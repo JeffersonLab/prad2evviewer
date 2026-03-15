@@ -13,7 +13,7 @@ using namespace evc;
 static inline status evio_status (int code)
 {
     if ( static_cast<unsigned int>(code) == S_EVFILE_UNXPTDEOF ) {
-        return stats:incomplete;
+        return status::incomplete;
     }
 
     switch (code) {
