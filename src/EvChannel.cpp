@@ -57,25 +57,19 @@ size_t EvChannel::scanBank(size_t off, int depth, int parent)
     if (IsContainer(h.type)) {
         scanChildren(off + BankHeader::size(), h.data_words(), h.type, depth + 1, idx);
     } else if (h.type == DATA_COMPOSITE) {
-        // expose the composite envelope as children (tagseg + inner bank)
-        scanChildren(off + BankHeader::size(), h.data_words(), DATA_TAGSEGMENT, depth + 1, idx);
-        // the second child is the inner bank — scanChildren will pick it up as a bank
-        // Actually, composite = tagseg then bank, so we walk it explicitly:
-        nodes[idx].child_first = 0;
-        nodes[idx].child_count = 0;
-        // re-scan properly:
-        nodes.resize(idx + 1);  // undo any partial children
-
+        // composite = tagsegment (format string) + inner bank (data payload)
         size_t doff = off + BankHeader::size();
         size_t dwords = h.data_words();
-        // tagsegment
+        size_t first_child = nodes.size();
+
         if (dwords >= 1) {
             size_t consumed = scanTagSegment(doff, depth + 1, idx);
-            // inner bank (remainder)
-            if (consumed < dwords && doff + consumed + 2 <= off + total) {
+            if (consumed < dwords)
                 scanBank(doff + consumed, depth + 1, idx);
-            }
         }
+
+        nodes[idx].child_first = first_child;
+        nodes[idx].child_count = nodes.size() - first_child;
     }
     return total;
 }
