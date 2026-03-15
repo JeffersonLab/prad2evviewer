@@ -4,6 +4,7 @@
 //=============================================================================
 
 #include "Fadc250Data.h"
+#include <cstddef>
 #include <vector>
 #include <cstdint>
 
