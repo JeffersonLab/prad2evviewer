@@ -134,7 +134,6 @@ public:
     }
 
 protected:
-    size_t scanTriggerBank(const uint32_t *buf, size_t gindex);
     size_t scanRocBank(const uint32_t *buf, size_t gindex, const std::vector<uint32_t> &banks);
     void scanDataBank(const uint32_t *buf, size_t buflen, uint32_t roc, uint32_t bank, size_t gindex);
     void scanCompositeBank(const uint32_t *buf, size_t buflen, uint32_t roc, uint32_t bank, size_t gindex);
