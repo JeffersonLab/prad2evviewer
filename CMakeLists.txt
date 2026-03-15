@@ -33,10 +33,18 @@ find_library(EVIO_LIB
 )
 message(STATUS "Found libevio : ${EVIO_LIB}")
 
+# libevio depends on expat (Expat XML parser) for dictionary support
+find_library(EXPAT_LIB
+    NAMES expat
+    REQUIRED
+)
+message(STATUS "Found libexpat: ${EXPAT_LIB}")
+
 add_library(evio STATIC IMPORTED GLOBAL)
 set_target_properties(evio PROPERTIES
     IMPORTED_LOCATION             "${EVIO_LIB}"
     INTERFACE_INCLUDE_DIRECTORIES "${CODA_INCLUDE_DIR}"
+    INTERFACE_LINK_LIBRARIES      "${EXPAT_LIB}"
 )
 
 # ---------------------------------------------------------------------------
