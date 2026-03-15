@@ -173,7 +173,7 @@ void EvChannel::PrintTree(std::ostream &os) const
 
         // header type label
         // determine if this was parsed as bank/seg/tagseg from depth + parent type
-        os << std::setw(6) << std::left << TypeName(n.type)
+        os << std::setw(6) << std::left << TypeName(n.type) << std::right
            << " tag=0x" << std::hex << n.tag << std::dec << "(" << n.tag << ")"
            << " type=0x" << std::hex << n.type << std::dec
            << " num=" << n.num
