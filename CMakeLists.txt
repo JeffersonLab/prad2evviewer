@@ -19,11 +19,11 @@ endif()
 set(EVIO_SOURCE "fetch" CACHE STRING "evio provider: prebuilt | fetch | system")
 set(ET_SOURCE   "fetch" CACHE STRING "et provider:   prebuilt | fetch | system")
 
-set(CODA_ROOT "/usr/clas12/release/1.4.0/coda/Linux_x86_64_RHEL9"
+set(CODA_ROOT "/usr/clas12/release/2.0.0/coda/Linux_x86_64_RHEL9"
     CACHE PATH "Root of the prebuilt CODA installation")
 set(CODA_LIB_DIR     "${CODA_ROOT}/lib"
     CACHE PATH "Directory containing prebuilt libevio.a and libet.a")
-set(CODA_INCLUDE_DIR "/usr/clas12/release/1.4.0/coda/common/include"
+set(CODA_INCLUDE_DIR "/usr/clas12/release/2.0.0/coda/common/include"
     CACHE PATH "Directory containing evio.h and et.h")
 
 # --- ROOT (optional, needed only if Fadc250Data uses ClassDef for I/O) ----
