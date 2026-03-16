@@ -1,28 +1,37 @@
 // test/test_main.cpp
-// Usage: evc_test <evio_file> [max_events]
+// Usage: evc_test <evio_file> [max_events] [-v]
+//   -v  verbose: print all sample values
 
 #include "EvChannel.h"
 #include "Fadc250Data.h"
 #include <iostream>
+#include <iomanip>
 #include <cstdlib>
+#include <cstring>
 
 using namespace evc;
 
 int main(int argc, char *argv[])
 {
     if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <evio_file> [max_events]\n";
+        std::cerr << "Usage: " << argv[0] << " <evio_file> [max_events] [-v]\n";
         return 1;
     }
-    int max_ev = (argc >= 3) ? std::atoi(argv[2]) : 0;
+
+    const char *filename = argv[1];
+    int max_ev = 0;
+    bool verbose = false;
+    for (int a = 2; a < argc; ++a) {
+        if (std::strcmp(argv[a], "-v") == 0) verbose = true;
+        else max_ev = std::atoi(argv[a]);
+    }
 
     EvChannel ch;
-    if (ch.Open(argv[1]) != status::success) {
-        std::cerr << "Failed to open " << argv[1] << "\n";
+    if (ch.Open(filename) != status::success) {
+        std::cerr << "Failed to open " << filename << "\n";
         return 1;
     }
 
-    // pre-allocate once, reuse for every event
     fdec::EventData event;
     int total = 0;
 
@@ -30,7 +39,6 @@ int main(int argc, char *argv[])
         if (!ch.Scan()) continue;
         auto hdr = ch.GetEvHeader();
 
-        // skip non-physics events
         if (hdr.tag != 0xfe && !(hdr.tag >= 0xFF50 && hdr.tag <= 0xFF8F))
             continue;
 
@@ -39,7 +47,7 @@ int main(int argc, char *argv[])
             if (!ch.DecodeEvent(i, event)) continue;
             ++total;
 
-            std::cout << "Event " << total << ": " << event.nrocs << " ROCs\n";
+            std::cout << "=== Event " << total << ": " << event.nrocs << " ROCs ===\n";
             for (int r = 0; r < event.nrocs; ++r) {
                 auto &roc = event.rocs[r];
                 std::cout << "  ROC 0x" << std::hex << roc.tag << std::dec
@@ -49,16 +57,26 @@ int main(int argc, char *argv[])
                     if (!roc.slots[s].present) continue;
                     auto &slot = roc.slots[s];
 
-                    std::cout << "    slot=" << s
-                              << " ev=" << slot.trigger
-                              << " ts=0x" << std::hex << (uint64_t)slot.timestamp << std::dec
-                              << " |";
+                    std::cout << "    slot " << std::setw(2) << s
+                              << "  ev=" << slot.trigger
+                              << "  ts=0x" << std::hex << (uint64_t)slot.timestamp << std::dec
+                              << "  nch=" << slot.nchannels << "\n";
 
                     for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
                         if (!(slot.channel_mask & (1u << c))) continue;
-                        std::cout << " ch" << c << ":" << slot.channels[c].nsamples;
+                        auto &cd = slot.channels[c];
+
+                        if (verbose) {
+                            std::cout << "      ch " << std::setw(2) << c
+                                      << " [" << cd.nsamples << "]:";
+                            for (int j = 0; j < cd.nsamples; ++j)
+                                std::cout << " " << cd.samples[j];
+                            std::cout << "\n";
+                        } else {
+                            std::cout << "      ch " << std::setw(2) << c
+                                      << " [" << cd.nsamples << "]\n";
+                        }
                     }
-                    std::cout << "\n";
                 }
             }
 
