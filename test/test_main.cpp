@@ -2,24 +2,11 @@
 // Usage: evc_test <evio_file> [max_events]
 
 #include "EvChannel.h"
-#include "Fadc250Decoder.h"
+#include "Fadc250Data.h"
 #include <iostream>
-#include <iomanip>
 #include <cstdlib>
-#include <cstring>
 
 using namespace evc;
-
-static void hexdump(const uint8_t *p, size_t n, size_t max = 128)
-{
-    size_t show = std::min(n, max);
-    for (size_t i = 0; i < show; ++i) {
-        if (i && i % 16 == 0) std::cout << "\n      ";
-        std::cout << std::hex << std::setw(2) << std::setfill('0') << (int)p[i] << " ";
-    }
-    if (n > show) std::cout << "...";
-    std::cout << std::dec << std::setfill(' ');
-}
 
 int main(int argc, char *argv[])
 {
@@ -35,56 +22,51 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    int n = 0;
+    // pre-allocate once, reuse for every event
+    fdec::EventData event;
+    int total = 0;
+
     while (ch.Read() == status::success) {
-        ++n;
         if (!ch.Scan()) continue;
         auto hdr = ch.GetEvHeader();
 
-        std::cout << "=== Event " << n
-                  << "  tag=0x" << std::hex << hdr.tag << std::dec
-                  << "  num=" << hdr.num
-                  << "  length=" << hdr.length << " ===\n";
+        // skip non-physics events
+        if (hdr.tag != 0xfe && !(hdr.tag >= 0xFF50 && hdr.tag <= 0xFF8F))
+            continue;
 
-        // print tree
-        ch.PrintTree(std::cout);
+        int nevt = ch.GetNEvents();
+        for (int i = 0; i < nevt; ++i) {
+            if (!ch.DecodeEvent(i, event)) continue;
+            ++total;
 
-        // for each composite bank, dump raw bytes and try decode
-        for (auto *node : ch.FindByTag(0xe101)) {
-            size_t nbytes;
-            auto *payload = ch.GetCompositePayload(*node, nbytes);
-            if (!payload) continue;
+            std::cout << "Event " << total << ": " << event.nrocs << " ROCs\n";
+            for (int r = 0; r < event.nrocs; ++r) {
+                auto &roc = event.rocs[r];
+                std::cout << "  ROC 0x" << std::hex << roc.tag << std::dec
+                          << " (" << roc.nslots << " slots)\n";
 
-            // find the parent ROC bank
-            int pi = node->parent;
-            uint32_t roc_tag = (pi >= 0) ? ch.GetNodes()[pi].tag : 0;
+                for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
+                    if (!roc.slots[s].present) continue;
+                    auto &slot = roc.slots[s];
 
-            std::cout << "  >> Composite 0xe101 in ROC 0x" << std::hex << roc_tag << std::dec
-                      << "  payload=" << nbytes << " bytes\n";
-            std::cout << "     raw: ";
-            hexdump(payload, nbytes, 64);
-            std::cout << "\n";
+                    std::cout << "    slot=" << s
+                              << " ev=" << slot.trigger
+                              << " ts=0x" << std::hex << (uint64_t)slot.timestamp << std::dec
+                              << " |";
 
-            auto slots = fdec::Fadc250Decoder::Decode(payload, nbytes);
-            if (slots.empty()) {
-                std::cout << "     (no slots decoded)\n";
+                    for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
+                        if (!(slot.channel_mask & (1u << c))) continue;
+                        std::cout << " ch" << c << ":" << slot.channels[c].nsamples;
+                    }
+                    std::cout << "\n";
+                }
             }
-            for (auto &s : slots) {
-                std::cout << "     slot=" << (int)s.slot
-                          << " trig=" << s.trigger
-                          << " ts=0x" << std::hex << (uint64_t)s.timestamp << std::dec
-                          << " nch=" << s.channels.size() << " |";
-                for (auto &c : s.channels)
-                    std::cout << " ch" << (int)c.channel << ":" << c.samples.size();
-                std::cout << "\n";
-            }
+
+            if (max_ev > 0 && total >= max_ev) goto done;
         }
-
-        std::cout << "\n";
-        if (max_ev > 0 && n >= max_ev) break;
     }
-
-    std::cout << "Done. " << n << " event(s).\n";
+done:
+    std::cout << "Done. " << total << " event(s) decoded.\n";
     ch.Close();
     return 0;
 }

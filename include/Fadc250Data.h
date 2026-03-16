@@ -1,39 +1,102 @@
 #pragma once
 //=============================================================================
-// Fadc250Data.h — decoded FADC250 data structures
+// Fadc250Data.h — pre-allocated, flat event data for high-performance reading
+//
+// No heap allocation. Fixed-size arrays sized for worst case.
+// Slot/channel indexed by hardware number for O(1) access.
 //=============================================================================
 
-#include <vector>
 #include <cstdint>
-#include <utility>
+#include <cstring>
 
 namespace fdec
 {
 
+// --- capacity limits (adjust to match your hardware) ------------------------
+static constexpr int MAX_SAMPLES  = 200;   // samples per channel per event
+static constexpr int MAX_CHANNELS = 16;    // channels per FADC250 slot
+static constexpr int MAX_SLOTS    = 22;    // slot IDs 0..21 (VME slots 3-20 typical)
+static constexpr int MAX_ROCS     = 10;    // number of ROC crates
+
+// --- per-channel data -------------------------------------------------------
+struct ChannelData {
+    int      nsamples;                     // 0 = channel not present
+    uint16_t samples[MAX_SAMPLES];
+};
+
+// --- per-slot data ----------------------------------------------------------
+struct SlotData {
+    bool     present;                      // was this slot in the data?
+    int32_t  trigger;                      // event number (from composite 'i')
+    int64_t  timestamp;                    // 48-bit timestamp (from composite 'l')
+    int      nchannels;                    // count of active channels
+    uint32_t channel_mask;                 // bitmask: bit i set = channel i present
+    ChannelData channels[MAX_CHANNELS];    // indexed by channel number
+
+    void clear()
+    {
+        present = false;
+        trigger = 0;
+        timestamp = 0;
+        nchannels = 0;
+        channel_mask = 0;
+        // only need to zero nsamples to mark channels empty
+        for (int i = 0; i < MAX_CHANNELS; ++i)
+            channels[i].nsamples = 0;
+    }
+};
+
+// --- per-ROC data -----------------------------------------------------------
+struct RocData {
+    bool     present;
+    uint32_t tag;                          // ROC bank tag (0x80, 0x84, etc.)
+    int      nslots;                       // count of active slots
+    SlotData slots[MAX_SLOTS];             // indexed by slot number
+
+    void clear()
+    {
+        present = false;
+        tag = 0;
+        nslots = 0;
+        for (int i = 0; i < MAX_SLOTS; ++i)
+            slots[i].clear();
+    }
+};
+
+// --- full event data --------------------------------------------------------
+struct EventData {
+    int      nrocs;                        // count of active ROCs
+    int      roc_index[MAX_ROCS];          // maps i -> ROC index in rocs[]
+    RocData  rocs[MAX_ROCS];
+
+    void clear()
+    {
+        nrocs = 0;
+        for (int i = 0; i < MAX_ROCS; ++i)
+            rocs[i].clear();
+    }
+
+    // find ROC by tag, returns nullptr if not found
+    const RocData *findRoc(uint32_t tag) const
+    {
+        for (int i = 0; i < nrocs; ++i)
+            if (rocs[i].tag == tag) return &rocs[i];
+        return nullptr;
+    }
+
+    // convenience: iterate active slots in a ROC
+    // usage: for (int s = 0; s < MAX_SLOTS; ++s) if (roc.slots[s].present) { ... }
+};
+
+// --- analysis helpers (to be filled later) ----------------------------------
 struct Peak {
-    double height = 0, integral = 0, time = 0;
-    uint32_t pos = 0, left = 0, right = 0;
-    bool overflow = false;
+    float height, integral, time;
+    int   pos, left, right;
+    bool  overflow;
 };
 
 struct Pedestal {
-    double mean = 0, err = 0;
-};
-
-// raw waveform for one channel
-struct ChannelData {
-    uint8_t  channel = 0;
-    Pedestal ped;
-    std::vector<Peak>     peaks;
-    std::vector<uint16_t> samples;
-};
-
-// one slot from composite format "c,i,l,N(c,Ns)"
-struct SlotData {
-    uint8_t  slot = 0;
-    int32_t  trigger = 0;
-    int64_t  timestamp = 0;
-    std::vector<ChannelData> channels;
+    float mean, rms;
 };
 
 } // namespace fdec

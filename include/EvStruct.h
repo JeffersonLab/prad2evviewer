@@ -5,8 +5,6 @@
 
 #include <cstdint>
 #include <cstddef>
-#include <string>
-#include <vector>
 
 namespace evc
 {
@@ -65,7 +63,7 @@ inline const char *TypeName(uint32_t type)
     }
 }
 
-// --- evio header parsers (read-only, zero-copy) -----------------------------
+// --- evio header parsers ----------------------------------------------------
 
 struct BankHeader {
     uint32_t length, tag, type, num;
@@ -80,7 +78,7 @@ struct BankHeader {
 };
 
 struct SegmentHeader {
-    uint32_t tag, type, length;   // length in words
+    uint32_t tag, type, length;
     SegmentHeader() : tag(0), type(0), length(0) {}
     SegmentHeader(const uint32_t *p)
         : tag((p[0] >> 24) & 0xFF),
@@ -90,7 +88,7 @@ struct SegmentHeader {
 };
 
 struct TagSegmentHeader {
-    uint32_t tag, type, length;   // length in words
+    uint32_t tag, type, length;
     TagSegmentHeader() : tag(0), type(0), length(0) {}
     TagSegmentHeader(const uint32_t *p)
         : tag((p[0] >> 20) & 0xFFF),
@@ -99,24 +97,17 @@ struct TagSegmentHeader {
     static constexpr size_t size() { return 1; }
 };
 
-// --- EvNode: one node in the scanned event tree -----------------------------
-// Points into the raw buffer — no data is copied.
-// The tree is stored as a flat vector; parent/depth give the structure.
-
+// --- EvNode: one node in the flat event tree --------------------------------
 struct EvNode {
     uint32_t tag;
     uint32_t type;
-    uint32_t num;           // bank num field (0 for segments)
-    int      depth;         // nesting depth (0 = top-level event)
-    int      parent;        // index of parent in the node vector (-1 = root)
-
-    // location of this node's DATA (not header) in the raw buffer
-    size_t   data_begin;    // word index where data starts
+    uint32_t num;
+    int      depth;
+    int      parent;
+    size_t   data_begin;    // word index of data in buffer
     size_t   data_words;    // number of data words
-
-    // child range in the flat node vector
-    size_t   child_first;   // index of first child
-    size_t   child_count;   // number of direct children
+    size_t   child_first;
+    size_t   child_count;
 };
 
 } // namespace evc

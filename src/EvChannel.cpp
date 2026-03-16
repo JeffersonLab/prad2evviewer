@@ -1,4 +1,5 @@
 #include "EvChannel.h"
+#include "Fadc250Decoder.h"
 #include "evio.h"
 #include <cstring>
 #include <iostream>
@@ -6,7 +7,7 @@
 
 using namespace evc;
 
-// --- evio C library status translation --------------------------------------
+// --- evio C library status --------------------------------------------------
 static inline status evio_status(int code)
 {
     if (static_cast<unsigned>(code) == S_EVFILE_UNXPTDEOF) return status::incomplete;
@@ -18,7 +19,7 @@ static inline status evio_status(int code)
     }
 }
 
-// --- construction / open / close / read -------------------------------------
+// --- open / close / read ----------------------------------------------------
 EvChannel::EvChannel(size_t buflen) : fHandle(-1) { buffer.resize(buflen); }
 
 status EvChannel::Open(const std::string &path)
@@ -31,24 +32,30 @@ status EvChannel::Open(const std::string &path)
 }
 
 void EvChannel::Close() { evClose(fHandle); fHandle = -1; }
-
 status EvChannel::Read() { return evio_status(evRead(fHandle, buffer.data(), buffer.size())); }
 
-// === Scan: walk the entire event buffer and build the node tree =============
+// === Scan ===================================================================
 bool EvChannel::Scan()
 {
     nodes.clear();
     BankHeader evh(&buffer[0]);
     if (evh.length + 1 > buffer.size()) return false;
+
     scanBank(0, 0, -1);
+
+    // number of events = num field from top-level bank header
+    nevents = (evh.tag == 0xfe || (evh.tag >= 0xFF50 && evh.tag <= 0xFF8F))
+            ? std::max<int>(evh.num, 1)
+            : 0;
+
     return true;
 }
 
-// --- scan a BANK (2-word header) -------------------------------------------
+// --- scan a BANK (2-word header) --------------------------------------------
 size_t EvChannel::scanBank(size_t off, int depth, int parent)
 {
     BankHeader h(&buffer[off]);
-    size_t total = h.length + 1;          // header word + length words
+    size_t total = h.length + 1;
 
     int idx = static_cast<int>(nodes.size());
     nodes.push_back({h.tag, h.type, h.num, depth, parent,
@@ -57,7 +64,6 @@ size_t EvChannel::scanBank(size_t off, int depth, int parent)
     if (IsContainer(h.type)) {
         scanChildren(off + BankHeader::size(), h.data_words(), h.type, depth + 1, idx);
     } else if (h.type == DATA_COMPOSITE) {
-        // composite = tagsegment (format string) + inner bank (data payload)
         size_t doff = off + BankHeader::size();
         size_t dwords = h.data_words();
         size_t first_child = nodes.size();
@@ -74,7 +80,7 @@ size_t EvChannel::scanBank(size_t off, int depth, int parent)
     return total;
 }
 
-// --- scan a SEGMENT (1-word header) ----------------------------------------
+// --- scan a SEGMENT (1-word header) -----------------------------------------
 size_t EvChannel::scanSegment(size_t off, int depth, int parent)
 {
     SegmentHeader h(&buffer[off]);
@@ -89,7 +95,7 @@ size_t EvChannel::scanSegment(size_t off, int depth, int parent)
     return total;
 }
 
-// --- scan a TAGSEGMENT (1-word header) -------------------------------------
+// --- scan a TAGSEGMENT (1-word header) --------------------------------------
 size_t EvChannel::scanTagSegment(size_t off, int depth, int parent)
 {
     TagSegmentHeader h(&buffer[off]);
@@ -104,31 +110,24 @@ size_t EvChannel::scanTagSegment(size_t off, int depth, int parent)
     return total;
 }
 
-// --- scan children of a container ------------------------------------------
+// --- scan children of a container -------------------------------------------
 void EvChannel::scanChildren(size_t off, size_t nwords, uint32_t ptype, int depth, int pidx)
 {
     size_t first_child = nodes.size();
-    size_t count = 0;
-    size_t pos = 0;
+    size_t count = 0, pos = 0;
 
     while (pos < nwords) {
         size_t consumed = 0;
         switch (ptype) {
-        case DATA_BANK:
-        case DATA_BANK2:
-            consumed = scanBank(off + pos, depth, pidx);
-            break;
-        case DATA_SEGMENT:
-        case DATA_SEGMENT2:
-            consumed = scanSegment(off + pos, depth, pidx);
-            break;
+        case DATA_BANK: case DATA_BANK2:
+            consumed = scanBank(off + pos, depth, pidx); break;
+        case DATA_SEGMENT: case DATA_SEGMENT2:
+            consumed = scanSegment(off + pos, depth, pidx); break;
         case DATA_TAGSEGMENT:
-            consumed = scanTagSegment(off + pos, depth, pidx);
-            break;
-        default:
-            return;
+            consumed = scanTagSegment(off + pos, depth, pidx); break;
+        default: return;
         }
-        if (consumed == 0) break;  // safety
+        if (consumed == 0) break;
         pos += consumed;
         ++count;
     }
@@ -150,23 +149,55 @@ std::vector<const EvNode*> EvChannel::FindByTag(uint32_t tag) const
 const uint8_t *EvChannel::GetCompositePayload(const EvNode &n, size_t &nbytes) const
 {
     nbytes = 0;
-    if (n.type != DATA_COMPOSITE) return nullptr;
-    // composite node has 2 children: tagseg (format string) + inner bank (data)
-    if (n.child_count < 2) return nullptr;
+    if (n.type != DATA_COMPOSITE || n.child_count < 2) return nullptr;
     auto &inner = nodes[n.child_first + 1];
     nbytes = inner.data_words * sizeof(uint32_t);
     return reinterpret_cast<const uint8_t*>(&buffer[inner.data_begin]);
 }
 
-// === PrintTree ==============================================================
+// === DecodeEvent ============================================================
+// For now, supports single-event mode (nevents=1, i=0).
+// Multi-event blocks (num>1) require splitting the composite payload by
+// tracking byte offsets per slot per event — to be added when needed.
 
+bool EvChannel::DecodeEvent(int i, fdec::EventData &evt) const
+{
+    evt.clear();
+    if (i < 0 || i >= nevents) return false;
+
+    // find all composite banks with tag 0xe101
+    int roc_idx = 0;
+    for (size_t ni = 0; ni < nodes.size() && roc_idx < fdec::MAX_ROCS; ++ni) {
+        auto &n = nodes[ni];
+        if (n.tag != 0xe101 || n.type != DATA_COMPOSITE) continue;
+
+        size_t nbytes;
+        auto *payload = GetCompositePayload(n, nbytes);
+        if (!payload) continue;
+
+        // find parent ROC tag
+        uint32_t roc_tag = (n.parent >= 0) ? nodes[n.parent].tag : 0;
+
+        fdec::RocData &roc = evt.rocs[roc_idx];
+        roc.clear();
+        roc.present = true;
+        roc.tag = roc_tag;
+
+        fdec::Fadc250Decoder::DecodeRoc(payload, nbytes, roc);
+
+        evt.roc_index[roc_idx] = roc_idx;
+        roc_idx++;
+    }
+    evt.nrocs = roc_idx;
+    return roc_idx > 0;
+}
+
+// === PrintTree ==============================================================
 void EvChannel::PrintTree(std::ostream &os) const
 {
     for (auto &n : nodes) {
         for (int i = 0; i < n.depth; ++i) os << "  ";
 
-        // header type label
-        // determine if this was parsed as bank/seg/tagseg from depth + parent type
         os << std::setw(6) << std::left << TypeName(n.type) << std::right
            << " tag=0x" << std::hex << n.tag << std::dec << "(" << n.tag << ")"
            << " type=0x" << std::hex << n.type << std::dec
@@ -176,7 +207,6 @@ void EvChannel::PrintTree(std::ostream &os) const
         if (n.child_count > 0)
             os << " children=" << n.child_count;
 
-        // for leaf nodes, show a few hex words
         if (n.child_count == 0 && n.data_words > 0 && !IsContainer(n.type) && n.type != DATA_COMPOSITE) {
             os << " |";
             size_t nshow = std::min<size_t>(n.data_words, 4);
@@ -186,7 +216,6 @@ void EvChannel::PrintTree(std::ostream &os) const
             if (n.data_words > nshow) os << " ...";
         }
 
-        // for string/char types, try to print ascii
         if ((n.type == DATA_CHARSTAR8 || n.type == DATA_CHAR8) && n.data_words > 0) {
             const char *s = reinterpret_cast<const char*>(&buffer[n.data_begin]);
             size_t maxlen = n.data_words * 4;
@@ -197,7 +226,6 @@ void EvChannel::PrintTree(std::ostream &os) const
             }
             os << "\"";
         }
-
         os << "\n";
     }
 }
