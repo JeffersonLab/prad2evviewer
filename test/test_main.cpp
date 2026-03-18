@@ -1,117 +1,178 @@
-// test/test_main.cpp
-// Usage: evc_test <evio_file> [-v] [-t]
-//
-// Iterates all events, counts how many times each ROC/slot/channel fires.
-// Outputs a JSON array at the end.
+// src/test_main.cpp
+// Basic smoke-test for the evc library.
+// Usage:
+//   evc_test <evio_file>            -- read from file
+//   evc_test --et <ip> <port> <file> <station>  -- read from ET system
 
 #include "EvChannel.h"
+#include "EtChannel.h"
+#include "EvStruct.h"
 #include "Fadc250Data.h"
 #include <iostream>
 #include <iomanip>
+#include <string>
 #include <cstdlib>
-#include <cstring>
-#include <map>
+#include <cstdint>
 
-using namespace evc;
-
-int main(int argc, char *argv[])
+static void usage(const char *prog)
 {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <evio_file> [-v] [-t]\n";
-        return 1;
-    }
+    std::cerr << "Usage:\n"
+              << "  " << prog << " <evio_file>                                       -- read buffers\n"
+              << "  " << prog << " --scan <evio_file> [--start N] [--num N]           -- per-event details\n"
+              << "  " << prog << " --et <ip> <port> <et_file> <station>               -- read from ET\n";
+}
 
-    const char *filename = argv[1];
-    bool verbose = false, tree = false;
-    for (int a = 2; a < argc; ++a) {
-        if (std::strcmp(argv[a], "-v") == 0) verbose = true;
-        else if (std::strcmp(argv[a], "-t") == 0) tree = true;
+// ---- scan mode: per-event details + duplicate detection ------------------
+static int scanFile(const std::string &path, int start_ev, int num_ev)
+{
+    evc::EvChannel ch;
+    if (ch.Open(path) != evc::status::success) {
+        std::cerr << "Failed to open: " << path << "\n"; return 1;
     }
-
-    EvChannel ch;
-    if (ch.Open(filename) != status::success) {
-        std::cerr << "Failed to open " << filename << "\n";
-        return 1;
-    }
-
-    // key = (roc_tag, slot, channel), value = event count
-    struct Key {
-        uint32_t roc;
-        int slot, channel;
-        bool operator<(const Key &o) const {
-            if (roc != o.roc) return roc < o.roc;
-            if (slot != o.slot) return slot < o.slot;
-            return channel < o.channel;
-        }
-    };
-    std::map<Key, int> counts;
 
     fdec::EventData event;
-    int total = 0, nread = 0;
+    int ev_seq = 0;      // decoded event counter (matches monitor seq)
+    int printed = 0;
+    uint32_t prev_hash = 0;
+    int buf_num = 0;
 
-    while (ch.Read() == status::success) {
-        ++nread;
+    while (ch.Read() == evc::status::success) {
+        ++buf_num;
         if (!ch.Scan()) continue;
-
-        if (tree) {
-            auto hdr = ch.GetEvHeader();
-            std::cout << "--- Read " << nread
-                      << "  tag=0x" << std::hex << hdr.tag << std::dec
-                      << "  nevents=" << ch.GetNEvents() << " ---\n";
-            ch.PrintTree(std::cout);
-        }
-
-        if (ch.GetNEvents() == 0) continue;
 
         int nevt = ch.GetNEvents();
         for (int i = 0; i < nevt; ++i) {
-            if (!ch.DecodeEvent(i, event)) continue;
-            ++total;
+            ++ev_seq;
+            if (ev_seq < start_ev) continue;
+            if (printed >= num_ev) break;
 
-            for (int r = 0; r < event.nrocs; ++r) {
-                auto &roc = event.rocs[r];
-                if (!roc.present) continue;
+            uint32_t *raw = ch.GetRawBuffer();
+            auto hdr = evc::BankHeader(raw);
 
-                for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-                    if (!roc.slots[s].present) continue;
-                    auto &slot = roc.slots[s];
+            // simple hash of data words (detect identical content)
+            uint32_t hash = 0;
+            int words = std::min((int)hdr.length + 1, 256);
+            for (int j = 0; j < words; ++j) hash ^= raw[j] * 2654435761u;
 
-                    for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
-                        if (!(slot.channel_mask & (1u << c))) continue;
+            bool dup = (printed > 0 && hash == prev_hash);
 
-                        if (verbose) {
-                            auto &cd = slot.channels[c];
-                            std::cout << "ev=" << total
-                                      << " ROC=0x" << std::hex << roc.tag << std::dec
-                                      << " slot=" << s << " ch=" << c
-                                      << " [" << cd.nsamples << "]:";
-                            for (int j = 0; j < cd.nsamples; ++j)
-                                std::cout << " " << cd.samples[j];
-                            std::cout << "\n";
-                        }
-
-                        counts[{roc.tag, s, c}]++;
+            // decode this sub-event
+            int nrocs = 0, nchannels = 0;
+            if (ch.DecodeEvent(i, event)) {
+                for (int r = 0; r < event.nrocs; ++r) {
+                    if (!event.rocs[r].present) continue;
+                    nrocs++;
+                    for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
+                        auto &slot = event.rocs[r].slots[s];
+                        if (!slot.present) continue;
+                        for (int c = 0; c < fdec::MAX_CHANNELS; ++c)
+                            if (slot.channel_mask & (1u << c)) nchannels++;
                     }
                 }
             }
+
+            std::cout << "ev " << std::setw(5) << ev_seq
+                      << "  buf=" << std::setw(4) << buf_num
+                      << "  sub=" << i << "/" << nevt
+                      << "  tag=0x" << std::hex << std::setw(4) << std::setfill('0') << hdr.tag
+                      << std::dec << std::setfill(' ')
+                      << "  num=" << std::setw(4) << hdr.num
+                      << "  len=" << std::setw(8) << hdr.length
+                      << "  rocs=" << nrocs
+                      << "  ch=" << std::setw(4) << nchannels
+                      << "  hash=" << std::hex << hash << std::dec
+                      << (dup ? "  ** DUP" : "")
+                      << "\n";
+
+            prev_hash = hash;
+            ++printed;
         }
+        if (printed >= num_ev) break;
+    }
+    ch.Close();
+    std::cout << "Printed " << printed << " events (seq " << start_ev << "-" << (start_ev + printed - 1) << ")\n";
+    return 0;
+}
+
+// ---- file mode -----------------------------------------------------------
+static int testFile(const std::string &path)
+{
+    evc::EvChannel ch;
+
+    if (ch.Open(path) != evc::status::success) {
+        std::cerr << "Failed to open: " << path << "\n";
+        return 1;
     }
 
-    // output JSON
-    std::cout << "[\n";
-    bool first = true;
-    for (auto &[k, v] : counts) {
-        if (!first) std::cout << ",\n";
-        first = false;
-        std::cout << "  {\"ROC\": \"0x" << std::hex << k.roc << std::dec
-                  << "\", \"slot\": " << k.slot
-                  << ", \"channel\": " << k.channel
-                  << ", \"events\": " << v << "}";
+    int nevents = 0;
+    evc::status st;
+    while ((st = ch.Read()) == evc::status::success) {
+        auto hdr = ch.GetEvHeader();
+        std::cout << "Event " << ++nevents
+                  << "  tag=" << hdr.tag
+                  << "  type=" << hdr.type
+                  << "  length=" << hdr.length << "\n";
     }
-    std::cout << "\n]\n";
 
-    std::cerr << "Read " << nread << " buffers, " << total << " events, "
-              << counts.size() << " channels.\n";
+    std::cout << "Done. Read " << nevents << " event(s). Final status: "
+              << static_cast<int>(st) << "\n";
     ch.Close();
     return 0;
+}
+
+// ---- ET mode -------------------------------------------------------------
+static int testET(const std::string &ip, int port,
+                  const std::string &et_file, const std::string &station)
+{
+    evc::EtChannel ch;
+
+    if (ch.Connect(ip, port, et_file) != evc::status::success) {
+        std::cerr << "Failed to connect to ET at " << ip << ":" << port << "\n";
+        return 1;
+    }
+    if (ch.Open(station) != evc::status::success) {
+        std::cerr << "Failed to open station: " << station << "\n";
+        ch.Disconnect();
+        return 1;
+    }
+
+    int nevents = 0, max_events = 20;
+    evc::status st;
+    while (nevents < max_events && (st = ch.Read()) != evc::status::failure) {
+        if (st == evc::status::empty) continue;
+        auto hdr = ch.GetEvHeader();
+        std::cout << "ET Event " << ++nevents
+                  << "  tag=" << hdr.tag
+                  << "  length=" << hdr.length << "\n";
+    }
+
+    std::cout << "Done. Read " << nevents << " event(s).\n";
+    ch.Disconnect();
+    return 0;
+}
+
+// --------------------------------------------------------------------------
+int main(int argc, char *argv[])
+{
+    if (argc < 2) { usage(argv[0]); return 1; }
+
+    std::string first = argv[1];
+
+    if (first == "--et") {
+        if (argc < 6) { usage(argv[0]); return 1; }
+        return testET(argv[2], std::atoi(argv[3]), argv[4], argv[5]);
+    }
+
+    if (first == "--scan") {
+        if (argc < 3) { usage(argv[0]); return 1; }
+        std::string path = argv[2];
+        int start = 1, num = 50;
+        for (int i = 3; i < argc; ++i) {
+            if (std::string(argv[i]) == "--start" && i+1 < argc) start = std::atoi(argv[++i]);
+            else if (std::string(argv[i]) == "--num" && i+1 < argc) num = std::atoi(argv[++i]);
+        }
+        return scanFile(path, start, num);
+    }
+
+    return testFile(first);
 }
