@@ -147,6 +147,21 @@ void WaveAnalyzer::findPeaks(const uint16_t *raw, const float *buf, int n,
             }
         }
 
+        // --- reject if overlapping a previous peak and local height too small ---
+        // smooth_height is the height above the line connecting left/right edges,
+        // i.e., how much this peak rises above the tail it sits on.
+        bool rejected = false;
+        for (int k = 0; k < result.npeaks; ++k) {
+            auto &prev = result.peaks[k];
+            if (int_left <= prev.right && int_right >= prev.left) {
+                if (smooth_height < prev.height * cfg.min_peak_ratio) {
+                    rejected = true;
+                    break;
+                }
+            }
+        }
+        if (rejected) { i = right; continue; }
+
         // --- fill peak ---
         Peak &p = result.peaks[result.npeaks];
         p.pos      = raw_pos;
