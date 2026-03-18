@@ -51,12 +51,12 @@ static json g_config;
 // Histogram storage
 // -------------------------------------------------------------------------
 struct HistConfig {
-    float time_min  = 170;      // sample range for peak search
+    float time_min  = 170;      // peak time range in ns
     float time_max  = 190;
-    float bin_min   = 0;        // histogram range
+    float bin_min   = 0;        // histogram range (integral units)
     float bin_max   = 20000;
     float bin_step  = 100;
-    float threshold = 3.0;      // minimum peak height to count
+    float threshold = 3.0;      // minimum peak height (ADC above pedestal)
 };
 
 struct Histogram {
@@ -151,7 +151,7 @@ static void fillHistEvent(fdec::EventData &event, fdec::WaveAnalyzer &ana,
                 for (int p = 0; p < wres.npeaks; ++p) {
                     auto &pk = wres.peaks[p];
                     if (pk.height < g_hist_cfg.threshold) continue;
-                    if (pk.pos < g_hist_cfg.time_min || pk.pos > g_hist_cfg.time_max) continue;
+                    if (pk.time < g_hist_cfg.time_min || pk.time > g_hist_cfg.time_max) continue;
                     if (pk.integral > best_integral)
                         best_integral = pk.integral;
                 }
