@@ -14,6 +14,9 @@ let ws=null;        // WebSocket connection (online mode)
 let autoFollow=true; // auto-load latest event
 let lastEventFetch=0, lastHistFetch=0;  // throttle timestamps
 
+// occupancy data (fetched once per file load when histograms enabled)
+let occData={}, occTcutData={}, occTotal=0;
+
 // color range: null = auto from data, number = user-set or hist-synced
 let rangeMin=null, rangeMax=null;
 
@@ -34,6 +37,8 @@ function syncRangeFromHist(){
         rangeMin=h.bin_min; rangeMax=h.bin_max;
     } else if(mt==='time' && h.pos_min!==undefined){
         rangeMin=h.pos_min; rangeMax=h.pos_max;
+    } else if((mt==='occupancy' || mt==='occupancy_tcut') && occTotal>0){
+        rangeMin=0; rangeMax=occTotal;
     } else {
         rangeMin=null; rangeMax=null;
     }
@@ -72,14 +77,17 @@ function fitView(){
 function d2c(x,y){return[x*scale+offsetX,-y*scale+offsetY];}
 function c2d(cx,cy){return[(cx-offsetX)/scale,-(cy-offsetY)/scale];}
 function modVal(m){
-    const d=eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
-    if(!d)return null;
+    const key=`${m.roc}_${m.sl}_${m.ch}`;
     const mt=document.getElementById('color-metric').value;
+    // occupancy metrics use pre-computed counts, not per-event data
+    if(mt==='occupancy') return occTotal>0 ? (occData[key]||0) : null;
+    if(mt==='occupancy_tcut') return occTotal>0 ? (occTcutData[key]||0) : null;
+    const d=eventChannels[key];
+    if(!d)return null;
     if(mt==='pedestal')return d.pm||0;
     if(!d.pk||!d.pk.length)return null;
     if(mt==='height')return Math.max(...d.pk.map(p=>p.h));
     if(mt==='time'){
-        // time of the peak with maximum height
         let best=d.pk[0];
         for(let i=1;i<d.pk.length;i++) if(d.pk[i].h>best.h) best=d.pk[i];
         return best.t;
@@ -417,6 +425,7 @@ function pollProgress() {
                 if (hcb) hcb.checked = histEnabled;
                 document.getElementById('ev-total').textContent = `/ ${totalEvents}`;
                 updateHeaderInfo(cfg);
+                if (histEnabled) fetchOccupancy();
                 syncRangeFromHist();
                 drawGeo();
                 if (totalEvents > 0) loadEvent(1);
@@ -430,6 +439,20 @@ function pollProgress() {
             `${phaseText}... ${data.current}` + (data.total > 0 ? ` / ${data.total}` : '');
         setTimeout(pollProgress, 300);
     }).catch(() => setTimeout(pollProgress, 1000));
+}
+
+function fetchOccupancy() {
+    fetch('/api/occupancy').then(r => r.json()).then(data => {
+        occData = data.occ || {};
+        occTcutData = data.occ_tcut || {};
+        occTotal = data.total || 0;
+        // redraw if currently showing occupancy
+        const mt = document.getElementById('color-metric').value;
+        if (mt === 'occupancy' || mt === 'occupancy_tcut') {
+            syncRangeFromHist();
+            drawGeo();
+        }
+    }).catch(() => {});
 }
 
 function updateHeaderInfo(cfg) {
@@ -557,12 +580,19 @@ function init(){
         if(m!==hoveredModule){hoveredModule=m;drawGeo();}
         if(m){
             const d=eventChannels[`${m.roc}_${m.sl}_${m.ch}`];
+            const key=`${m.roc}_${m.sl}_${m.ch}`;
             let t=`${m.n}  (${m.t==='G'?'PbGlass':'PbWO₄'})\n${crateName(m.roc)}  slot ${m.sl}  ch ${m.ch}`;
             if(d&&d.pk&&d.pk.length){
                 let best=d.pk[0]; for(let j=1;j<d.pk.length;j++) if(d.pk[j].h>best.h) best=d.pk[j];
                 t+=`\nPed ${d.pm.toFixed(1)}  H ${best.h.toFixed(0)}  Int ${best.i.toFixed(0)}  T ${best.t.toFixed(0)}ns`;
             }
             else if(d)t+=`\nPed ${d.pm.toFixed(1)}  (no peaks)`;
+            if(occTotal>0){
+                const o=occData[key]||0, ot=occTcutData[key]||0;
+                t+=`\nOcc ${o}/${occTotal}  Occ(t) ${ot}/${occTotal}`;
+            } else if(histEnabled===false){
+                t+=`\nOcc: not computed (enable histograms)`;
+            }
             tip.textContent=t;tip.style.display='block';
             tip.style.left=(e.clientX-r.left+14)+'px';tip.style.top=(e.clientY-r.top-8)+'px';
         }else tip.style.display='none';
@@ -622,6 +652,7 @@ function init(){
         if(mode==='file'){
             document.getElementById('ev-total').textContent=`/ ${totalEvents}`;
             updateHeaderInfo(data);
+            if(histEnabled) fetchOccupancy();
             syncRangeFromHist();
             resizeGeo();
             if(totalEvents>0)loadEvent(1);
