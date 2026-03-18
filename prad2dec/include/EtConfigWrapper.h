@@ -16,7 +16,17 @@
 #include <unordered_set>
 #include "et.h"
 
-#define ET_VERSION 16
+// Auto-detect ET version from symbols defined in et.h.
+// Don't hardcode — the prebuilt library may be older than the fetched one.
+#ifndef ET_VERSION
+#  ifdef ET_ERROR_JAVASYS
+#    define ET_VERSION 16
+#  elif defined(ET_ERROR_NOMEM)
+#    define ET_VERSION 14
+#  else
+#    define ET_VERSION 13
+#  endif
+#endif
 
 #define SET_BIT(n, i) ( (n) |= (1ULL << i) )
 #define CLEAR_BIT(n, i) ( (n) &= ~(1ULL << i) )
@@ -52,6 +62,8 @@ static std::string get_error_str(int error)
     case ET_ERROR_SOCKET: return "Socket option could not be set.";
     case ET_ERROR_NETWORK: return "Host name or address could not be resolved, or cannot connect.";
     case ET_ERROR_CLOSED: return "ET system has been closed by client.";
+#endif
+#ifdef ET_ERROR_JAVASYS
     case ET_ERROR_JAVASYS: return "C code trying to open Java-based ET system file locally.";
 #endif
     default: break;
