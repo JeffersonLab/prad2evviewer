@@ -4,7 +4,7 @@
 // accumulates histograms, stores latest N events in a ring buffer,
 // pushes WebSocket notifications to the viewer on new events.
 //
-// Usage: evc_monitor [-p port] [-c online_config.json]
+// Usage: evc_monitor [-p port] [-c online_config.json] [-H hist_config.json]
 
 #include "EtChannel.h"
 #include "Fadc250Data.h"
@@ -467,21 +467,24 @@ int main(int argc, char *argv[])
 {
     int port = 5051;
     std::string config_file;
+    std::string hist_config_file;
 
     static struct option long_opts[] = {
-        {"port",   required_argument, nullptr, 'p'},
-        {"config", required_argument, nullptr, 'c'},
-        {"help",   no_argument,       nullptr, '?'},
+        {"port",        required_argument, nullptr, 'p'},
+        {"config",      required_argument, nullptr, 'c'},
+        {"hist-config", required_argument, nullptr, 'H'},
+        {"help",        no_argument,       nullptr, '?'},
         {nullptr, 0, nullptr, 0},
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:c:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:c:H:", long_opts, nullptr)) != -1) {
         switch (opt) {
         case 'p': port = std::atoi(optarg); break;
         case 'c': config_file = optarg; break;
+        case 'H': hist_config_file = optarg; break;
         default:
-            std::cerr << "Usage: " << argv[0] << " [-p port] [-c online_config.json]\n";
+            std::cerr << "Usage: " << argv[0] << " [-p port] [-c online_config.json] [-H hist_config.json]\n";
             return 1;
         }
     }
@@ -489,7 +492,30 @@ int main(int argc, char *argv[])
     std::string db_dir  = DATABASE_DIR;
     std::string res_dir = RESOURCE_DIR;
 
-    // load config
+    // load histogram config (shared with evc_viewer)
+    if (hist_config_file.empty())
+        hist_config_file = findFile("hist_config.json", db_dir);
+
+    std::string hcfg_str = readFile(hist_config_file);
+    if (!hcfg_str.empty()) {
+        auto hcfg = json::parse(hcfg_str, nullptr, false);
+        if (hcfg.contains("hist")) {
+            auto &h = hcfg["hist"];
+            if (h.contains("time_min"))  g_hist_cfg.time_min  = h["time_min"];
+            if (h.contains("time_max"))  g_hist_cfg.time_max  = h["time_max"];
+            if (h.contains("bin_min"))   g_hist_cfg.bin_min   = h["bin_min"];
+            if (h.contains("bin_max"))   g_hist_cfg.bin_max   = h["bin_max"];
+            if (h.contains("bin_step"))  g_hist_cfg.bin_step  = h["bin_step"];
+            if (h.contains("threshold")) g_hist_cfg.threshold = h["threshold"];
+            if (h.contains("pos_min"))   g_hist_cfg.pos_min   = h["pos_min"];
+            if (h.contains("pos_max"))   g_hist_cfg.pos_max   = h["pos_max"];
+            if (h.contains("pos_step"))  g_hist_cfg.pos_step  = h["pos_step"];
+            if (h.contains("min_peak_ratio")) g_hist_cfg.min_peak_ratio = h["min_peak_ratio"];
+        }
+        std::cerr << "Hist config: " << hist_config_file << "\n";
+    }
+
+    // load ET / online config
     if (config_file.empty())
         config_file = findFile("online_config.json", db_dir);
 
@@ -505,22 +531,9 @@ int main(int argc, char *argv[])
         }
         if (cfg.contains("ring_buffer_size"))
             g_ring_size = cfg["ring_buffer_size"];
-        if (cfg.contains("hist")) {
-            auto &h = cfg["hist"];
-            if (h.contains("time_min"))  g_hist_cfg.time_min  = h["time_min"];
-            if (h.contains("time_max"))  g_hist_cfg.time_max  = h["time_max"];
-            if (h.contains("bin_min"))   g_hist_cfg.bin_min   = h["bin_min"];
-            if (h.contains("bin_max"))   g_hist_cfg.bin_max   = h["bin_max"];
-            if (h.contains("bin_step"))  g_hist_cfg.bin_step  = h["bin_step"];
-            if (h.contains("threshold")) g_hist_cfg.threshold = h["threshold"];
-            if (h.contains("pos_min"))   g_hist_cfg.pos_min   = h["pos_min"];
-            if (h.contains("pos_max"))   g_hist_cfg.pos_max   = h["pos_max"];
-            if (h.contains("pos_step"))  g_hist_cfg.pos_step  = h["pos_step"];
-            if (h.contains("min_peak_ratio")) g_hist_cfg.min_peak_ratio = h["min_peak_ratio"];
-        }
-        std::cerr << "Config: " << config_file << "\n";
+        std::cerr << "ET config: " << config_file << "\n";
     } else {
-        std::cerr << "Config: using defaults\n";
+        std::cerr << "ET config: using defaults\n";
     }
 
     g_hist_nbins = std::max(1, (int)std::ceil(

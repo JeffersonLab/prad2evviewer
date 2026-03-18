@@ -49,7 +49,7 @@ When `--data-dir` is set, the 📂 Open button lets you switch files from the br
 ## Online Monitor
 
 ```bash
-evc_monitor [-p port] [-c online_config.json]
+evc_monitor [-p port] [-c online_config.json] [-H hist_config.json]
 ```
 
 Connects to a running ET system. Same GUI as the file viewer, plus:
@@ -86,15 +86,16 @@ evchan_test <evio_file> [-h host] [-p port] [-f et_file] [-i interval_ms]
 }
 ```
 
-`database/online_config.json`:
+`database/online_config.json` (ET connection only):
 ```json
 {
     "et": { "host": "localhost", "port": 11111,
             "et_file": "/tmp/et_sys_prad2", "station": "prad2_monitor" },
-    "ring_buffer_size": 20,
-    "hist": { "...same as above..." }
+    "ring_buffer_size": 20
 }
 ```
+
+Both `evc_viewer` and `evc_monitor` read histogram settings from `hist_config.json`.
 
 | Field | Description |
 |-------|-------------|
