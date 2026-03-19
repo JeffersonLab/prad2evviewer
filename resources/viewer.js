@@ -397,10 +397,18 @@ function updateRingSelector() {
     });
 }
 
-function setEtStatus(connected) {
+function setEtStatus(connected, waiting, retries) {
     const el = document.getElementById('et-status');
-    el.textContent = connected ? '● Connected' : '● Disconnected';
-    el.style.color = connected ? '#51cf66' : '#f66';
+    if (connected) {
+        el.textContent = '● Connected';
+        el.style.color = '#51cf66';
+    } else if (waiting) {
+        el.textContent = `● Waiting for ET (${retries||'...'})`;
+        el.style.color = '#ffd43b';
+    } else {
+        el.textContent = '● Disconnected';
+        el.style.color = '#f66';
+    }
 }
 
 function updateFollowStatus() {
@@ -443,7 +451,7 @@ function connectWebSocket() {
                     fetchOccupancy();
                 }
             } else if (msg.type === 'status') {
-                setEtStatus(msg.connected);
+                setEtStatus(msg.connected, msg.waiting, msg.retries);
             } else if (msg.type === 'hist_cleared') {
                 occData={}; occTcutData={}; occTotal=0;
                 if (selectedModule) showHistograms(selectedModule);

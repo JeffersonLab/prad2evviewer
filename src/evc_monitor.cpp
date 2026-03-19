@@ -288,24 +288,45 @@ static void etReaderThread()
     ana.cfg.min_peak_ratio = g_hist_cfg.min_peak_ratio;
     fdec::WaveResult wres;
 
+    int retry_ms = 3000;       // start at 3s
+    const int max_retry = 30000; // cap at 30s
+    int retry_count = 0;
+    auto retry_start = std::chrono::steady_clock::now();
+
     while (g_running) {
         // connect
-        std::cerr << "ET: connecting to " << g_et_cfg.host << ":" << g_et_cfg.port
-                  << "  " << g_et_cfg.et_file << " ...\n";
+        if (retry_count == 0) {
+            std::cerr << "ET: connecting to " << g_et_cfg.host << ":" << g_et_cfg.port
+                      << "  " << g_et_cfg.et_file << " ...\n";
+            retry_start = std::chrono::steady_clock::now();
+        }
 
         if (ch.Connect(g_et_cfg.host, g_et_cfg.port, g_et_cfg.et_file) != status::success) {
-            std::cerr << "ET: connect failed, retrying in 3s\n";
-            sleepMs(3000);
+            retry_count++;
+            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - retry_start).count();
+            std::cerr << "\rET: waiting for ET system... "
+                      << retry_count << " attempts, " << elapsed << "s elapsed   " << std::flush;
+            wsBroadcast("{\"type\":\"status\",\"connected\":false,\"waiting\":true,\"retries\":"
+                        + std::to_string(retry_count) + "}");
+            sleepMs(retry_ms);
+            retry_ms = std::min(retry_ms * 2, max_retry);
             continue;
         }
+
+        if (retry_count > 0) std::cerr << "\n";  // newline after in-place updates
 
         if (ch.Open(g_et_cfg.station) != status::success) {
-            std::cerr << "ET: station open failed, retrying in 3s\n";
+            std::cerr << "ET: station open failed, retrying...\n";
             ch.Disconnect();
-            sleepMs(3000);
+            sleepMs(retry_ms);
+            retry_ms = std::min(retry_ms * 2, max_retry);
             continue;
         }
 
+        // connected — reset backoff
+        retry_ms = 3000;
+        retry_count = 0;
         g_et_connected = true;
         wsBroadcast("{\"type\":\"status\",\"connected\":true}");
         std::cerr << "ET: connected, reading events\n";
@@ -355,8 +376,10 @@ static void etReaderThread()
         ch.Disconnect();
         wsBroadcast("{\"type\":\"status\",\"connected\":false}");
 
-        if (g_running)
-            sleepMs(3000);
+        if (g_running) {
+            std::cerr << "ET: disconnected, retrying in " << retry_ms/1000 << "s\n";
+            sleepMs(retry_ms);
+        }
     }
 }
 
