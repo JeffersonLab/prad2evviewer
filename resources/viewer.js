@@ -12,7 +12,7 @@ let histEnabled=false, histConfig={};
 let mode='file';    // 'file' or 'online'
 let ws=null;        // WebSocket connection (online mode)
 let autoFollow=true; // auto-load latest event
-let lastEventFetch=0, lastHistFetch=0, lastOccFetch=0;  // throttle timestamps
+let lastEventFetch=0, lastHistFetch=0, lastRingFetch=0, lastOccFetch=0;  // throttle timestamps
 
 // occupancy data (fetched once per file load when histograms enabled)
 let occData={}, occTcutData={}, occTotal=0;
@@ -441,8 +441,8 @@ function connectWebSocket() {
                     loadLatestEvent();
                 }
                 // throttle ring selector update to ~2 Hz
-                if (now - lastHistFetch > 500) {
-                    lastHistFetch = now;
+                if (now - lastRingFetch > 500) {
+                    lastRingFetch = now;
                     updateRingSelector();
                 }
                 // throttle occupancy refresh to ~0.5 Hz
