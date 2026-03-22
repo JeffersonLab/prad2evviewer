@@ -145,5 +145,7 @@ prad2qtmon/                     Qt5 WebEngine client (optional)
 ```
 
 ## Contributors
-Chao Peng -- Argonne National Laboratory\
-Yuan Li -- Shandong University
+Chao Peng — Argonne National Laboratory\
+Yuan Li — Shandong University\
+Mingyu Li — Shandong University
+
