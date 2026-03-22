@@ -508,7 +508,7 @@ function loadEventData(reqId, data) {
     currentEventNumber = data.event_number || 0;
     currentTriggerBits = data.trigger_bits || 0;
     eventChannels = data.channels || {};
-    if(mode==='online') sampleCount=currentEvent;  // seq number = total samples
+    if(mode==='online') sampleCount++;
     updateStatusBar();
     updateHeaderStats();
     if(activeTab==='cluster'){
@@ -1532,22 +1532,30 @@ function init(){
     // Clear All — resets all tabs' data for new run
     document.getElementById('btn-clear-all').onclick=()=>{
         function clearFrontend(){
-            // DQ
+            // DQ: clear occupancy + copy data + event channels
             occData={}; occTcutData={}; occTotal=0;
+            eventChannels={};
+            currentWaveform=null;
+            currentHist={};
             if(selectedModule) showHistograms(selectedModule);
 
-            // Clustering
+            // Clustering: clear all bins + caches + copy data + UI
             initClHist(); plotClHist(); plotClStatHists();
             clusterData=null; clusterEvent=-1; selectedCluster=-1;
+            currentNclustHist=null; currentNblocksHist=null;
+            document.getElementById('cl-select').innerHTML='<option value="all">All</option>';
             document.getElementById('cl-detail-header').innerHTML=
                 '<span class="cl-info-text">Click a module or select a cluster</span>';
+            document.getElementById('cl-tbody').innerHTML='';
 
-            // LMS
+            // LMS: clear all state + plots + table
             lmsSummaryData=null; lmsSelectedModule=-1; currentLmsData=null;
             Plotly.react('lms-plot',[],{...PL,title:{text:'LMS History',font:{size:10,color:'#555'}}},PC2);
             document.getElementById('lms-detail-header').innerHTML=
                 '<span class="cl-info-text">Click a module to view LMS history</span>';
+            document.getElementById('lms-tbody').innerHTML='';
 
+            // Reset counters
             sampleCount=0;
             updateHeaderStats();
             redrawGeo();
