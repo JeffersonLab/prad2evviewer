@@ -28,6 +28,11 @@ get_filename_component(RESOURCE_DIR "${RESOURCE_DIR}" ABSOLUTE)
 add_subdirectory(prad2dec)
 
 # ---------------------------------------------------------------------------
+# Analysis library (clustering, reconstruction)
+# ---------------------------------------------------------------------------
+add_subdirectory(prad2ana)
+
+# ---------------------------------------------------------------------------
 # Web server dependencies (json, websocketpp, asio)
 # ---------------------------------------------------------------------------
 include(FetchContent)
@@ -77,16 +82,25 @@ add_executable(evchan_test test/evchan_test.cpp)
 target_link_libraries(evchan_test PRIVATE prad2dec)
 set_target_properties(evchan_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+add_executable(evio_dump test/evio_dump.cpp)
+target_link_libraries(evio_dump PRIVATE prad2dec nlohmann_json::nlohmann_json)
+set_target_properties(evio_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
+add_executable(ped_calc test/ped_calc.cpp)
+target_link_libraries(ped_calc PRIVATE prad2dec nlohmann_json::nlohmann_json)
+set_target_properties(ped_calc PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ---------------------------------------------------------------------------
 # Event viewer
 # ---------------------------------------------------------------------------
-add_executable(evc_viewer src/evc_viewer.cpp)
+add_executable(evc_viewer src/evc_viewer.cpp src/app_state.cpp)
 target_compile_definitions(evc_viewer PRIVATE
     DATABASE_DIR="${DATABASE_DIR}"
     RESOURCE_DIR="${RESOURCE_DIR}"
 )
 target_link_libraries(evc_viewer PRIVATE
     prad2dec
+    prad2ana
     nlohmann_json::nlohmann_json
     websocketpp_lib
     pthread
@@ -96,13 +110,14 @@ set_target_properties(evc_viewer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BIN
 # ---------------------------------------------------------------------------
 # Online monitor
 # ---------------------------------------------------------------------------
-add_executable(evc_monitor src/evc_monitor.cpp)
+add_executable(evc_monitor src/evc_monitor.cpp src/app_state.cpp)
 target_compile_definitions(evc_monitor PRIVATE
     DATABASE_DIR="${DATABASE_DIR}"
     RESOURCE_DIR="${RESOURCE_DIR}"
 )
 target_link_libraries(evc_monitor PRIVATE
     prad2dec
+    prad2ana
     nlohmann_json::nlohmann_json
     websocketpp_lib
     pthread
@@ -114,7 +129,7 @@ set_target_properties(evc_monitor PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BI
 # ---------------------------------------------------------------------------
 option(BUILD_GUI "Build the Qt5 WebEngine monitor client" OFF)
 if(BUILD_GUI)
-    add_subdirectory(prad2_monitor)
+    add_subdirectory(prad2qtmon)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -14,8 +14,8 @@ namespace fdec
 
 // --- capacity limits (adjust to match your hardware) ------------------------
 static constexpr int MAX_SAMPLES  = 200;   // samples per channel per event
-static constexpr int MAX_CHANNELS = 16;    // channels per FADC250 slot
-static constexpr int MAX_SLOTS    = 22;    // slot IDs 0..21 (VME slots 3-20 typical)
+static constexpr int MAX_CHANNELS = 64;    // channels per slot (16 for FADC250, 64 for ADC1881M)
+static constexpr int MAX_SLOTS    = 32;    // slot IDs 0..31 (VME 3-20, Fastbus 0-25)
 static constexpr int MAX_ROCS     = 10;    // number of ROC crates
 
 // --- per-channel data -------------------------------------------------------
@@ -30,7 +30,7 @@ struct SlotData {
     int32_t  trigger;                      // event number (from composite 'i')
     int64_t  timestamp;                    // 48-bit timestamp (from composite 'l')
     int      nchannels;                    // count of active channels
-    uint32_t channel_mask;                 // bitmask: bit i set = channel i present
+    uint64_t channel_mask;                 // bitmask: bit i set = channel i present
     ChannelData channels[MAX_CHANNELS];    // indexed by channel number
 
     void clear()
@@ -63,14 +63,40 @@ struct RocData {
     }
 };
 
+// --- event-level information (extracted from TI bank + trigger bank) ---------
+struct EventInfo {
+    uint8_t  type;              // evc::EventType cast to uint8_t
+    uint32_t trigger_bits;      // 32 FP trigger input bits from TI master (word[5])
+    uint32_t event_tag;         // top-level bank tag (raw)
+    int32_t  event_number;      // from trigger bank (0xC000) or TI
+    int32_t  trigger_number;    // from TI data bank
+    uint64_t timestamp;         // 48-bit TI timestamp (250MHz ticks)
+    uint32_t run_number;        // from run info bank (0xE10F), 0 if absent
+    uint32_t unix_time;         // from run info bank, 0 if absent
+
+    void clear()
+    {
+        type = 0;
+        trigger_bits = 0;
+        event_tag = 0;
+        event_number = 0;
+        trigger_number = 0;
+        timestamp = 0;
+        run_number = 0;
+        unix_time = 0;
+    }
+};
+
 // --- full event data --------------------------------------------------------
 struct EventData {
+    EventInfo info;                         // event-level metadata
     int      nrocs;                        // count of active ROCs
     int      roc_index[MAX_ROCS];          // maps i -> ROC index in rocs[]
     RocData  rocs[MAX_ROCS];
 
     void clear()
     {
+        info.clear();
         nrocs = 0;
         for (int i = 0; i < MAX_ROCS; ++i)
             rocs[i].clear();

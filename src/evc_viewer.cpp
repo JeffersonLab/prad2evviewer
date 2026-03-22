@@ -1,19 +1,20 @@
 // src/evc_viewer.cpp — HyCal event viewer
 //
 // Usage:
-//   evc_viewer [evio_file] [-p port] [-H] [-c config.json] [-d /path/to/data]
+//   evc_viewer [evio_file] [-p port] [-H] [-c config.json] [-d /path/to/data] [-D daq_config.json]
 //   evc_viewer -d /data/stage6 -H              # browse and pick from GUI
 //   evc_viewer data.evio -H                    # open file directly
 //   evc_viewer data.evio -H -d /data/stage6    # open file + enable browsing
 //   evc_viewer                                 # empty viewer, no file browser
+//   evc_viewer prad.evio -D prad_daq_config.json  # open PRad file with PRad DAQ config
 //
 // -d enables file browsing: the viewer shows a file picker limited to
 // .evio files under that directory tree. Selecting a new file triggers
 // background re-indexing + histogram building with progress updates.
 
 #include "EvChannel.h"
-#include "Fadc250Data.h"
-#include "WaveAnalyzer.h"
+#include "HyCalCluster.h"
+#include "app_state.h"
 
 #include <nlohmann/json.hpp>
 
@@ -25,7 +26,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <map>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -48,75 +49,29 @@ using namespace evc;
 #endif
 
 // -------------------------------------------------------------------------
-// Forward declarations
+// Viewer-specific types
 // -------------------------------------------------------------------------
-struct HistConfig;
-struct Histogram;
 struct EventIndex { int buffer_num, sub_event; };
 
-// -------------------------------------------------------------------------
-// Histogram types
-// -------------------------------------------------------------------------
-struct HistConfig {
-    float time_min  = 170;
-    float time_max  = 190;
-    float bin_min   = 0;
-    float bin_max   = 20000;
-    float bin_step  = 100;
-    float threshold = 3.0;
-    float pos_min   = 0;
-    float pos_max   = 400;
-    float pos_step  = 4;
-    float min_peak_ratio = 0.3f;
-};
-
-struct Histogram {
-    int underflow = 0, overflow = 0;
-    std::vector<int> bins;
-    void init(int n) { bins.assign(n, 0); underflow = overflow = 0; }
-    void fill(float v, float bmin, float bstep) {
-        if (v < bmin) { ++underflow; return; }
-        int b = (int)((v - bmin) / bstep);
-        if (b >= (int)bins.size()) { ++overflow; return; }
-        ++bins[b];
-    }
-};
-
-// -------------------------------------------------------------------------
-// Data container: holds everything for one loaded file
-// -------------------------------------------------------------------------
 struct FileData {
     std::string filepath;
     std::vector<EventIndex> index;
-    std::map<std::string, Histogram> histograms;
-    std::map<std::string, Histogram> pos_histograms;
-    std::map<std::string, int> occupancy;       // events with ≥1 peak above threshold
-    std::map<std::string, int> occupancy_tcut;   // same, but peak must be in time window
-    int hist_events_processed = 0;
 };
 
-// -------------------------------------------------------------------------
-// Loading progress
-// -------------------------------------------------------------------------
 struct Progress {
     std::atomic<bool> loading{false};
-    std::atomic<int>  phase{0};         // 0=idle, 1=indexing, 2=histograms
-    std::atomic<int>  current{0};       // buffers or events processed so far
-    std::atomic<int>  total{0};         // estimated total (0 if unknown)
-    std::string       target_file;      // file being loaded
-    std::mutex        mtx;              // protects target_file
+    std::atomic<int>  phase{0};
+    std::atomic<int>  current{0};
+    std::atomic<int>  total{0};
+    std::string       target_file;
+    std::mutex        mtx;
 
     json toJson() {
         std::lock_guard<std::mutex> lk(mtx);
-        return {
-            {"loading", loading.load()},
-            {"phase", phase == 1 ? "indexing" : phase == 2 ? "histograms" : "idle"},
-            {"current", current.load()},
-            {"total", total.load()},
-            {"file", target_file},
-        };
+        return {{"loading", loading.load()},
+                {"phase", phase == 1 ? "indexing" : phase == 2 ? "histograms" : "idle"},
+                {"current", current.load()}, {"total", total.load()}, {"file", target_file}};
     }
-
     void setFile(const std::string &f) {
         std::lock_guard<std::mutex> lk(mtx);
         target_file = f;
@@ -126,134 +81,102 @@ struct Progress {
 // -------------------------------------------------------------------------
 // Globals
 // -------------------------------------------------------------------------
-static std::shared_ptr<FileData> g_data;  // current active data (read by HTTP threads)
-static std::mutex g_data_mtx;             // protects swap of g_data pointer
-static std::thread g_load_thread;         // background loading thread
-static std::mutex g_load_mtx;             // protects g_load_thread join
-
-static HistConfig g_hist_cfg;
+static AppState g_app;                        // shared state
+static std::shared_ptr<FileData> g_data;
+static std::mutex g_data_mtx;
+static std::thread g_load_thread;
+static std::mutex g_load_mtx;
 static bool g_hist_enabled = false;
-static int  g_hist_nbins = 0, g_pos_nbins = 0;
-
-static std::string g_data_dir;            // sandboxed data directory (empty = disabled)
-static std::string g_res_dir;             // resources directory (viewer.html, .css, .js)
-static json g_base_config;                // config without per-file fields
+static std::string g_data_dir;
+static std::string g_res_dir;
 static Progress g_progress;
+
+// cached file reader
+static struct CachedReader {
+    EvChannel ch;
+    std::string filepath;
+    int current_buf = 0;
+    std::mutex mtx;
+
+    std::string seekTo(const std::string &path, int buf_num) {
+        if (path != filepath || buf_num < current_buf) {
+            ch.Close();
+            ch.SetConfig(g_app.daq_cfg);
+            if (ch.Open(path) != status::success) {
+                filepath.clear(); current_buf = 0;
+                return "cannot open file";
+            }
+            filepath = path;
+            current_buf = 0;
+        }
+        while (current_buf < buf_num) {
+            if (ch.Read() != status::success) {
+                ch.Close(); filepath.clear(); current_buf = 0;
+                return "read error";
+            }
+            current_buf++;
+        }
+        return "";
+    }
+    void invalidate() { ch.Close(); filepath.clear(); current_buf = 0; }
+} g_reader;
 
 // -------------------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------------------
-static std::string readFile(const std::string &path) {
-    std::ifstream f(path);
-    if (!f) return "";
-    return {std::istreambuf_iterator<char>(f), {}};
-}
-
-static std::string findFile(const std::string &name, const std::string &base) {
-    { std::ifstream f(name); if (f.good()) return name; }
-    std::string p = base + "/" + name;
-    { std::ifstream f(p); if (f.good()) return p; }
-    return "";
-}
-
-static std::string contentType(const std::string &path) {
-    if (path.size() >= 5 && path.substr(path.size()-5) == ".html") return "text/html; charset=utf-8";
-    if (path.size() >= 4 && path.substr(path.size()-4) == ".css")  return "text/css; charset=utf-8";
-    if (path.size() >= 3 && path.substr(path.size()-3) == ".js")   return "application/javascript; charset=utf-8";
-    return "application/octet-stream";
-}
-
-// Serve a file from the resources directory (no directory traversal)
-static bool serveResource(const std::string &uri, websocketpp::server<websocketpp::config::asio>::connection_ptr con)
-{
+static bool serveResource(const std::string &uri, WsServer::connection_ptr con) {
     if (g_res_dir.empty()) return false;
-
-    // map "/" to "/viewer.html"
     std::string relpath = (uri == "/") ? "viewer.html" : uri.substr(1);
-
-    // reject anything with .. or absolute paths
     if (relpath.find("..") != std::string::npos || relpath[0] == '/') return false;
-
     std::string fullpath = g_res_dir + "/" + relpath;
     std::string content = readFile(fullpath);
     if (content.empty()) return false;
-
     con->set_status(websocketpp::http::status_code::ok);
     con->set_body(content);
     con->append_header("Content-Type", contentType(fullpath));
     return true;
 }
 
-// -------------------------------------------------------------------------
-// File listing (sandboxed)
-// -------------------------------------------------------------------------
-static json listFiles(const std::string &data_dir)
-{
+static json listFiles(const std::string &data_dir) {
     json files = json::array();
     if (data_dir.empty()) return files;
-
     try {
         fs::path root(data_dir);
-        for (auto &entry : fs::recursive_directory_iterator(root,
-                fs::directory_options::skip_permission_denied)) {
+        for (auto &entry : fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied)) {
             if (!entry.is_regular_file()) continue;
-            // match: *.evio, *.evio.0, *.evio.00000, etc.
-            std::string fname = entry.path().filename().string();
-            if (fname.find(".evio") == std::string::npos) continue;
-            {
-                // relative path from data_dir
-                auto rel = fs::relative(entry.path(), root).string();
-                auto sz = entry.file_size();
-                files.push_back({
-                    {"path", rel},
-                    {"size", sz},
-                    {"size_mb", std::round(sz / 1048576.0 * 10) / 10},
-                });
-            }
+            if (entry.path().filename().string().find(".evio") == std::string::npos) continue;
+            auto rel = fs::relative(entry.path(), root).string();
+            auto sz = entry.file_size();
+            files.push_back({{"path", rel}, {"size", sz}, {"size_mb", std::round(sz / 1048576.0 * 10) / 10}});
         }
-    } catch (const std::exception &e) {
-        std::cerr << "listFiles error: " << e.what() << "\n";
-    }
-
-    // sort by path
-    std::sort(files.begin(), files.end(),
-        [](const json &a, const json &b) { return a["path"] < b["path"]; });
+    } catch (...) {}
+    std::sort(files.begin(), files.end(), [](const json &a, const json &b) { return a["path"] < b["path"]; });
     return files;
 }
 
-// -------------------------------------------------------------------------
-// Validate a requested file path (prevent directory traversal)
-// -------------------------------------------------------------------------
-static std::string resolveDataFile(const std::string &relpath)
-{
+static std::string resolveDataFile(const std::string &relpath) {
     if (g_data_dir.empty()) return "";
     try {
         fs::path full = fs::canonical(fs::path(g_data_dir) / relpath);
         fs::path root = fs::canonical(fs::path(g_data_dir));
-        // must be under root
-        auto rootStr = root.string();
-        if (full.string().rfind(rootStr, 0) != 0) return "";
+        if (full.string().rfind(root.string(), 0) != 0) return "";
         if (!fs::is_regular_file(full)) return "";
         return full.string();
     } catch (...) { return ""; }
 }
 
 // -------------------------------------------------------------------------
-// Build index for a file
+// Build index
 // -------------------------------------------------------------------------
-static void buildIndex(const std::string &path, std::vector<EventIndex> &index,
-                       Progress &prog)
-{
+static void buildIndex(const std::string &path, std::vector<EventIndex> &index, Progress &prog) {
     index.clear();
     EvChannel ch;
+    ch.SetConfig(g_app.daq_cfg);
     if (ch.Open(path) != status::success) return;
-
-    prog.phase = 1;
-    prog.current = 0;
+    prog.phase = 1; prog.current = 0;
     int buf = 0;
     while (ch.Read() == status::success) {
-        ++buf;
-        prog.current = buf;
+        ++buf; prog.current = buf;
         if (!ch.Scan()) continue;
         for (int i = 0; i < ch.GetNEvents(); ++i)
             index.push_back({buf, i});
@@ -263,133 +186,73 @@ static void buildIndex(const std::string &path, std::vector<EventIndex> &index,
 }
 
 // -------------------------------------------------------------------------
-// Build histograms
+// Build histograms (delegates to AppState)
 // -------------------------------------------------------------------------
-static void buildHistograms(const std::string &path,
-                            std::map<std::string, Histogram> &hists,
-                            std::map<std::string, Histogram> &pos_hists,
-                            std::map<std::string, int> &occ,
-                            std::map<std::string, int> &occ_tcut,
-                            int &events_out, Progress &prog)
-{
-    hists.clear();
-    pos_hists.clear();
-    occ.clear();
-    occ_tcut.clear();
-    events_out = 0;
+static void buildHistograms(const std::string &path, Progress &prog) {
+    g_app.clearHistograms();
+    g_app.clearLms();
 
     EvChannel ch;
+    ch.SetConfig(g_app.daq_cfg);
     if (ch.Open(path) != status::success) return;
 
-    fdec::EventData event;
+    auto event_ptr = std::make_unique<fdec::EventData>();
+    auto &event = *event_ptr;
     fdec::WaveAnalyzer ana;
-    ana.cfg.min_peak_ratio = g_hist_cfg.min_peak_ratio;
+    ana.cfg.min_peak_ratio = g_app.hist_cfg.min_peak_ratio;
     fdec::WaveResult wres;
 
-    prog.phase = 2;
-    prog.current = 0;
-
-    int buf = 0, total = 0;
+    prog.phase = 2; prog.current = 0;
+    int buf = 0;
+    uint64_t last_ti_ts = 0;
     while (ch.Read() == status::success) {
         ++buf;
         if (!ch.Scan()) continue;
+        // capture sync time reference
+        if (g_app.sync_unix == 0) {
+            uint32_t ct = ch.GetControlTime();
+            if (ct != 0) g_app.recordSyncTime(ct, last_ti_ts);
+        }
         for (int i = 0; i < ch.GetNEvents(); ++i) {
             if (!ch.DecodeEvent(i, event)) continue;
-            ++total;
-            prog.current = total;
+            prog.current = g_app.events_processed.load() + 1;
+            last_ti_ts = event.info.timestamp;
 
-            // fill histograms
-            for (int r = 0; r < event.nrocs; ++r) {
-                auto &roc = event.rocs[r];
-                if (!roc.present) continue;
-                for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-                    if (!roc.slots[s].present) continue;
-                    auto &slot = roc.slots[s];
-                    for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
-                        if (!(slot.channel_mask & (1u << c))) continue;
-                        auto &cd = slot.channels[c];
-                        if (cd.nsamples <= 0) continue;
-
-                        ana.Analyze(cd.samples, cd.nsamples, wres);
-
-                        std::string key = std::to_string(roc.tag) + "_"
-                                        + std::to_string(s) + "_" + std::to_string(c);
-
-                        bool has_peak = false, has_peak_tcut = false;
-
-                        // integral histogram + occupancy
-                        float best = -1;
-                        for (int p = 0; p < wres.npeaks; ++p) {
-                            auto &pk = wres.peaks[p];
-                            if (pk.height < g_hist_cfg.threshold) continue;
-                            has_peak = true;
-                            if (pk.time >= g_hist_cfg.time_min && pk.time <= g_hist_cfg.time_max) {
-                                has_peak_tcut = true;
-                                if (pk.integral > best) best = pk.integral;
-                            }
-                        }
-                        if (best >= 0) {
-                            auto &h = hists[key];
-                            if (h.bins.empty()) h.init(g_hist_nbins);
-                            h.fill(best, g_hist_cfg.bin_min, g_hist_cfg.bin_step);
-                        }
-
-                        // position histogram
-                        for (int p = 0; p < wres.npeaks; ++p) {
-                            auto &pk = wres.peaks[p];
-                            if (pk.height < g_hist_cfg.threshold) continue;
-                            auto &ph = pos_hists[key];
-                            if (ph.bins.empty()) ph.init(g_pos_nbins);
-                            ph.fill(pk.time, g_hist_cfg.pos_min, g_hist_cfg.pos_step);
-                        }
-
-                        // occupancy
-                        if (has_peak)      occ[key]++;
-                        if (has_peak_tcut) occ_tcut[key]++;
-                    }
-                }
-            }
+            // process: histograms + clustering + LMS (single-threaded, no locks needed)
+            g_app.fillHist(event, ana, wres);
+            g_app.clusterEvent(event, ana, wres);
+            g_app.processLms(event, ana, wres);
+            g_app.events_processed++;
         }
     }
     ch.Close();
-    events_out = total;
 }
 
 // -------------------------------------------------------------------------
-// Load a file: index + optional histograms, then swap into g_data
+// Load file async
 // -------------------------------------------------------------------------
-static void loadFileAsync(const std::string &filepath)
-{
+static void loadFileAsync(const std::string &filepath) {
     g_progress.loading = true;
     g_progress.setFile(filepath);
-    g_progress.phase = 0;
-    g_progress.current = 0;
-    g_progress.total = 0;
+    g_progress.phase = 0; g_progress.current = 0; g_progress.total = 0;
 
     auto data = std::make_shared<FileData>();
     data->filepath = filepath;
 
     std::cerr << "Loading: " << filepath << "\n";
-
-    // index
     buildIndex(filepath, data->index, g_progress);
     std::cerr << "  Indexed " << data->index.size() << " events\n";
 
-    // histograms
     if (g_hist_enabled) {
         g_progress.total = (int)data->index.size();
-        buildHistograms(filepath, data->histograms, data->pos_histograms,
-                        data->occupancy, data->occupancy_tcut,
-                        data->hist_events_processed, g_progress);
-        std::cerr << "  Histograms: " << data->hist_events_processed << " events, "
-                  << data->histograms.size() << " channels\n";
+        buildHistograms(filepath, g_progress);
+        std::cerr << "  Histograms: " << g_app.events_processed.load() << " events"
+                  << ", clusters: " << g_app.cluster_events_processed
+                  << ", LMS: " << g_app.lms_events.load() << "\n";
     }
 
-    // atomic swap
-    {
-        std::lock_guard<std::mutex> lk(g_data_mtx);
-        g_data = data;
-    }
+    { std::lock_guard<std::mutex> lk(g_data_mtx); g_data = data; }
+    { std::lock_guard<std::mutex> lk(g_reader.mtx); g_reader.invalidate(); }
 
     g_progress.loading = false;
     g_progress.phase = 0;
@@ -397,120 +260,92 @@ static void loadFileAsync(const std::string &filepath)
 }
 
 // -------------------------------------------------------------------------
-// Decode one event → JSON (from current g_data)
+// Decode raw event from file
 // -------------------------------------------------------------------------
-static json decodeEvent(int ev1)
-{
+static std::string decodeRawEvent(int ev1, fdec::EventData &event) {
     std::shared_ptr<FileData> data;
     { std::lock_guard<std::mutex> lk(g_data_mtx); data = g_data; }
-    if (!data) return {{"error", "no file loaded"}};
-
+    if (!data) return "no file loaded";
     int idx = ev1 - 1;
-    if (idx < 0 || idx >= (int)data->index.size())
-        return {{"error", "event out of range"}};
+    if (idx < 0 || idx >= (int)data->index.size()) return "event out of range";
 
     auto &ei = data->index[idx];
-    EvChannel ch;
-    if (ch.Open(data->filepath) != status::success)
-        return {{"error", "cannot open file"}};
+    std::lock_guard<std::mutex> lk(g_reader.mtx);
+    std::string err = g_reader.seekTo(data->filepath, ei.buffer_num);
+    if (!err.empty()) return err;
+    if (!g_reader.ch.Scan()) return "scan error";
+    if (!g_reader.ch.DecodeEvent(ei.sub_event, event)) return "decode error";
+    return "";
+}
 
-    for (int b = 0; b < ei.buffer_num; ++b)
-        if (ch.Read() != status::success) { ch.Close(); return {{"error", "read error"}}; }
-    if (!ch.Scan()) { ch.Close(); return {{"error", "scan error"}}; }
-
-    fdec::EventData event;
-    if (!ch.DecodeEvent(ei.sub_event, event)) { ch.Close(); return {{"error", "decode error"}}; }
-    ch.Close();
+// -------------------------------------------------------------------------
+// Decode one event → JSON (delegates to AppState)
+// -------------------------------------------------------------------------
+static json decodeEvent(int ev1) {
+    auto event_ptr = std::make_unique<fdec::EventData>();
+    auto &event = *event_ptr;
+    std::string err = decodeRawEvent(ev1, event);
+    if (!err.empty()) return {{"error", err}};
 
     fdec::WaveAnalyzer ana;
-    ana.cfg.min_peak_ratio = g_hist_cfg.min_peak_ratio;
+    ana.cfg.min_peak_ratio = g_app.hist_cfg.min_peak_ratio;
     fdec::WaveResult wres;
-    json channels = json::object();
-
-    for (int r = 0; r < event.nrocs; ++r) {
-        auto &roc = event.rocs[r];
-        if (!roc.present) continue;
-        for (int s = 0; s < fdec::MAX_SLOTS; ++s) {
-            if (!roc.slots[s].present) continue;
-            auto &slot = roc.slots[s];
-            for (int c = 0; c < fdec::MAX_CHANNELS; ++c) {
-                if (!(slot.channel_mask & (1u << c))) continue;
-                auto &cd = slot.channels[c];
-                if (cd.nsamples <= 0) continue;
-
-                ana.Analyze(cd.samples, cd.nsamples, wres);
-
-                std::string key = std::to_string(roc.tag) + "_"
-                                + std::to_string(s) + "_" + std::to_string(c);
-
-                json sarr = json::array();
-                for (int j = 0; j < cd.nsamples; ++j) sarr.push_back(cd.samples[j]);
-
-                json parr = json::array();
-                for (int p = 0; p < wres.npeaks; ++p) {
-                    auto &pk = wres.peaks[p];
-                    parr.push_back({
-                        {"p", pk.pos}, {"t", std::round(pk.time * 10) / 10},
-                        {"h", std::round(pk.height * 10) / 10},
-                        {"i", std::round(pk.integral * 10) / 10},
-                        {"l", pk.left}, {"r", pk.right},
-                        {"o", pk.overflow ? 1 : 0},
-                    });
-                }
-
-                channels[key] = {
-                    {"s", sarr},
-                    {"pm", std::round(wres.ped.mean * 10) / 10},
-                    {"pr", std::round(wres.ped.rms * 10) / 10},
-                    {"pk", parr},
-                };
-            }
-        }
-    }
-    return {{"event", ev1}, {"channels", channels}};
+    return g_app.encodeEventJson(event, ev1, ana, wres);
 }
 
 // -------------------------------------------------------------------------
-// Histogram API
+// Compute clusters for one event (delegates to AppState)
 // -------------------------------------------------------------------------
-static json getHist(bool integral, const std::string &key)
-{
-    std::shared_ptr<FileData> data;
-    { std::lock_guard<std::mutex> lk(g_data_mtx); data = g_data; }
-    if (!data || !g_hist_enabled)
-        return {{"bins", json::array()}, {"underflow", 0}, {"overflow", 0}, {"events", 0}};
+static json computeClusters(int ev1) {
+    auto event_ptr = std::make_unique<fdec::EventData>();
+    auto &event = *event_ptr;
+    std::string err = decodeRawEvent(ev1, event);
+    if (!err.empty()) return {{"error", err}};
 
-    auto &hmap = integral ? data->histograms : data->pos_histograms;
-    auto it = hmap.find(key);
-    if (it == hmap.end())
-        return {{"bins", json::array()}, {"underflow", 0}, {"overflow", 0},
-                {"events", data->hist_events_processed}};
-    auto &h = it->second;
-    return {{"bins", h.bins}, {"underflow", h.underflow}, {"overflow", h.overflow},
-            {"events", data->hist_events_processed}};
+    fdec::WaveAnalyzer ana;
+    ana.cfg.min_peak_ratio = g_app.hist_cfg.min_peak_ratio;
+    fdec::WaveResult wres;
+    return g_app.computeClustersJson(event, ev1, ana, wres);
 }
 
 // -------------------------------------------------------------------------
-// Build config JSON for current state
+// Build config JSON
 // -------------------------------------------------------------------------
-static json buildConfig()
-{
+static json buildConfig() {
     std::shared_ptr<FileData> data;
     { std::lock_guard<std::mutex> lk(g_data_mtx); data = g_data; }
 
-    json cfg = g_base_config;
+    json cfg = g_app.base_config;
     cfg["total_events"] = data ? (int)data->index.size() : 0;
     cfg["current_file"] = data ? data->filepath : "";
     cfg["data_dir_enabled"] = !g_data_dir.empty();
     cfg["data_dir"] = g_data_dir;
     cfg["hist_enabled"] = g_hist_enabled;
-    // always include hist config so the client can use ranges for coloring
+    cfg["mode"] = "file";
     cfg["hist"] = {
-        {"time_min", g_hist_cfg.time_min}, {"time_max", g_hist_cfg.time_max},
-        {"bin_min", g_hist_cfg.bin_min}, {"bin_max", g_hist_cfg.bin_max},
-        {"bin_step", g_hist_cfg.bin_step}, {"threshold", g_hist_cfg.threshold},
-        {"pos_min", g_hist_cfg.pos_min}, {"pos_max", g_hist_cfg.pos_max},
-        {"pos_step", g_hist_cfg.pos_step},
+        {"time_min", g_app.hist_cfg.time_min}, {"time_max", g_app.hist_cfg.time_max},
+        {"bin_min", g_app.hist_cfg.bin_min}, {"bin_max", g_app.hist_cfg.bin_max},
+        {"bin_step", g_app.hist_cfg.bin_step}, {"threshold", g_app.hist_cfg.threshold},
+        {"pos_min", g_app.hist_cfg.pos_min}, {"pos_max", g_app.hist_cfg.pos_max},
+        {"pos_step", g_app.hist_cfg.pos_step},
+    };
+    cfg["cluster_hist"] = {
+        {"min", g_app.cl_hist_min}, {"max", g_app.cl_hist_max}, {"step", g_app.cl_hist_step},
+    };
+    cfg["nclusters_hist"] = {
+        {"min", g_app.nclusters_hist_min}, {"max", g_app.nclusters_hist_max}, {"step", g_app.nclusters_hist_step},
+    };
+    cfg["nblocks_hist"] = {
+        {"min", g_app.nblocks_hist_min}, {"max", g_app.nblocks_hist_max}, {"step", g_app.nblocks_hist_step},
+    };
+    cfg["color_ranges"] = g_app.apiColorRanges();
+    cfg["refresh_ms"] = {{"event", g_app.refresh_event_ms}, {"ring", g_app.refresh_ring_ms},
+                         {"histogram", g_app.refresh_hist_ms}, {"lms", g_app.refresh_lms_ms}};
+    cfg["lms"] = {
+        {"trigger_bit", g_app.lms_trigger_bit},
+        {"warn_threshold", g_app.lms_warn_thresh},
+        {"events", g_app.lms_events.load()},
+        {"ref_channels", g_app.apiLmsRefChannels()},
     };
     return cfg;
 }
@@ -518,8 +353,7 @@ static json buildConfig()
 // -------------------------------------------------------------------------
 // HTTP handler
 // -------------------------------------------------------------------------
-static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
-{
+static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl) {
     auto con = srv->get_con_from_hdl(hdl);
     std::string uri = con->get_resource();
 
@@ -539,96 +373,90 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         reply(decodeEvent(evnum).dump()); return;
     }
 
+    // /api/clusters/<num>
+    if (uri.rfind("/api/clusters/", 0) == 0) {
+        int evnum = std::atoi(uri.c_str() + 14);
+        reply(computeClusters(evnum).dump()); return;
+    }
+
+    // /api/progress
+    if (uri == "/api/progress") { reply(g_progress.toJson().dump()); return; }
+
     // /api/hist/<key>
     if (uri.rfind("/api/hist/", 0) == 0) {
-        reply(getHist(true, uri.substr(10)).dump()); return;
+        reply(g_app.apiHist(true, uri.substr(10)).dump()); return;
     }
 
     // /api/poshist/<key>
     if (uri.rfind("/api/poshist/", 0) == 0) {
-        reply(getHist(false, uri.substr(13)).dump()); return;
+        reply(g_app.apiHist(false, uri.substr(13)).dump()); return;
     }
 
-    // /api/occupancy — per-channel event counts (for geo view)
-    if (uri == "/api/occupancy") {
-        std::shared_ptr<FileData> data;
-        { std::lock_guard<std::mutex> lk(g_data_mtx); data = g_data; }
-        if (!data) { reply("{\"occ\":{},\"occ_tcut\":{},\"total\":0}"); return; }
-        json jocc = json::object(), jtcut = json::object();
-        for (auto &[k,v] : data->occupancy) jocc[k] = v;
-        for (auto &[k,v] : data->occupancy_tcut) jtcut[k] = v;
-        reply(json({{"occ", jocc}, {"occ_tcut", jtcut},
-                     {"total", data->hist_events_processed}}).dump());
-        return;
+    // /api/cluster_hist
+    if (uri == "/api/cluster_hist") { reply(g_app.apiClusterHist().dump()); return; }
+
+    // /api/occupancy
+    if (uri == "/api/occupancy") { reply(g_app.apiOccupancy().dump()); return; }
+
+    // /api/lms/refs — list reference channels
+    if (uri == "/api/lms/refs") { reply(g_app.apiLmsRefChannels().dump()); return; }
+
+    // /api/lms/summary?ref=N or /api/lms/<idx>?ref=N
+    if (uri.rfind("/api/lms/", 0) == 0) {
+        // parse ref= query param
+        int ref = -1;
+        auto qpos = uri.find('?');
+        std::string path_part = (qpos != std::string::npos) ? uri.substr(9, qpos - 9) : uri.substr(9);
+        if (qpos != std::string::npos) {
+            std::string q = uri.substr(qpos + 1);
+            if (q.rfind("ref=", 0) == 0) ref = std::atoi(q.c_str() + 4);
+        }
+        if (path_part == "summary") { reply(g_app.apiLmsSummary(ref).dump()); return; }
+        reply(g_app.apiLmsModule(std::atoi(path_part.c_str()), ref).dump()); return;
     }
 
-    // /api/files — list .evio files under data-dir
-    if (uri == "/api/files") {
-        reply(json({{"files", listFiles(g_data_dir)}}).dump()); return;
-    }
+    // /api/files
+    if (uri == "/api/files") { reply(json({{"files", listFiles(g_data_dir)}}).dump()); return; }
 
-    // /api/progress — loading progress
-    if (uri == "/api/progress") {
-        reply(g_progress.toJson().dump()); return;
-    }
-
-    // /api/load?file=relative/path.evio&hist=1 — switch to a new file
+    // /api/load?file=<relpath>&hist=0|1
     if (uri.rfind("/api/load?", 0) == 0) {
-        if (g_data_dir.empty()) {
-            reply("{\"error\":\"file browsing not enabled (use --data-dir)\"}"); return;
-        }
-        bool expected = false;
-        if (!g_progress.loading.compare_exchange_strong(expected, true)) {
-            reply("{\"error\":\"already loading a file\"}"); return;
-        }
-
-        // parse query string
-        std::string qs = uri.substr(10);  // after "/api/load?"
-        auto urlDecode = [](const std::string &raw) {
-            std::string out;
-            for (size_t i = 0; i < raw.size(); ++i) {
-                if (raw[i] == '+') out += ' ';
-                else if (raw[i] == '%' && i + 2 < raw.size()) {
-                    out += (char)std::stoi(raw.substr(i+1, 2), nullptr, 16);
-                    i += 2;
-                } else out += raw[i];
+        auto qpos = uri.find('?');
+        std::string query = uri.substr(qpos + 1);
+        // parse file= and hist= from query
+        std::string relpath;
+        bool do_hist = false;
+        for (size_t pos = 0; pos < query.size();) {
+            size_t amp = query.find('&', pos);
+            if (amp == std::string::npos) amp = query.size();
+            std::string kv = query.substr(pos, amp - pos);
+            auto eq = kv.find('=');
+            if (eq != std::string::npos) {
+                std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
+                if (k == "file") relpath = v;
+                if (k == "hist") do_hist = (v == "1");
             }
-            return out;
-        };
-        auto getParam = [&](const std::string &key) -> std::string {
-            std::string prefix = key + "=";
-            size_t pos = qs.find(prefix);
-            if (pos == std::string::npos) return "";
-            size_t start = pos + prefix.size();
-            size_t end = qs.find('&', start);
-            return urlDecode(qs.substr(start, end == std::string::npos ? end : end - start));
-        };
-
-        std::string relpath = getParam("file");
-        std::string hist_param = getParam("hist");
-
-        if (relpath.empty()) {
-            g_progress.loading = false;
-            reply("{\"error\":\"missing file parameter\"}"); return;
+            pos = amp + 1;
         }
+        // URL-decode %xx
+        std::string decoded;
+        for (size_t i = 0; i < relpath.size(); ++i) {
+            if (relpath[i] == '%' && i + 2 < relpath.size()) {
+                decoded += (char)std::stoi(relpath.substr(i + 1, 2), nullptr, 16);
+                i += 2;
+            } else if (relpath[i] == '+') decoded += ' ';
+            else decoded += relpath[i];
+        }
+        relpath = decoded;
 
         std::string fullpath = resolveDataFile(relpath);
-        if (fullpath.empty()) {
-            g_progress.loading = false;
-            reply("{\"error\":\"file not found or access denied\"}"); return;
-        }
+        if (fullpath.empty()) { reply("{\"error\":\"invalid path\"}"); return; }
 
-        // update histogram enabled flag
-        if (!hist_param.empty())
-            g_hist_enabled = (hist_param == "1" || hist_param == "true");
-
-        // start background loading (join any previous load first)
+        g_hist_enabled = do_hist;
         {
             std::lock_guard<std::mutex> lk(g_load_mtx);
             if (g_load_thread.joinable()) g_load_thread.join();
             g_load_thread = std::thread([fullpath]() { loadFileAsync(fullpath); });
         }
-
         reply(json({{"status", "loading"}, {"file", relpath},
                      {"hist_enabled", g_hist_enabled}}).dump());
         return;
@@ -641,93 +469,76 @@ static void onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
 // -------------------------------------------------------------------------
 // Main
 // -------------------------------------------------------------------------
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     std::string evio_file;
     int port = 5050;
-    std::string hist_config_file;
+    std::string config_file;
+    std::string daq_config_file;
 
     static struct option long_opts[] = {
         {"port",        required_argument, nullptr, 'p'},
         {"hist",        no_argument,       nullptr, 'H'},
-        {"hist-config", required_argument, nullptr, 'c'},
+        {"config",      required_argument, nullptr, 'c'},
         {"data-dir",    required_argument, nullptr, 'd'},
+        {"daq-config",  required_argument, nullptr, 'D'},
         {"help",        no_argument,       nullptr, '?'},
         {nullptr, 0, nullptr, 0},
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "p:Hc:d:", long_opts, nullptr)) != -1) {
+    while ((opt = getopt_long(argc, argv, "p:Hc:d:D:", long_opts, nullptr)) != -1) {
         switch (opt) {
         case 'p': port = std::atoi(optarg); break;
         case 'H': g_hist_enabled = true; break;
-        case 'c': hist_config_file = optarg; g_hist_enabled = true; break;
+        case 'c': config_file = optarg; break;
         case 'd': g_data_dir = optarg; break;
+        case 'D': daq_config_file = optarg; break;
         default:
             std::cerr << "Usage: " << argv[0]
-                      << " [evio_file] [-p port] [-H] [-c hist_config.json] [-d data_dir]\n";
+                      << " [evio_file] [-p port] [-H] [-c config.json]"
+                      << " [-d data_dir] [-D daq_config.json]\n";
             return 1;
         }
     }
-    if (optind < argc)
-        evio_file = argv[optind];
+    if (optind < argc) evio_file = argv[optind];
 
     std::string db_dir  = DATABASE_DIR;
     std::string res_dir = RESOURCE_DIR;
 
-    // always load histogram config (needed if user enables hist via GUI later)
-    if (hist_config_file.empty())
-        hist_config_file = findFile("hist_config.json", db_dir);
+    // initialize shared state
+    g_app.init(db_dir, daq_config_file, config_file);
 
-    std::string hcfg_str = readFile(hist_config_file);
-    if (!hcfg_str.empty()) {
-        auto hcfg = json::parse(hcfg_str, nullptr, false);
-        if (hcfg.contains("hist")) {
-            auto &h = hcfg["hist"];
-            if (h.contains("time_min"))  g_hist_cfg.time_min  = h["time_min"];
-            if (h.contains("time_max"))  g_hist_cfg.time_max  = h["time_max"];
-            if (h.contains("bin_min"))   g_hist_cfg.bin_min   = h["bin_min"];
-            if (h.contains("bin_max"))   g_hist_cfg.bin_max   = h["bin_max"];
-            if (h.contains("bin_step"))  g_hist_cfg.bin_step  = h["bin_step"];
-            if (h.contains("threshold")) g_hist_cfg.threshold = h["threshold"];
-            if (h.contains("pos_min"))   g_hist_cfg.pos_min   = h["pos_min"];
-            if (h.contains("pos_max"))   g_hist_cfg.pos_max   = h["pos_max"];
-            if (h.contains("pos_step"))  g_hist_cfg.pos_step  = h["pos_step"];
-            if (h.contains("min_peak_ratio")) g_hist_cfg.min_peak_ratio = h["min_peak_ratio"];
+    // build base_config for /api/config
+    std::string mod_file = findFile("hycal_modules.json", db_dir);
+    json modules_j = json::array(), daq_j = json::array();
+    { std::string s = readFile(mod_file); if (!s.empty()) modules_j = json::parse(s, nullptr, false); }
+    {
+        std::string daq_fn = "daq_map.json";
+        if (!daq_config_file.empty()) {
+            std::ifstream dcf(daq_config_file);
+            if (dcf.is_open()) {
+                auto dcj = json::parse(dcf, nullptr, false, true);
+                if (dcj.contains("daq_map_file")) daq_fn = dcj["daq_map_file"].get<std::string>();
+            }
         }
-        std::cerr << "Hist config: " << hist_config_file << "\n";
+        std::string s = readFile(findFile(daq_fn, db_dir));
+        if (!s.empty()) daq_j = json::parse(s, nullptr, false);
     }
+    g_app.base_config = {
+        {"modules", modules_j}, {"daq", daq_j}, {"crate_roc", g_app.crate_roc_json},
+    };
 
-    g_hist_nbins = std::max(1, (int)std::ceil(
-        (g_hist_cfg.bin_max - g_hist_cfg.bin_min) / g_hist_cfg.bin_step));
-    g_pos_nbins = std::max(1, (int)std::ceil(
-        (g_hist_cfg.pos_max - g_hist_cfg.pos_min) / g_hist_cfg.pos_step));
-
-    // resources directory (viewer.html, viewer.css, viewer.js)
+    // resources
     g_res_dir = res_dir;
     if (readFile(g_res_dir + "/viewer.html").empty())
         std::cerr << "Warning: viewer.html not found in " << g_res_dir << "\n";
-
-    json modules_j = json::array(), daq_j = json::array();
-    { std::string s = readFile(findFile("hycal_modules.json", db_dir));
-      if (!s.empty()) modules_j = json::parse(s, nullptr, false); }
-    { std::string s = readFile(findFile("daq_map.json", db_dir));
-      if (!s.empty()) daq_j = json::parse(s, nullptr, false); }
-
-    // base config (file-independent fields)
-    g_base_config = {
-        {"modules", modules_j},
-        {"daq", daq_j},
-        {"crate_roc", {{"0",0x80},{"1",0x82},{"2",0x84},{"3",0x86},{"4",0x88},{"5",0x8a},{"6",0x8c}}},
-        {"mode", "file"},
-    };
 
     std::cerr << "Database  : " << db_dir << "\n"
               << "Resources : " << res_dir << "\n";
     if (!g_data_dir.empty())
         std::cerr << "Data dir  : " << g_data_dir << "\n";
 
-    // load initial file if provided (blocking)
+    // load initial file
     if (!evio_file.empty())
         loadFileAsync(evio_file);
 
@@ -761,10 +572,6 @@ int main(int argc, char *argv[])
 
     server.run();
 
-    // clean shutdown: join any in-progress load thread
-    {
-        std::lock_guard<std::mutex> lk(g_load_mtx);
-        if (g_load_thread.joinable()) g_load_thread.join();
-    }
+    { std::lock_guard<std::mutex> lk(g_load_mtx); if (g_load_thread.joinable()) g_load_thread.join(); }
     return 0;
 }

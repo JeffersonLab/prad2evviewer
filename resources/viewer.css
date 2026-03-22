@@ -19,7 +19,28 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 }
 .header .info { color:var(--dim); font-size:11px; margin-left:auto; }
 
-.main { display:flex; height:calc(100vh - 40px); }
+/* --- tab bar --- */
+.tab-bar {
+    display:flex; gap:0; background:var(--panel); border-bottom:1px solid var(--border);
+    padding:0 16px;
+}
+.tab {
+    background:none; border:none; border-bottom:2px solid transparent;
+    color:var(--dim); padding:6px 16px; cursor:pointer; font-family:inherit; font-size:12px;
+    font-weight:500;
+}
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+
+.main { display:flex; height:calc(100vh - 66px - 22px); }
+
+/* --- clustering panel --- */
+.cl-hist-panel { flex:none; height:35%; min-height:80px; position:relative; }
+.cl-stat-row { flex:none; height:25%; min-height:60px; display:flex; flex-direction:row; }
+.cl-stat-cell { flex:1; min-width:0; position:relative; }
+.cluster-info-wrap { flex:1; overflow-y:auto; min-height:0; font-size:12px; }
+.cl-table-row.selected { background:rgba(0,180,216,0.15); }
+.cl-table-row:hover { background:rgba(0,180,216,0.08); cursor:pointer; }
 
 /* --- geo panel (left) --- */
 .geo-panel { flex:none; width:55%; display:flex; flex-direction:column; min-width:300px; }
@@ -32,6 +53,20 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     background:var(--bg); border:1px solid var(--border); color:var(--text);
     padding:2px 6px; border-radius:3px; font-family:inherit; font-size:12px;
 }
+/* clear button — right-aligned in toolbar */
+.geo-clear-btn {
+    background:var(--border); border:none; color:var(--dim); padding:1px 8px;
+    border-radius:3px; cursor:pointer; font-family:inherit; font-size:11px; margin-left:auto;
+}
+.geo-clear-btn:hover { background:var(--accent); color:#000; }
+
+/* reset view button — overlay inside geo canvas */
+.geo-view-reset {
+    position:absolute; top:6px; left:6px; z-index:5;
+    background:rgba(15,52,96,0.8); border:1px solid var(--border); color:var(--dim);
+    padding:2px 8px; border-radius:3px; cursor:pointer; font-family:inherit; font-size:11px;
+}
+.geo-view-reset:hover { background:var(--accent); color:#000; border-color:var(--accent); }
 .geo-canvas-wrap { flex:1; position:relative; overflow:hidden; }
 .geo-canvas-wrap canvas { position:absolute; top:0; left:0; }
 .geo-tooltip {
@@ -49,9 +84,26 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 /* --- detail panel (right) --- */
 .detail-panel { flex:1; display:flex; flex-direction:column; min-width:350px; overflow:hidden; }
 .detail-header {
-    padding:6px 10px; background:var(--panel); border-bottom:1px solid var(--border);
-    font-size:13px; flex-shrink:0;
+    padding:4px 10px; background:var(--panel); border-bottom:1px solid var(--border);
+    font-size:13px; flex:0 0 24px; line-height:16px;
 }
+#cl-detail-header {
+    flex:0 0 24px; padding:4px 10px; font-size:12px;
+    border-top:1px solid var(--border); background:var(--panel);
+}
+.cl-info-text { color:var(--dim); }
+
+/* --- LMS panel --- */
+.lms-plot-panel { flex:none; height:50%; min-height:100px; position:relative; }
+.lms-summary-wrap { flex:1; overflow-y:auto; min-height:0; font-size:12px; }
+#lms-detail-header {
+    flex:0 0 24px; padding:4px 10px; font-size:12px;
+    border-top:1px solid var(--border); background:var(--panel);
+}
+.lms-warn { color:#f66; font-weight:600; }
+.lms-ok { color:#51cf66; }
+#cl-detail-header .mod-name { color:var(--accent); font-weight:600; }
+#cl-detail-header .mod-daq { color:var(--dim); font-size:11px; }
 .detail-header .mod-name { color:var(--accent); font-weight:600; }
 .detail-header .mod-daq { color:var(--dim); font-size:11px; }
 
@@ -63,8 +115,14 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .bottom-panel { flex:1; display:flex; flex-direction:row; min-height:120px; overflow:hidden; }
 .peaks-table-wrap { flex:none; width:50%; overflow-y:auto; font-size:12px; min-width:200px; }
 .waveform-wrap { flex:1; min-width:200px; min-height:0; position:relative; }
-.copy-btn {
+.hist-controls {
     position:absolute; top:4px; right:4px; z-index:10;
+    display:flex; align-items:center; gap:6px; font-size:11px; color:var(--dim);
+}
+.hist-controls label { cursor:pointer; display:flex; align-items:center; gap:2px; }
+.hist-controls input[type="checkbox"] { accent-color:var(--accent); }
+.copy-btn {
+    z-index:10;
     background:var(--border); border:none; color:var(--dim); padding:2px 6px;
     border-radius:3px; cursor:pointer; font-size:12px; opacity:0.6;
 }
@@ -96,7 +154,8 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     padding:3px 12px; background:var(--panel); border-top:1px solid var(--border);
     font-size:11px; color:var(--dim); z-index:20;
 }
-.empty-msg { padding:20px; color:var(--dim); text-align:center; font-size:13px; }
+.empty-msg { color:var(--dim); font-size:12px; }
+.detail-header .empty-msg { padding:0; }
 
 /* file browser */
 .file-dialog {

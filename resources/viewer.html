@@ -21,7 +21,6 @@
     <div class="nav" id="nav-online" style="display:none">
         <span id="et-status" style="font-size:12px;color:#f66">● Disconnected</span>
         <select id="ring-select" style="background:var(--bg);border:1px solid var(--border);color:var(--text);padding:2px 6px;border-radius:3px;font-family:inherit;font-size:12px;min-width:120px"></select>
-        <button id="btn-clear-hist" title="Clear all histograms and occupancy">Clear Entries</button>
         <button id="follow-status" style="font-size:11px;color:#ffd43b;background:none;border:1px solid #ffd43b;padding:2px 8px;border-radius:3px;display:none;cursor:pointer"></button>
     </div>
     <div class="info" id="header-info"></div>
@@ -52,9 +51,15 @@
     </div>
 </div>
 
+<div class="tab-bar" id="tab-bar">
+    <button class="tab active" data-tab="dq">Waveform Data</button>
+    <button class="tab" data-tab="cluster">Clustering</button>
+    <button class="tab" data-tab="lms">Gain Monitoring</button>
+</div>
+
 <div class="main">
     <div class="geo-panel" id="geo-panel">
-        <div class="geo-toolbar">
+        <div class="geo-toolbar" id="geo-toolbar-dq">
             <label>Color:</label>
             <select id="color-metric">
                 <option value="integral">Peak Integral</option>
@@ -77,15 +82,57 @@
                 <input class="range-edit" id="range-max-edit" type="number" step="any">
                 <span class="range-btn" id="range-max-btn" title="Edit max">✎</span>
             </div>
+            <button id="btn-clear-dq" class="geo-clear-btn" title="Clear DQ histograms and occupancy">Clear</button>
+        </div>
+        <div class="geo-toolbar" id="geo-toolbar-cl" style="display:none">
+            <label>Cluster:</label>
+            <select id="cl-select"><option value="all">All</option></select>
+            <label>Log</label>
+            <input type="checkbox" id="cl-log-scale" checked>
+            <div class="color-bar">
+                <span class="range-val" id="cl-range-min-show">0</span>
+                <input class="range-edit" id="cl-range-min-edit" type="number" step="any">
+                <span class="range-btn" id="cl-range-min-btn" title="Edit min">&#x270E;</span>
+                <canvas id="cl-colorbar-canvas" width="120" height="12" style="cursor:pointer"></canvas>
+                <span class="range-val" id="cl-range-max-show">max</span>
+                <input class="range-edit" id="cl-range-max-edit" type="number" step="any">
+                <span class="range-btn" id="cl-range-max-btn" title="Edit max">&#x270E;</span>
+            </div>
+            <span style="color:var(--dim);font-size:11px" id="cl-summary"></span>
+            <button id="btn-clear-cl" class="geo-clear-btn" title="Clear cluster histogram">Clear</button>
+        </div>
+        <div class="geo-toolbar" id="geo-toolbar-lms" style="display:none">
+            <label>Ref:</label>
+            <select id="lms-ref-select"><option value="-1">None</option></select>
+            <label>Color:</label>
+            <select id="lms-color-metric">
+                <option value="mean">LMS Mean</option>
+                <option value="rms_frac">RMS/Mean</option>
+                <option value="warn">Warnings</option>
+            </select>
+            <label>Log</label>
+            <input type="checkbox" id="lms-log-scale">
+            <div class="color-bar">
+                <span class="range-val" id="lms-range-min-show">0</span>
+                <input class="range-edit" id="lms-range-min-edit" type="number" step="any">
+                <span class="range-btn" id="lms-range-min-btn" title="Edit min">&#x270E;</span>
+                <canvas id="lms-colorbar-canvas" width="120" height="12" style="cursor:pointer"></canvas>
+                <span class="range-val" id="lms-range-max-show">max</span>
+                <input class="range-edit" id="lms-range-max-edit" type="number" step="any">
+                <span class="range-btn" id="lms-range-max-btn" title="Edit max">&#x270E;</span>
+            </div>
+            <button id="btn-clear-lms" class="geo-clear-btn" title="Clear LMS data">Clear</button>
         </div>
         <div class="geo-canvas-wrap" id="geo-wrap">
             <canvas id="geo-canvas"></canvas>
+            <button id="btn-reset-view" class="geo-view-reset" title="Reset view (double-click also works)">Reset</button>
             <div class="geo-tooltip" id="geo-tooltip"></div>
         </div>
     </div>
 
     <div class="vdiv" id="div-main"></div>
 
+    <!-- Data Quality detail panel -->
     <div class="detail-panel" id="detail-panel">
         <div class="detail-header" id="detail-header">
             <div class="empty-msg">Click a module to view details</div>
@@ -95,12 +142,18 @@
         <div class="top-panel" id="top-panel">
             <div class="hist-cell">
                 <div id="inthist-div" style="width:100%;height:100%"></div>
-                <button id="btn-copy-inthist" class="copy-btn" title="Copy histogram data">copy</button>
+                <div class="hist-controls">
+                    <label><input type="checkbox" id="inthist-logx"> LogX</label>
+                    <label><input type="checkbox" id="inthist-logy"> LogY</label>
+                    <button id="btn-copy-inthist" class="copy-btn" title="Copy histogram data">copy</button>
+                </div>
             </div>
             <div class="hdiv" id="div-hist"></div>
             <div class="hist-cell">
                 <div id="poshist-div" style="width:100%;height:100%"></div>
-                <button id="btn-copy-poshist" class="copy-btn" title="Copy histogram data">copy</button>
+                <div class="hist-controls">
+                    <button id="btn-copy-poshist" class="copy-btn" title="Copy histogram data">copy</button>
+                </div>
             </div>
         </div>
 
@@ -111,7 +164,7 @@
             <div class="peaks-table-wrap" id="table-wrap">
                 <table class="peaks-table">
                     <thead><tr>
-                        <th>#</th><th>Pos</th><th>Time</th><th>Height</th>
+                        <th>#</th><th>Pos</th><th>Time [ns]</th><th>Height</th>
                         <th>Integral</th><th>Left</th><th>Right</th><th>OVF</th>
                     </tr></thead>
                     <tbody id="peaks-tbody"></tbody>
@@ -120,8 +173,74 @@
             <div class="vdiv" id="div-tw"></div>
             <div class="waveform-wrap" id="waveform-wrap">
                 <div id="waveform-div" style="width:100%;height:100%"></div>
-                <button id="btn-copy-wf" class="copy-btn" title="Copy waveform data">copy</button>
+                <div class="hist-controls">
+                    <button id="btn-copy-wf" class="copy-btn" title="Copy waveform data">copy</button>
+                </div>
             </div>
+        </div>
+    </div>
+
+    <!-- Clustering detail panel -->
+    <div class="detail-panel" id="cluster-panel" style="display:none">
+        <div class="cl-hist-panel" id="cl-hist-panel">
+            <div id="cl-energy-hist" style="width:100%;height:100%"></div>
+            <div class="hist-controls">
+                <label><input type="checkbox" id="clhist-logx"> LogX</label>
+                <label><input type="checkbox" id="clhist-logy"> LogY</label>
+                <button id="btn-copy-cl-hist" class="copy-btn" title="Copy histogram data">copy</button>
+            </div>
+        </div>
+        <div class="hdiv" id="div-cl-ht"></div>
+        <div class="cl-stat-row">
+            <div class="cl-stat-cell">
+                <div id="cl-nclust-hist" style="width:100%;height:100%"></div>
+                <div class="hist-controls">
+                    <button id="btn-copy-nclust" class="copy-btn" title="Copy data">copy</button>
+                </div>
+            </div>
+            <div class="vdiv" id="div-cl-stat"></div>
+            <div class="cl-stat-cell">
+                <div id="cl-nblocks-hist" style="width:100%;height:100%"></div>
+                <div class="hist-controls">
+                    <button id="btn-copy-nblocks" class="copy-btn" title="Copy data">copy</button>
+                </div>
+            </div>
+        </div>
+        <div class="hdiv" id="div-cl-st"></div>
+        <div class="cluster-info-wrap" id="cl-table-wrap">
+            <table class="peaks-table" id="cl-table">
+                <thead><tr>
+                    <th>#</th><th>Center</th><th>Energy [MeV]</th>
+                    <th>X [mm]</th><th>Y [mm]</th><th>Blocks</th>
+                </tr></thead>
+                <tbody id="cl-tbody"></tbody>
+            </table>
+        </div>
+        <div id="cl-detail-header">
+            <span class="cl-info-text" id="cl-info-text">Click a module or select a cluster</span>
+        </div>
+    </div>
+
+    <!-- LMS Monitoring panel -->
+    <div class="detail-panel" id="lms-panel" style="display:none">
+        <div class="lms-plot-panel" id="lms-plot-panel">
+            <div id="lms-plot" style="width:100%;height:100%"></div>
+            <div class="hist-controls">
+                <button id="btn-copy-lms" class="copy-btn" title="Copy LMS data">copy</button>
+            </div>
+        </div>
+        <div class="hdiv" id="div-lms-ht"></div>
+        <div class="lms-summary-wrap" id="lms-summary-wrap">
+            <table class="peaks-table" id="lms-table">
+                <thead><tr>
+                    <th>Module</th><th>Mean</th><th>RMS</th>
+                    <th>RMS/Mean</th><th>Count</th><th>Status</th>
+                </tr></thead>
+                <tbody id="lms-tbody"></tbody>
+            </table>
+        </div>
+        <div id="lms-detail-header">
+            <span class="cl-info-text" id="lms-info-text">Click a module to view LMS history</span>
         </div>
     </div>
 </div>
