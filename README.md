@@ -73,7 +73,7 @@ et_start -f /tmp/test_et -s 100000 -n 500
 
 # Terminal 2: start monitor (PRad example)
 ./bin/evc_monitor -D ../database/prad1/prad_daq_config.json \
-  -c ../database/config_prad1.json
+  -c ../database/prad1/prad_config.json
 
 # Terminal 3: feed events
 ./bin/et_feeder prad.evio -f /tmp/test_et -i 50 -s 10000 -n 5000

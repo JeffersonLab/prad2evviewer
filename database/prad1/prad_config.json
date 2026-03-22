@@ -1,0 +1,72 @@
+{
+    "online": {
+        "et_host": "localhost",
+        "et_port": 11111,
+        "et_file": "/tmp/test_et",
+        "et_station": "prad_monitor",
+        "ring_buffer_size": 20,
+        "refresh_ms": {
+            "event": 200,
+            "ring": 500,
+            "histogram": 2000,
+            "lms": 2000
+        }
+    },
+    "waveform": {
+        "time_cut": {"min": 160, "max": 220},
+        "integral_hist": {"min": 0, "max": 20000, "step": 100},
+        "time_hist": {"min": 0, "max": 400, "step": 4},
+        "thresholds": {
+            "min_peak_height": 10.0,
+            "min_secondary_peak_ratio": 0.3
+        }
+    },
+    "clustering": {
+        "min_module_energy": 1.0,
+        "min_center_energy": 10.0,
+        "min_cluster_energy": 50.0,
+        "min_cluster_size": 1,
+        "corner_conn": false,
+        "split_iter": 6,
+        "least_split": 0.01,
+        "log_weight_thres": 3.6,
+        "skip_trigger_bits": [2, 3],
+        "energy_hist": {
+            "min": 0,
+            "max": 3000,
+            "step": 10
+        },
+        "nclusters_hist": {
+            "min": 0,
+            "max": 20,
+            "step": 1
+        },
+        "nblocks_hist": {
+            "min": 0,
+            "max": 40,
+            "step": 1
+        }
+    },
+    "lms_monitor": {
+        "trigger_bit": 2,
+        "warn_threshold": 0.1,
+        "warn_min_mean": 100,
+        "max_history": 5000,
+        "reference_channels": ["LMS1", "LMS2", "LMS3"]
+    },
+    "color_ranges": {
+        "dq:integral":  [0, 10000],
+        "dq:height":    [0, 1000],
+        "dq:count":     [0, 10],
+        "dq:time":      [0, 400],
+        "dq:pedestal":  [0, 500],
+        "dq:occupancy": [0, 100],
+        "cluster:energy": [0, 1000],
+        "lms:mean":     [0, 5000],
+        "lms:rms_frac": [0, 0.2]
+    },
+    "calibration": {
+        "adc_to_mev": 0.078,
+        "calibration_file": "prad1/prad_calibration.json"
+    }
+}
