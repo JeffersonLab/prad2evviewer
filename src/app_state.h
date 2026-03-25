@@ -26,6 +26,7 @@
 struct AppState {
     // ---- Configuration (set once at startup, then read-only) ---------------
     HistConfig hist_cfg;
+    uint32_t waveform_trigger_mask = 0;  // 0 = accept all
     int hist_nbins = 0;
     int pos_nbins  = 0;
 
@@ -38,11 +39,10 @@ struct AppState {
     nlohmann::json base_config;                 // modules, daq, crate_roc for /api/config
 
     // LMS config
-    int      lms_trigger_bit  = 16;
+    uint32_t lms_trigger_mask = 0;       // 0 = accept all
     float    lms_warn_thresh  = 0.1f;
     float    lms_warn_min_mean = 100.f;  // warn if mean below this
     int      lms_max_history  = 5000;
-    uint32_t lms_trigger_mask = 0;
 
     // LMS reference channels (for normalization)
     struct LmsRefChannel {
@@ -56,6 +56,24 @@ struct AppState {
     int refresh_ring_ms  = 500;
     int refresh_hist_ms  = 2000;
     int refresh_lms_ms   = 2000;
+
+    // Physics / coordinate config
+    float target_x=0, target_y=0, target_z=0;  // target position in lab frame (mm)
+    DetectorTransform hycal_transform;           // HyCal position + tilting
+    float ea_angle_min=0.f, ea_angle_max=8.f, ea_angle_step=0.2f;   // degrees
+    float ea_energy_min=0.f, ea_energy_max=3000.f, ea_energy_step=100.f; // MeV
+    float beam_energy = 2200.f;  // MeV (for elastic line overlay)
+    uint32_t physics_trigger_mask = 0;  // 0 = accept all
+
+    // Møller selection config
+    float moller_energy_tol = 0.1f;     // energy sum within this fraction of beam_energy
+    float moller_angle_min  = 1.0f;     // deg — require one cluster in this range
+    float moller_angle_max  = 1.2f;     // deg
+    // Møller XY histogram
+    float moller_xy_x_min=-600.f, moller_xy_x_max=600.f, moller_xy_x_step=5.f;  // mm
+    float moller_xy_y_min=-600.f, moller_xy_y_max=600.f, moller_xy_y_step=5.f;  // mm
+    // Møller energy histogram
+    float moller_e_min=0.f, moller_e_max=2500.f, moller_e_step=10.f; // MeV
 
     // EPICS config
     int   epics_max_history = 5000;
@@ -77,7 +95,7 @@ struct AppState {
     std::map<std::string, std::pair<float, float>> color_range_defaults;
 
     // cluster config
-    uint32_t cluster_skip_mask = 0;
+    uint32_t cluster_trigger_mask = 0;   // 0 = accept all
     float    adc_to_mev        = 1.0f;
     float    cl_hist_min       = 0.f;
     float    cl_hist_max       = 3000.f;
@@ -100,6 +118,10 @@ struct AppState {
     Histogram cluster_energy_hist;
     Histogram nclusters_hist;
     Histogram nblocks_hist;
+    Histogram2D energy_angle_hist;
+    Histogram2D moller_xy_hist;
+    Histogram   moller_energy_hist;
+    int         moller_events = 0;
     int       cluster_events_processed = 0;
 
     // ---- LMS data (guarded by lms_mtx) -------------------------------------
@@ -173,6 +195,8 @@ struct AppState {
     nlohmann::json apiLmsSummary(int ref_index = -1) const;
     nlohmann::json apiLmsModule(int module_index, int ref_index = -1) const;
     nlohmann::json apiLmsRefChannels() const;
+    nlohmann::json apiEnergyAngle() const;
+    nlohmann::json apiMoller() const;
     nlohmann::json apiEpicsChannels() const;
     nlohmann::json apiEpicsChannel(const std::string &name) const;
     nlohmann::json apiEpicsLatest() const;

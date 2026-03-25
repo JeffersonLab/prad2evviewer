@@ -3,14 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PRad2 HyCal</title>
+<title>PRad-II HyCal</title>
 <script src="plotly-2.35.0.min.js"></script>
 <link rel="stylesheet" href="viewer.css">
 </head>
 <body>
 
 <div class="header">
-    <h1 id="app-title">PRad2 HyCal</h1>
+    <h1 id="app-title">PRad-II HyCal</h1>
     <div class="nav" id="nav-file">
         <button id="btn-open" title="Open file" style="display:none">📂 Open</button>
         <button id="btn-prev" title="← key">◀</button>
@@ -85,6 +85,7 @@
     <button class="tab" data-tab="cluster">Clustering</button>
     <button class="tab" data-tab="lms">Gain Monitoring<span class="tab-dot" id="lms-dot"></span></button>
     <button class="tab" data-tab="epics">EPICS<span class="tab-dot" id="epics-dot"></span></button>
+    <button class="tab" data-tab="physics">Physics</button>
 </div>
 
 <div class="main">
@@ -290,12 +291,35 @@
             </table>
         </div>
     </div>
+
+    <!-- Physics panel -->
+    <div class="physics-outer" id="physics-outer" style="display:none">
+        <div class="physics-toolbar">
+            <label>Log Z</label><input type="checkbox" id="physics-logz" checked>
+            <label style="margin-left:12px">Elastic ep</label><input type="checkbox" id="physics-elastic">
+            <span id="physics-stats" style="color:var(--dim);font-size:11px;margin-left:12px"></span>
+        </div>
+        <div class="physics-grid">
+            <div class="physics-cell">
+                <div id="physics-plot" style="width:100%;height:100%"></div>
+            </div>
+            <div class="physics-right">
+                <div class="physics-cell-top">
+                    <div id="moller-xy-plot" style="width:100%;height:100%"></div>
+                </div>
+                <div class="physics-cell-bot">
+                    <div id="moller-energy-plot" style="width:100%;height:100%"></div>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <div class="status-bar" id="status-bar">Ready</div>
 
 <script src="report.js"></script>
 <script src="epics.js"></script>
+<script src="physics.js"></script>
 <script src="viewer.js"></script>
 </body>
 </html>

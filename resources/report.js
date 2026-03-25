@@ -255,6 +255,94 @@ registerReportSection({id:'cluster',title:'Clustering',order:20,
     }
 });
 
+// --- Physics ---
+registerReportSection({id:'physics',title:'Physics',order:25,
+    generate:async()=>{
+        let data,ml;
+        try{ data=await fetch('/api/physics/energy_angle').then(r=>r.json()); }catch(e){}
+        try{ ml=await fetch('/api/physics/moller').then(r=>r.json()); }catch(e){}
+        if((!data||!data.events)&&(!ml||!ml.total_events)) return null;
+
+        let md='## Physics\n\n';
+        const evts=data?.events||ml?.total_events||0;
+        md+=`Events: ${evts}`;
+        if(data?.beam_energy) md+=` | Beam: ${data.beam_energy} MeV`;
+        if(data?.hycal_z) md+=` | HyCal z: ${data.hycal_z/1000}m`;
+        if(ml) md+=` | Møller: ${ml.moller_events}`;
+        md+='\n\n';
+
+        // energy vs angle heatmap + elastic line
+        if(data&&data.bins&&data.bins.length&&data.nx){
+            try{
+                const img=await plotToImage(async div=>{
+                    const z=[];
+                    for(let iy=0;iy<data.ny;iy++)
+                        z.push(data.bins.slice(iy*data.nx,(iy+1)*data.nx).map(v=>v>0?Math.log10(v):null));
+                    const x=[];for(let i=0;i<data.nx;i++) x.push(data.angle_min+(i+0.5)*data.angle_step);
+                    const y=[];for(let i=0;i<data.ny;i++) y.push(data.energy_min+(i+0.5)*data.energy_step);
+                    const traces=[{z,x,y,type:'heatmap',colorscale:'Hot',
+                        colorbar:{title:'log₁₀(counts)',titleside:'right'}}];
+                    if(data.beam_energy>0){
+                        const ex=[],ey=[];
+                        for(let th=data.angle_min+0.1;th<=data.angle_max;th+=0.05){
+                            const e=data.beam_energy/(1+(data.beam_energy/938.272)*(1-Math.cos(th*Math.PI/180)));
+                            if(e>=data.energy_min&&e<=data.energy_max){ex.push(th);ey.push(e);}
+                        }
+                        traces.push({x:ex,y:ey,mode:'lines',line:{color:'#00ff88',width:2,dash:'dot'},
+                            name:'ep elastic'});
+                    }
+                    await Plotly.newPlot(div,traces,
+                        {...RPL,xaxis:{...RPL.xaxis,title:'Scattering Angle (deg)'},
+                         yaxis:{...RPL.yaxis,title:'Energy (MeV)'},margin:{l:55,r:80,t:10,b:40},
+                         showlegend:!!data.beam_energy,legend:{x:0.7,y:0.95,font:{size:10,color:'#aaa'}}});
+                },800,500);
+                addAttachment(img,'energy_vs_angle.png','Energy vs Angle');
+                md+=`![Energy vs Angle](energy_vs_angle.png)\n\n`;
+            }catch(e){}
+        }
+
+        // Møller XY heatmap
+        if(ml&&ml.xy_bins&&ml.xy_bins.length&&ml.xy_nx&&ml.moller_events>0){
+            const cuts=ml.cuts||{};
+            md+=`### Møller Selection\n\nCuts: θ ∈ [${cuts.angle_min}, ${cuts.angle_max}]°, `
+               +`E_sum within ±${((cuts.energy_tolerance||0.1)*100).toFixed(0)}% of beam\n\n`;
+            try{
+                const img=await plotToImage(async div=>{
+                    const z=[];
+                    for(let iy=0;iy<ml.xy_ny;iy++)
+                        z.push(ml.xy_bins.slice(iy*ml.xy_nx,(iy+1)*ml.xy_nx).map(v=>v>0?Math.log10(v):null));
+                    const x=[];for(let i=0;i<ml.xy_nx;i++) x.push(ml.xy_x_min+(i+0.5)*ml.xy_x_step);
+                    const y=[];for(let i=0;i<ml.xy_ny;i++) y.push(ml.xy_y_min+(i+0.5)*ml.xy_y_step);
+                    await Plotly.newPlot(div,[{z,x,y,type:'heatmap',colorscale:'Hot',
+                        colorbar:{title:'log₁₀(counts)',titleside:'right'}}],
+                        {...RPL,xaxis:{...RPL.xaxis,title:'X (mm)',scaleanchor:'y',scaleratio:1},
+                         yaxis:{...RPL.yaxis,title:'Y (mm)'},margin:{l:55,r:80,t:10,b:40}});
+                },600,600);
+                addAttachment(img,'moller_xy.png','Møller XY Position');
+                md+=`![Møller XY](moller_xy.png)\n\n`;
+            }catch(e){}
+
+            // Møller energy histogram
+            const h=ml.energy_hist;
+            if(h&&h.bins&&h.bins.length){
+                try{
+                    const img=await plotToImage(async div=>{
+                        const x=[];for(let i=0;i<h.bins.length;i++) x.push(h.min+(i+0.5)*h.step);
+                        await Plotly.newPlot(div,[{x,y:h.bins,type:'bar',
+                            marker:{color:'#00b4d8'}}],
+                            {...RPL,xaxis:{...RPL.xaxis,title:'Energy (MeV)'},
+                             yaxis:{...RPL.yaxis,title:'Counts'},
+                             margin:{l:55,r:20,t:10,b:40},bargap:0});
+                    },800,400);
+                    addAttachment(img,'moller_energy.png','Møller Cluster Energy');
+                    md+=`![Møller Energy](moller_energy.png)\n\n`;
+                }catch(e){}
+            }
+        }
+        return md;
+    }
+});
+
 // --- LMS Monitoring ---
 registerReportSection({id:'lms',title:'LMS Monitoring',order:30,
     generate:async()=>{
@@ -264,10 +352,10 @@ registerReportSection({id:'lms',title:'LMS Monitoring',order:30,
         const d=await fetch(`/api/lms/summary${refQ}`).then(r=>r.json());
         lmsSummaryData=d;
         const lmsEvents=lmsSummaryData?lmsSummaryData.events||0:0;
-        const trigBit=lmsSummaryData?lmsSummaryData.trigger_bit:'?';
+        const trigMask=lmsSummaryData?'0x'+(lmsSummaryData.trigger_mask||0).toString(16):'?';
         if(!lmsSummaryData||!lmsSummaryData.modules||
             !Object.keys(lmsSummaryData.modules).length)
-            return `## LMS Monitoring\n\nLMS events received: ${lmsEvents} (trigger bit = ${trigBit})\n\n`;
+            return `## LMS Monitoring\n\nLMS events received: ${lmsEvents} (trigger mask = ${trigMask})\n\n`;
         const allEntries=Object.entries(lmsSummaryData.modules)
             .map(([idx,m])=>({idx:parseInt(idx),...m}));
 
@@ -364,7 +452,7 @@ async function generateReport(reportBy,runNumber){
         const samples=mode==='online'?sampleCount:totalEvents;
         const runStr=runNumber?String(runNumber).padStart(6,'0'):'';
         const titleRun=runStr?`Run ${runStr}: `:'';
-        let header=`# ${titleRun}PRad2 HyCal Monitor Report\n\n`;
+        let header=`# ${titleRun}PRad-II HyCal Monitor Report\n\n`;
         header+=`- **Generated:** ${ts}\n`;
         header+=`- **Samples:** ${samples}\n`;
         if(runNumber) header+=`- **DAQ Run:** ${runNumber}\n`;
@@ -394,7 +482,7 @@ async function generateReport(reportBy,runNumber){
                 header+=`- **Gain Monitoring Warnings:** None\n`;
         }
         let md=header+`\n---\n\n`+sectionsMd;
-        md+=`---\n*PRad2 HyCal Online Monitor — Report generated ${ts}*\n`;
+        md+=`---\n*PRad-II HyCal Online Monitor — Report generated ${ts}*\n`;
         statusBar.textContent=prevStatus;
         return {md, attachments:reportAttachments};
     }catch(err){
