@@ -418,7 +418,7 @@ function showWaveform(mod){
         wfStackTraces.push({x:Array.from(x), y:Array.from(samples)});
 
         // enforce max stack size
-        const maxStack=parseInt(document.getElementById('wf-stack-max').value)||200;
+        const maxStack=200;
         while(wfStackTraces.length>maxStack) wfStackTraces.shift();
 
         // build traces: all stacked waveforms in dim color, no peaks
@@ -1543,9 +1543,13 @@ function init(){
     // waveform stacking controls
     document.getElementById('wf-stack').onchange=e=>{
         wfStackEnabled=e.target.checked;
-        document.getElementById('wf-stack-max-label').style.display=wfStackEnabled?'':'none';
         document.getElementById('wf-stack-count').style.display=wfStackEnabled?'':'none';
+        document.getElementById('btn-wf-stack-reset').style.display=wfStackEnabled?'':'none';
         if(!wfStackEnabled){ wfStackTraces=[]; wfStackModKey=''; }
+        if(selectedModule) showWaveform(selectedModule);
+    };
+    document.getElementById('btn-wf-stack-reset').onclick=()=>{
+        wfStackTraces=[]; wfStackModKey='';
         if(selectedModule) showWaveform(selectedModule);
     };
 
