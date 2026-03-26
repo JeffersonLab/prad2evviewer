@@ -20,6 +20,9 @@ let refreshEventMs=200, refreshRingMs=500, refreshHistMs=2000, refreshLmsMs=2000
 // occupancy data (fetched once per file load when histograms enabled)
 let occData={}, occTcutData={}, occTotal=0;
 let currentWaveform=null;  // {x:[], y:[]} for copy button
+let wfStackEnabled=false;
+let wfStackTraces=[];      // [{x,y},...] accumulated waveforms
+let wfStackModKey='';      // module key for current stack (clear on module change)
 let currentHist={};  // {divId: {x:[], y:[]}} for histogram copy
 
 // color range: per-tab user overrides, keyed by "tab:metric"
@@ -405,6 +408,45 @@ function showWaveform(mod){
 
     const samples=d.s, peaks=d.pk||[], x=samples.map((_,i)=>i);
     currentWaveform={x, y:Array.from(samples)};
+
+    // --- stacking mode ---
+    if(wfStackEnabled){
+        // reset stack if module changed
+        if(key!==wfStackModKey){ wfStackTraces=[]; wfStackModKey=key; }
+
+        // add current waveform to stack
+        wfStackTraces.push({x:Array.from(x), y:Array.from(samples)});
+
+        // enforce max stack size
+        const maxStack=parseInt(document.getElementById('wf-stack-max').value)||200;
+        while(wfStackTraces.length>maxStack) wfStackTraces.shift();
+
+        // build traces: all stacked waveforms in dim color, no peaks
+        const traces=wfStackTraces.map(w=>({
+            x:w.x, y:w.y, type:'scatter', mode:'lines',
+            line:{color:'rgba(119,119,170,0.25)', width:1},
+            showlegend:false, hoverinfo:'skip',
+        }));
+        // highlight the latest waveform
+        if(wfStackTraces.length>0){
+            const last=wfStackTraces[wfStackTraces.length-1];
+            traces.push({x:last.x, y:last.y, type:'scatter', mode:'lines',
+                name:'Latest', line:{color:'#7777aa', width:1.5}, showlegend:false});
+        }
+
+        document.getElementById('wf-stack-count').textContent=`${wfStackTraces.length}/${maxStack}`;
+        Plotly.react('waveform-div',traces,{...PL,
+            title:{text:`${mod.n} — Stacked (${wfStackTraces.length})`,font:{size:11,color:'#ccc'}},
+            xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC'},
+        },PC2);
+
+        // skip peaks table in stack mode
+        document.getElementById('peaks-tbody').innerHTML=
+            '<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">Stack mode — peaks hidden</td></tr>';
+        showHistograms(mod); drawGeo(); return;
+    }
+
+    // --- normal (single event) mode ---
     const traces=[
         {x,y:samples,type:'scatter',mode:'lines',name:'Waveform',line:{color:'#7777aa',width:1}},
         {x:[0,samples.length-1],y:[d.pm,d.pm],type:'scatter',mode:'lines',name:'Pedestal',line:{color:'#555',width:1,dash:'dash'}},
@@ -1497,6 +1539,15 @@ function init(){
             try{Plotly.Plots.resize('cl-nclust-hist');}catch(e){}
             try{Plotly.Plots.resize('cl-nblocks-hist');}catch(e){}
         });
+
+    // waveform stacking controls
+    document.getElementById('wf-stack').onchange=e=>{
+        wfStackEnabled=e.target.checked;
+        document.getElementById('wf-stack-max-label').style.display=wfStackEnabled?'':'none';
+        document.getElementById('wf-stack-count').style.display=wfStackEnabled?'':'none';
+        if(!wfStackEnabled){ wfStackTraces=[]; wfStackModKey=''; }
+        if(selectedModule) showWaveform(selectedModule);
+    };
 
     // histogram log-scale toggles
     document.getElementById('inthist-logx').onchange=()=>{ if(selectedModule) showHistograms(selectedModule); };

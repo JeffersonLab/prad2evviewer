@@ -202,6 +202,9 @@
             <div class="waveform-wrap" id="waveform-wrap">
                 <div id="waveform-div" style="width:100%;height:100%"></div>
                 <div class="hist-controls">
+                    <label title="Overlay waveforms across events"><input type="checkbox" id="wf-stack"> Stack</label>
+                    <label id="wf-stack-max-label" style="display:none" title="Max overlaid waveforms">Max:<input type="number" id="wf-stack-max" value="200" min="10" max="5000" step="10" style="width:52px;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:1px 4px;border-radius:3px;font-family:inherit;font-size:11px"></label>
+                    <span id="wf-stack-count" style="display:none;color:var(--dim);font-size:11px"></span>
                     <button id="btn-copy-wf" class="copy-btn" title="Copy waveform data">copy</button>
                 </div>
             </div>
