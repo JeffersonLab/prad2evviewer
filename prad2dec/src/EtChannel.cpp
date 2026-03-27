@@ -76,10 +76,13 @@ status EtChannel::Open(const std::string &station)
 // detach from the station
 void EtChannel::Close()
 {
-    if (IsETOpen() && (att_id != ID_NULL)) {
-        et_status(et_station_detach(et_id, att_id), true);
+    if (et_id != nullptr && att_id != ID_NULL) {
+        // Detach and remove station.  These may fail if the ET system is
+        // dead, but we reset our handles either way so Disconnect() can
+        // proceed to release the memory mapping.
+        et_station_detach(et_id, att_id);
         att_id = ID_NULL;
-        et_status(et_station_remove(et_id, stat_id), true);
+        et_station_remove(et_id, stat_id);
         stat_id = ID_NULL;
     }
 }
@@ -87,8 +90,11 @@ void EtChannel::Close()
 void EtChannel::Disconnect()
 {
     Close();
-    if (IsETOpen()) {
-        et_status(et_close(et_id), true);
+    if (et_id != nullptr) {
+        // Always call et_close to release the memory mapping, even if the
+        // ET system is dead.  Skipping this leaks the mmap region until
+        // the process exits.
+        et_close(et_id);
         et_id = nullptr;
     }
 }
