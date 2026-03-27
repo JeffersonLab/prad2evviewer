@@ -3,7 +3,7 @@
 // get the ratio of expected/measured peak position, and write to a database file. 
 //=============================================================================
 //
-// Usage: epCalib <input.evio> [-o output_calib_file] [-D daq_config.json] [-n max_events]
+// Usage: epCalib <input.root> [-o output_calib_file] [-D daq_config.json] [-n max_events]
 //
 // Reads rawdata.root (peak mode), runs HyCal clustering, fills per-module energy histograms
 //=============================================================================
@@ -17,6 +17,8 @@
 
 #include <TFile.h>
 #include <TTree.h>
+#include <TLatex.h>
+#include <TCanvas.h>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -93,7 +95,7 @@ int main(int argc, char *argv[])
     if (optind < argc) input = argv[optind];
 
     if (input.empty()) {
-        std::cerr << "Usage: epCalib <input.evio> [-o output_calib_file] "
+        std::cerr << "Usage: epCalib <iput.root> [-o output_calib_file] "
                   << " [-D daq_config.json] [-n max_events]\n";
         return 1;
     }
@@ -170,10 +172,16 @@ int main(int argc, char *argv[])
                                   "#cbar#bar{E_{recon}} - E_{expect}#cbar #/ E_{expect}",
                                   34, -17.*20.75, 17.*20.75, 34, -17.*20.75, 17.*20.75);
     std::vector<float> ratio_values(nmod, 0.f);
+    TLatex t;
+    t.SetTextSize(0.01);
+    t.SetTextColor(kBlack);
+    TCanvas *c = new TCanvas("c", "Calibration", 1200, 1200);
+    c->cd();
     for (int m = 0; m < nmod; m++) {
         auto [peak, resolution] = physics.FitPeakResolution(m);
         if (peak > 0 && resolution > 0) {
             std::string name = hycal.module(m).name;
+            if(name[0] != 'W') continue; 
             float theta_deg = atan(sqrt(pow(hycal.module(m).x, 2) + pow(hycal.module(m).y, 2)) / hycal_z) * 180.f / 3.14159265f;
             float expected_peak = physics.ExpectedEnergy(theta_deg, Ebeam, "ep");
             float ratio = expected_peak / peak;
@@ -183,8 +191,15 @@ int main(int argc, char *argv[])
             double current_factor = hycal.GetCalibConstant(hycal.module(m).id);
             double new_factor = current_factor * ratio;
             hycal.SetCalibConstant(hycal.module(m).id, new_factor);
+
+            module_ratio->Fill(hycal.module(m).x, hycal.module(m).y, abs(1.f-1.f/ratio));
+            t.DrawLatex(hycal.module(m).x, hycal.module(m).y, name.c_str());
         }
     }
+    module_ratio->SetStats(0);
+    module_ratio->Draw("COLZ");
+    module_ratio->Write();
+    c->Write();
     //write the new calibration constants to database file
     hycal.PrintCalibConstants(output_calib_file);
     outfile.mkdir("module_energy");

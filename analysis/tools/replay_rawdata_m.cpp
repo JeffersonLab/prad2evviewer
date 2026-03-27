@@ -1,12 +1,13 @@
 //=============================================================================
 // replay_rawdata_m — convert multiple EVIO files to ROOT trees (multi-threaded)
 //
-// Usage: replay_rawdata_m <evio_dir> [-f max_files] [-n max_events] [-p] [-j num_threads]
+// Usage: replay_rawdata_m <evio_dir> [-f max_files] [-n max_events] [-p] [-j num_threads] [-o merged.root]
 //   -f  max files to process (default: all)
 //   -n  max events per file (default: all)
 //   -p  include peak analysis branches
 //   -j  number of threads (default: 4)
 //   -D  DAQ configuration file
+//   -o  merged output ROOT file (optional, skipped if not given)
 //=============================================================================
 
 #include "Replay.h"
@@ -20,6 +21,8 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+
+#include <TFileMerger.h>
 
 #ifndef DATABASE_DIR
 #define DATABASE_DIR "."
@@ -50,7 +53,7 @@ static std::string makeOutputPath(const std::string &evio_path)
 
 int main(int argc, char *argv[])
 {
-    std::string input, daq_config;
+    std::string input, daq_config, merged_output;
     int max_events = -1;
     int max_files = -1;
     bool peaks = false;
@@ -60,12 +63,13 @@ int main(int argc, char *argv[])
     daq_config = db_dir + "/daq_config.json"; // default DAQ config for PRad2
 
     int opt;
-    while ((opt = getopt(argc, argv, "f:n:D:j:p")) != -1) {
+    while ((opt = getopt(argc, argv, "f:n:D:j:o:p")) != -1) {
         switch (opt) {
             case 'f': max_files = std::atoi(optarg); break;
             case 'n': max_events = std::atoi(optarg); break;
             case 'D': daq_config = optarg; break;
             case 'j': num_threads = std::atoi(optarg); break;
+            case 'o': merged_output = optarg; break;
             case 'p': peaks = true; break;
         }
     }
@@ -73,7 +77,7 @@ int main(int argc, char *argv[])
 
     if (input.empty()) {
         std::cerr << "Usage: replay_rawdata_m <evio_dir> [-f max_files] [-j threads]"
-                  << " [-D daq_config.json] [-n N] [-p]\n";
+                  << " [-D daq_config.json] [-n N] [-p] [-o merged.root]\n";
         return 1;
     }
 
@@ -93,6 +97,7 @@ int main(int argc, char *argv[])
     std::atomic<int> next_file{0};
     std::mutex io_mtx;
     std::atomic<int> errors{0};
+    std::vector<std::string> merged_files;
 
     auto worker = [&]() {
         // each thread gets its own Replay instance (own EvChannel, own buffers)
@@ -107,10 +112,12 @@ int main(int argc, char *argv[])
             bool ok = replay.Process(evio_files[idx], out, max_events, peaks, daq_config);
 
             std::lock_guard<std::mutex> lk(io_mtx);
-            if (ok)
+            if (ok) {
                 std::cout << "  [" << (idx + 1) << "/" << num_files << "] "
                           << evio_files[idx] << " -> " << out << "\n";
-            else {
+                if (!merged_output.empty())
+                    merged_files.push_back(out);
+            } else {
                 std::cerr << "  [" << (idx + 1) << "/" << num_files << "] FAILED: "
                           << evio_files[idx] << "\n";
                 errors++;
@@ -128,5 +135,20 @@ int main(int argc, char *argv[])
     std::cout << "Done: " << num_files << " files"
               << (errors > 0 ? ", " + std::to_string(errors.load()) + " errors" : "")
               << "\n";
+
+    if (!merged_output.empty() && !merged_files.empty()) {
+        std::cout << "Merging " << merged_files.size() << " files into " << merged_output << " ...\n";
+        TFileMerger merger(/*isLocal=*/false);
+        merger.OutputFile(merged_output.c_str(), "RECREATE");
+        for (auto &f : merged_files)
+            merger.AddFile(f.c_str());
+        if (merger.Merge())
+            std::cout << "Merged -> " << merged_output << "\n";
+        else {
+            std::cerr << "Merge failed!\n";
+            return 1;
+        }
+    }
+
     return errors > 0 ? 1 : 0;
 }
