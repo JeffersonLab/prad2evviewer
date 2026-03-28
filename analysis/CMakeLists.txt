@@ -5,7 +5,7 @@ include(${ROOT_USE_FILE})
 message(STATUS "ROOT: ${ROOT_VERSION} at ${ROOT_DIR}")
 
 # shared sources + deps for all analysis tools
-set(ANA_SOURCES src/Replay.cpp src/PhysicsTools.cpp)
+set(ANA_SOURCES src/Replay.cpp src/PhysicsTools.cpp src/MatchingTools.cpp)
 set(ANA_DEPS prad2dec prad2ana nlohmann_json::nlohmann_json
     ROOT::Core ROOT::Tree ROOT::RIO ROOT::Hist ROOT::Graf ROOT::Gpad)
 

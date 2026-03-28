@@ -1,0 +1,196 @@
+// MatchingTools.cpp — tools for matching HyCal clusters to GEM hits
+//=============================================================================
+// Adapted from PRadAnalyzer/PRadDetMatch.cpp.
+// Usage:
+//   MatchingTools matcher;
+//   auto matches = matcher.Match(hycalHits, gem1Hits, gem2Hits, gem3Hits, gem4Hits);
+//   for (auto &m : matches) { 
+//       m.cluster is the HyCal cluster
+//       m.gem is the best-matched GEM hit (if any)
+//       m.gem1, m.gem2, m.gem3, m.gem4 are the candidates in each plane (sorted by distance)
+//       m.mflag has bits set for each plane with a match
+//       m.hycal_idx is the index of the cluster in the original vector
+//   }
+//=============================================================================
+
+
+#include "MatchingTools.h"
+#include <algorithm>
+#include <set>
+
+namespace analysis {
+
+// ============================================================================
+// Projection
+// ============================================================================
+
+ProjectHit MatchingTools::GetProjectionHits(float x, float y, float z,
+                                            float projection_z) const
+{
+    float scale = projection_z / z;
+    return ProjectHit(x * scale, y * scale, projection_z);
+}
+
+// Distance between HyCal cluster and GEM hit after projecting GEM to HyCal z
+float MatchingTools::ProjectionDistance(const fdec::ClusterHit &h,
+                                       const fdec::GEMHit &g) const
+{
+    ProjectHit proj = GetProjectionHits(g.x, g.y, g.z, hycal_z_);
+    float dx = h.x - proj.x_proj;
+    float dy = h.y - proj.y_proj;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+// Distance between two GEM hits projected to a common reference z
+float MatchingTools::ProjectionDistance(const fdec::GEMHit &g1,
+                                       const fdec::GEMHit &g2,
+                                       float ref_z) const
+{
+    ProjectHit p1 = GetProjectionHits(g1.x, g1.y, g1.z, ref_z);
+    ProjectHit p2 = GetProjectionHits(g2.x, g2.y, g2.z, ref_z);
+    float dx = p1.x_proj - p2.x_proj;
+    float dy = p1.y_proj - p2.y_proj;
+    return std::sqrt(dx * dx + dy * dy);
+}
+
+// ============================================================================
+// Pre-match: check if a GEM hit falls within the matching window of a cluster
+// ============================================================================
+
+bool MatchingTools::PreMatch(const fdec::ClusterHit &hycal,
+                             const fdec::GEMHit &gem) const
+{
+    ProjectHit proj = GetProjectionHits(gem.x, gem.y, gem.z, hycal_z_);
+    float dx = std::fabs(hycal.x - proj.x_proj);
+    float dy = std::fabs(hycal.y - proj.y_proj);
+
+    if (squareSel_) {
+        return (dx <= matchRange_) && (dy <= matchRange_);
+    } else {
+        return (dx * dx + dy * dy) <= matchRange_ * matchRange_;
+    }
+}
+
+// ============================================================================
+// Post-match: sort candidates per plane, set flags, pick best GEM hit
+// ============================================================================
+
+void MatchingTools::PostMatch(MatchHit &h) const
+{
+    if (h.gem1.empty() && h.gem2.empty() &&
+        h.gem3.empty() && h.gem4.empty())
+        return;
+
+    // sort each plane's candidates by projection distance (closest first)
+    auto by_dist = [this, &h](const fdec::GEMHit &a, const fdec::GEMHit &b) {
+        return ProjectionDistance(h.cluster, a) < ProjectionDistance(h.cluster, b);
+    };
+    std::sort(h.gem1.begin(), h.gem1.end(), by_dist);
+    std::sort(h.gem2.begin(), h.gem2.end(), by_dist);
+    std::sort(h.gem3.begin(), h.gem3.end(), by_dist);
+    std::sort(h.gem4.begin(), h.gem4.end(), by_dist);
+
+    // set match flag for each plane that has candidates
+    if (!h.gem1.empty()) fdec::set_bit(h.mflag, kGEM1Match);
+    if (!h.gem2.empty()) fdec::set_bit(h.mflag, kGEM2Match);
+    if (!h.gem3.empty()) fdec::set_bit(h.mflag, kGEM3Match);
+    if (!h.gem4.empty()) fdec::set_bit(h.mflag, kGEM4Match);
+
+    // pick the best match across all planes (smallest projection distance)
+    float best_dist = 1e9f;
+    fdec::GEMHit best_gem{};
+
+    auto check = [&](const std::vector<fdec::GEMHit> &plane) {
+        if (!plane.empty()) {
+            float d = ProjectionDistance(h.cluster, plane.front());
+            if (d < best_dist) {
+                best_dist = d;
+                best_gem  = plane.front();
+            }
+        }
+    };
+    check(h.gem1);
+    check(h.gem2);
+    check(h.gem3);
+    check(h.gem4);
+
+    h.gem = best_gem;
+}
+
+// ============================================================================
+// Main matching — adapted from PRadDetMatch::Match for 4 GEM planes
+// ============================================================================
+
+// comparator so GEMHit can be stored in std::set (identity by position)
+struct GEMHitCmp {
+    bool operator()(const fdec::GEMHit &a, const fdec::GEMHit &b) const
+    {
+        if (a.z != b.z) return a.z < b.z;
+        if (a.x != b.x) return a.x < b.x;
+        return a.y < b.y;
+    }
+};
+
+std::vector<MatchHit> MatchingTools::Match(
+    std::vector<fdec::ClusterHit> &hycalHits,
+    const std::vector<fdec::GEMHit> &gem1,
+    const std::vector<fdec::GEMHit> &gem2,
+    const std::vector<fdec::GEMHit> &gem3,
+    const std::vector<fdec::GEMHit> &gem4) const
+{
+    std::vector<MatchHit> result;
+
+    // keep track of GEM hits already claimed (higher-E cluster gets priority)
+    std::set<fdec::GEMHit, GEMHitCmp> used1, used2, used3, used4;
+
+    // sort HyCal clusters by energy descending — highest energy matched first
+    std::sort(hycalHits.begin(), hycalHits.end(),
+              [](const fdec::ClusterHit &a, const fdec::ClusterHit &b) {
+                  return b.energy < a.energy;
+              });
+
+    for (size_t i = 0; i < hycalHits.size(); ++i) {
+        const auto &hit = hycalHits[i];
+
+        // collect candidates in each GEM plane
+        std::vector<fdec::GEMHit> cand1, cand2, cand3, cand4;
+
+        for (const auto &g : gem1)
+            if (PreMatch(hit, g) && used1.find(g) == used1.end())
+                cand1.push_back(g);
+        for (const auto &g : gem2)
+            if (PreMatch(hit, g) && used2.find(g) == used2.end())
+                cand2.push_back(g);
+        for (const auto &g : gem3)
+            if (PreMatch(hit, g) && used3.find(g) == used3.end())
+                cand3.push_back(g);
+        for (const auto &g : gem4)
+            if (PreMatch(hit, g) && used4.find(g) == used4.end())
+                cand4.push_back(g);
+
+        // skip if no candidates in any plane
+        if (cand1.empty() && cand2.empty() && cand3.empty() && cand4.empty())
+            continue;
+
+        result.emplace_back(hit, cand1, cand2, cand3, cand4);
+        MatchHit &mhit = result.back();
+        mhit.hycal_idx = i;
+
+        // resolve best match and set flags
+        PostMatch(mhit);
+
+        // mark the winning GEM hit in each flagged plane as used
+        if (fdec::test_bit(mhit.mflag, kGEM1Match))
+            used1.insert(mhit.gem1.front());
+        if (fdec::test_bit(mhit.mflag, kGEM2Match))
+            used2.insert(mhit.gem2.front());
+        if (fdec::test_bit(mhit.mflag, kGEM3Match))
+            used3.insert(mhit.gem3.front());
+        if (fdec::test_bit(mhit.mflag, kGEM4Match))
+            used4.insert(mhit.gem4.front());
+    }
+
+    return result;
+}
+
+} // namespace analysis
