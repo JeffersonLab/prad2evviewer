@@ -11,6 +11,9 @@
 #include "EpicsStore.h"
 #include "DaqConfig.h"
 #include "Fadc250Data.h"
+#include "SspData.h"
+#include "GemSystem.h"
+#include "GemCluster.h"
 #include "WaveAnalyzer.h"
 #include "viewer_utils.h"
 
@@ -33,6 +36,11 @@ struct AppState {
     evc::DaqConfig daq_cfg;
     fdec::HyCalSystem hycal;
     fdec::ClusterConfig cluster_cfg;
+
+    // GEM system
+    gem::GemSystem gem_sys;
+    gem::GemCluster gem_clusterer;
+    bool gem_enabled = false;       // true if gem_map.json loaded successfully
 
     std::unordered_map<int, int> roc_to_crate;  // ROC tag → crate index
     nlohmann::json crate_roc_json;              // crate→ROC tag JSON
@@ -142,7 +150,7 @@ struct AppState {
 
     // ---- Initialization (call once at startup) -----------------------------
 
-    // Load all configs from db_dir. daq_config_file may be empty (PRad-II defaults).
+    // Load all configs from db_dir. daq_config_file may be empty (uses daq_config.json from db_dir).
     // config_file: main config (config.json or -c override). Empty = auto-find.
     void init(const std::string &db_dir,
               const std::string &daq_config_file,
@@ -161,6 +169,9 @@ struct AppState {
     // Process LMS data for one event (checks trigger mask internally).
     void processLms(fdec::EventData &event,
                     fdec::WaveAnalyzer &ana, fdec::WaveResult &wres);
+
+    // Process GEM SSP data for one event. Call after DecodeEvent with ssp_evt.
+    void processGemEvent(const ssp::SspEventData &ssp_evt);
 
     // Process one fully-decoded event: histograms + clustering + LMS.
     // Thread-safe (locks internally).
@@ -200,6 +211,8 @@ struct AppState {
     nlohmann::json apiEpicsChannels() const;
     nlohmann::json apiEpicsChannel(const std::string &name) const;
     nlohmann::json apiEpicsLatest() const;
+    nlohmann::json apiGemHits() const;
+    nlohmann::json apiGemConfig() const;
 
     // Fill common config fields into a JSON object (used by both viewer and monitor).
     void fillConfigJson(nlohmann::json &cfg) const;

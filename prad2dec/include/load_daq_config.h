@@ -71,11 +71,13 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
         if (bt.contains("run_info"))       cfg.run_info_tag       = parse_hex(bt["run_info"]);
         if (bt.contains("daq_config"))     cfg.daq_config_tag     = parse_hex(bt["daq_config"]);
         if (bt.contains("epics_data"))     cfg.epics_bank_tag     = parse_hex(bt["epics_data"]);
+        if (bt.contains("ssp_raw"))        cfg.ssp_bank_tag       = parse_hex(bt["ssp_raw"]);
     }
 
     // TI format
     if (j.contains("ti_format")) {
         auto &ti = j["ti_format"];
+        if (ti.contains("trigger_word"))        cfg.ti_trigger_word        = ti["trigger_word"].get<int>();
         if (ti.contains("time_low_word"))       cfg.ti_time_low_word       = ti["time_low_word"].get<int>();
         if (ti.contains("time_high_word"))      cfg.ti_time_high_word      = ti["time_high_word"].get<int>();
         if (ti.contains("time_high_mask"))      cfg.ti_time_high_mask      = parse_hex(ti["time_high_mask"]);
@@ -108,6 +110,7 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
             re.tag   = parse_hex(entry["tag"]);
             re.name  = entry.value("name", "");
             re.crate = entry.value("crate", -1);
+            re.type  = entry.value("type", "");
             cfg.roc_tags.push_back(re);
         }
     }

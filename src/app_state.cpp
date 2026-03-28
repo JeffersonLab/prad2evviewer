@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iostream>
 #include <cmath>
+#include <cstdlib>
 
 using json = nlohmann::json;
 
@@ -20,23 +21,29 @@ void AppState::init(const std::string &db_dir,
     if (main_config.empty()) main_config = findFile("config.json", db_dir);
     if (main_config.empty()) main_config = findFile("reconstruction.json", db_dir);
 
-    // --- DAQ config + pedestals ---
-    if (!daq_config_file.empty()) {
-        if (evc::load_daq_config(daq_config_file, daq_cfg)) {
-            std::cerr << "DAQ config: " << daq_config_file
-                      << " (adc_format=" << daq_cfg.adc_format << ")\n";
-            std::ifstream dcf(daq_config_file);
-            if (dcf.is_open()) {
-                auto dcj = json::parse(dcf, nullptr, false, true);
-                if (dcj.contains("pedestal_file")) {
-                    std::string ped_file = findFile(dcj["pedestal_file"].get<std::string>(), db_dir);
-                    if (evc::load_pedestals(ped_file, daq_cfg))
-                        std::cerr << "Pedestals : " << ped_file
-                                  << " (" << daq_cfg.pedestals.size() << " channels)\n";
-                }
+    // --- DAQ config + pedestals (required) ---
+    std::string daq_cfg_path = daq_config_file;
+    if (daq_cfg_path.empty())
+        daq_cfg_path = findFile("daq_config.json", db_dir);
+
+    if (daq_cfg_path.empty() || !evc::load_daq_config(daq_cfg_path, daq_cfg)) {
+        std::cerr << "Error: failed to load DAQ config"
+                  << (daq_cfg_path.empty() ? " (not found)" : ": " + daq_cfg_path)
+                  << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+    std::cerr << "DAQ config: " << daq_cfg_path
+              << " (adc_format=" << daq_cfg.adc_format << ")\n";
+    {
+        std::ifstream dcf(daq_cfg_path);
+        if (dcf.is_open()) {
+            auto dcj = json::parse(dcf, nullptr, false, true);
+            if (dcj.contains("pedestal_file")) {
+                std::string ped_file = findFile(dcj["pedestal_file"].get<std::string>(), db_dir);
+                if (evc::load_pedestals(ped_file, daq_cfg))
+                    std::cerr << "Pedestals : " << ped_file
+                              << " (" << daq_cfg.pedestals.size() << " channels)\n";
             }
-        } else {
-            std::cerr << "Warning: failed to load DAQ config: " << daq_config_file << "\n";
         }
     }
 
@@ -129,8 +136,8 @@ void AppState::init(const std::string &db_dir,
     // --- HyCal system ---
     std::string modules_filename = "hycal_modules.json";
     std::string daq_filename     = "daq_map.json";
-    if (!daq_config_file.empty()) {
-        std::ifstream dcf2(daq_config_file);
+    {
+        std::ifstream dcf2(daq_cfg_path);
         if (dcf2.is_open()) {
             auto dcj2 = json::parse(dcf2, nullptr, false, true);
             if (dcj2.contains("modules_file")) modules_filename = dcj2["modules_file"].get<std::string>();
@@ -147,10 +154,39 @@ void AppState::init(const std::string &db_dir,
             std::cerr << "Warning: HyCal system initialization failed\n";
     }
 
+    // --- GEM system (optional) ---
+    {
+        std::string gem_map_filename = "gem_map.json";
+        std::string gem_ped_filename;
+        std::ifstream dcf_gem(daq_cfg_path);
+        if (dcf_gem.is_open()) {
+            auto dcj_gem = json::parse(dcf_gem, nullptr, false, true);
+            if (dcj_gem.contains("gem_map_file"))
+                gem_map_filename = dcj_gem["gem_map_file"].get<std::string>();
+            if (dcj_gem.contains("gem_pedestal_file"))
+                gem_ped_filename = dcj_gem["gem_pedestal_file"].get<std::string>();
+        }
+        std::string gem_map_file = findFile(gem_map_filename, db_dir);
+        if (!gem_map_file.empty()) {
+            gem_sys.Init(gem_map_file);
+            gem_enabled = (gem_sys.GetNDetectors() > 0);
+            if (gem_enabled) {
+                std::cerr << "GEM       : " << gem_sys.GetNDetectors() << " detectors\n";
+                if (!gem_ped_filename.empty()) {
+                    std::string gem_ped_file = findFile(gem_ped_filename, db_dir);
+                    if (!gem_ped_file.empty()) {
+                        gem_sys.LoadPedestals(gem_ped_file);
+                        std::cerr << "GEM peds  : " << gem_ped_file << "\n";
+                    }
+                }
+            }
+        }
+    }
+
     // --- crate_roc map ---
     crate_roc_json = json::object();
-    if (!daq_config_file.empty()) {
-        std::ifstream dcf3(daq_config_file);
+    {
+        std::ifstream dcf3(daq_cfg_path);
         if (dcf3.is_open()) {
             auto dcj3 = json::parse(dcf3, nullptr, false, true);
             if (dcj3.contains("roc_tags")) {
@@ -735,6 +771,97 @@ void AppState::processEvent(fdec::EventData &event,
     }
 }
 
+void AppState::processGemEvent(const ssp::SspEventData &ssp_evt)
+{
+    if (!gem_enabled || ssp_evt.nmpds == 0) return;
+    gem_sys.Clear();
+    gem_sys.ProcessEvent(ssp_evt);
+    gem_sys.Reconstruct(gem_clusterer);
+}
+
+//=============================================================================
+// GEM API builders
+//=============================================================================
+
+nlohmann::json AppState::apiGemHits() const
+{
+    json result = json::object();
+    result["enabled"] = gem_enabled;
+    if (!gem_enabled) return result;
+
+    result["n_detectors"] = gem_sys.GetNDetectors();
+    json detectors = json::array();
+    for (int d = 0; d < gem_sys.GetNDetectors(); ++d) {
+        auto &det = gem_sys.GetDetectors()[d];
+        json dj;
+        dj["name"] = det.name;
+        dj["id"] = det.id;
+
+        // 1D clusters per plane
+        for (int p = 0; p < 2; ++p) {
+            std::string pname = (p == 0) ? "x_clusters" : "y_clusters";
+            json clusters = json::array();
+            for (auto &cl : gem_sys.GetPlaneClusters(d, p)) {
+                clusters.push_back({
+                    {"position", cl.position},
+                    {"peak_charge", cl.peak_charge},
+                    {"total_charge", cl.total_charge},
+                    {"size", (int)cl.hits.size()},
+                    {"max_timebin", cl.max_timebin}
+                });
+            }
+            dj[pname] = clusters;
+        }
+
+        // 2D hits
+        json hits = json::array();
+        for (auto &h : gem_sys.GetHits(d)) {
+            hits.push_back({
+                {"x", h.x}, {"y", h.y},
+                {"x_charge", h.x_charge}, {"y_charge", h.y_charge},
+                {"x_size", h.x_size}, {"y_size", h.y_size}
+            });
+        }
+        dj["hits_2d"] = hits;
+        detectors.push_back(dj);
+    }
+    result["detectors"] = detectors;
+
+    // flat list of all 2D hits
+    json all = json::array();
+    for (auto &h : gem_sys.GetAllHits()) {
+        all.push_back({
+            {"x", h.x}, {"y", h.y}, {"det", h.det_id},
+            {"x_charge", h.x_charge}, {"y_charge", h.y_charge}
+        });
+    }
+    result["all_hits"] = all;
+    return result;
+}
+
+nlohmann::json AppState::apiGemConfig() const
+{
+    json result = json::object();
+    result["enabled"] = gem_enabled;
+    if (!gem_enabled) return result;
+
+    result["n_detectors"] = gem_sys.GetNDetectors();
+    json layers = json::array();
+    for (auto &det : gem_sys.GetDetectors()) {
+        layers.push_back({
+            {"id", det.id},
+            {"name", det.name},
+            {"type", det.type},
+            {"x_pitch", det.planes[0].pitch},
+            {"y_pitch", det.planes[1].pitch},
+            {"x_apvs", det.planes[0].n_apvs},
+            {"y_apvs", det.planes[1].n_apvs}
+        });
+    }
+    result["layers"] = layers;
+    return result;
+}
+
 //=============================================================================
 // Clearing
 //=============================================================================
@@ -1107,6 +1234,7 @@ void AppState::fillConfigJson(json &cfg) const
         {"min_avg_points", epics_min_avg_pts}, {"mean_window", epics_mean_window},
         {"slots", epics_default_slots},
     };
+    cfg["gem"] = apiGemConfig();
 }
 
 AppState::ApiResult AppState::handleReadApi(const std::string &uri) const
@@ -1159,5 +1287,9 @@ AppState::ApiResult AppState::handleReadApi(const std::string &uri) const
             return {true, apiEpicsChannel(name).dump()};
         }
     }
+    if (uri == "/api/gem/hits")
+        return {true, apiGemHits().dump()};
+    if (uri == "/api/gem/config")
+        return {true, apiGemConfig().dump()};
     return {false, ""};
 }

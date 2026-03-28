@@ -70,17 +70,19 @@ endif()
 # ---------------------------------------------------------------------------
 # Test tools
 # ---------------------------------------------------------------------------
-add_executable(evc_test test/test_main.cpp)
-target_link_libraries(evc_test PRIVATE prad2dec)
-set_target_properties(evc_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if(WITH_ET)
+    add_executable(evc_test test/test_main.cpp)
+    target_link_libraries(evc_test PRIVATE prad2dec)
+    set_target_properties(evc_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-add_executable(et_feeder test/et_feeder.cpp)
-target_link_libraries(et_feeder PRIVATE prad2dec)
-set_target_properties(et_feeder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    add_executable(et_feeder test/et_feeder.cpp)
+    target_link_libraries(et_feeder PRIVATE prad2dec)
+    set_target_properties(et_feeder PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
-add_executable(evchan_test test/evchan_test.cpp)
-target_link_libraries(evchan_test PRIVATE prad2dec)
-set_target_properties(evchan_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    add_executable(evchan_test test/evchan_test.cpp)
+    target_link_libraries(evchan_test PRIVATE prad2dec)
+    set_target_properties(evchan_test PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 
 add_executable(evio_dump test/evio_dump.cpp)
 target_link_libraries(evio_dump PRIVATE prad2dec nlohmann_json::nlohmann_json)
@@ -90,6 +92,10 @@ add_executable(ped_calc test/ped_calc.cpp)
 target_link_libraries(ped_calc PRIVATE prad2dec nlohmann_json::nlohmann_json)
 set_target_properties(ped_calc PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
+add_executable(gem_dump test/gem_dump.cpp)
+target_link_libraries(gem_dump PRIVATE prad2dec prad2ana nlohmann_json::nlohmann_json)
+set_target_properties(gem_dump PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+
 # ---------------------------------------------------------------------------
 # Event viewer
 # ---------------------------------------------------------------------------
@@ -98,31 +104,34 @@ target_compile_definitions(evc_viewer PRIVATE
     DATABASE_DIR="${DATABASE_DIR}"
     RESOURCE_DIR="${RESOURCE_DIR}"
 )
+find_package(Threads REQUIRED)
 target_link_libraries(evc_viewer PRIVATE
     prad2dec
     prad2ana
     nlohmann_json::nlohmann_json
     websocketpp_lib
-    pthread
+    Threads::Threads
 )
 set_target_properties(evc_viewer PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ---------------------------------------------------------------------------
-# Online monitor
+# Online monitor (requires ET for live data streaming)
 # ---------------------------------------------------------------------------
-add_executable(evc_monitor src/evc_monitor.cpp src/app_state.cpp)
-target_compile_definitions(evc_monitor PRIVATE
-    DATABASE_DIR="${DATABASE_DIR}"
-    RESOURCE_DIR="${RESOURCE_DIR}"
-)
-target_link_libraries(evc_monitor PRIVATE
-    prad2dec
-    prad2ana
-    nlohmann_json::nlohmann_json
-    websocketpp_lib
-    pthread
-)
-set_target_properties(evc_monitor PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+if(WITH_ET)
+    add_executable(evc_monitor src/evc_monitor.cpp src/app_state.cpp)
+    target_compile_definitions(evc_monitor PRIVATE
+        DATABASE_DIR="${DATABASE_DIR}"
+        RESOURCE_DIR="${RESOURCE_DIR}"
+    )
+    target_link_libraries(evc_monitor PRIVATE
+        prad2dec
+        prad2ana
+        nlohmann_json::nlohmann_json
+        websocketpp_lib
+        Threads::Threads
+    )
+    set_target_properties(evc_monitor PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+endif()
 
 # ---------------------------------------------------------------------------
 # Analysis tools (optional, requires ROOT)
@@ -148,6 +157,7 @@ message(STATUS "  ${PROJECT_NAME} ${PROJECT_VERSION}")
 message(STATUS "  Build type   : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Database     : ${DATABASE_DIR}")
 message(STATUS "  Resources    : ${RESOURCE_DIR}")
+message(STATUS "  ET support   : ${WITH_ET}")
 message(STATUS "  Analysis     : ${BUILD_ANALYSIS}")
 message(STATUS "  Qt client    : ${BUILD_GUI}")
 message(STATUS "----------------------------------------------------")
