@@ -528,14 +528,17 @@ function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, 
     });
 }
 
+let lastHistModule = '';
 function showHistograms(mod){
-    // in online mode, throttle histogram fetches to ~1 Hz
-    if (mode === 'online') {
+    const key=`${mod.roc}_${mod.sl}_${mod.ch}`;
+    // in online mode, throttle auto-refreshes of the same module to ~1 Hz
+    if (mode === 'online' && key === lastHistModule) {
         const now = Date.now();
         if (now - lastHistFetch < refreshHistMs) return;
         lastHistFetch = now;
     }
-    const key=`${mod.roc}_${mod.sl}_${mod.ch}`;
+    lastHistFetch = Date.now();
+    lastHistModule = key;
     const h=histConfig;
     fetchAndPlotHist('inthist-div',`/api/hist/${key}`,
         `${mod.n} Integral [${h.time_min||170}-${h.time_max||190} ns]`,
@@ -705,7 +708,7 @@ function connectWebSocket() {
                 initClHist(); plotClHist(); plotClStatHists();
                 if (selectedModule) showHistograms(selectedModule);
                 clearPhysicsFrontend();
-                drawGeo();
+                redrawGeo();
                 if(activeTab==='gem') fetchGemOccupancy();
             } else if (msg.type === 'lms_event') {
                 // throttle LMS refresh to ~0.5 Hz
@@ -870,7 +873,7 @@ function pollProgress() {
                 if(activeTab==='epics') fetchAllEpicsSlots();
                 if(activeTab==='physics') fetchPhysics();
                 syncDqRange();
-                drawGeo();
+                redrawGeo();
                 if (totalEvents > 0) loadEvent(1);
             });
             return;
@@ -889,9 +892,8 @@ function fetchOccupancy() {
         occData = data.occ || {};
         occTcutData = data.occ_tcut || {};
         occTotal = data.total || 0;
-        // redraw if currently showing occupancy
-        const mt = document.getElementById('color-metric').value;
-        if (mt === 'occupancy') {
+        // redraw if currently showing occupancy on DQ tab
+        if (activeTab === 'dq' && document.getElementById('color-metric').value === 'occupancy') {
             syncDqRange();
             drawGeo();
         }
@@ -1100,7 +1102,7 @@ function drawClusterGeo(){
     const ctx=geoCtx;
     if(geoLightTheme){ctx.fillStyle='#fff';ctx.fillRect(0,0,canvasW,canvasH);}
     else ctx.clearRect(0,0,canvasW,canvasH);
-    if(!clusterData){ drawGeo(); return; }
+    if(!clusterData) return;
 
     const hits=clusterData.hits||{};
     const clusters=clusterData.clusters||[];
@@ -1464,7 +1466,7 @@ function init(){
     drawColorBar(); initGeo();
     document.getElementById('colorbar-canvas').onclick=()=>{
         paletteIdx=(paletteIdx+1)%PALETTE_NAMES.length;
-        drawColorBar(); drawGeo();
+        drawColorBar(); redrawGeo();
     };
     Plotly.newPlot('waveform-div',[],{...PL,xaxis:{...PL.xaxis,title:'Sample'},yaxis:{...PL.yaxis,title:'ADC'}},PC2);
     Plotly.newPlot('inthist-div',[],{...PL,title:{text:'Integral Histogram',font:{size:10,color:'#555'}}},PC2);
