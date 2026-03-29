@@ -270,7 +270,8 @@ class SimulatedEPICS:
         self._y_spmg = int(SPMG.GO)
         self._x_movn = 0
         self._y_movn = 0
-        self._speed = 50.0        # mm/s  (fast for simulation)
+        self._x_speed = 50.0      # mm/s  x-axis (fast)
+        self._y_speed = 5.0       # mm/s  y-axis (~1/10 of x)
         self._moving = False
         self._thread: Optional[threading.Thread] = None
 
@@ -295,8 +296,8 @@ class SimulatedEPICS:
                 "y_movn": self._y_movn,
                 "x_spmg": self._x_spmg,
                 "y_spmg": self._y_spmg,
-                "x_velo": self._speed,
-                "y_velo": self._speed,
+                "x_velo": self._x_speed,
+                "y_velo": self._y_speed,
                 "x_accl": 2.0,  "y_accl": 2.0,
                 "x_tdir": 1 if self._tx >= self._x else 0,
                 "y_tdir": 1 if self._ty >= self._y else 0,
@@ -354,19 +355,19 @@ class SimulatedEPICS:
                     return
                 dx = self._tx - self._x
                 dy = self._ty - self._y
-                dist = math.sqrt(dx * dx + dy * dy)
-                if dist < 0.001:
+                # Move each axis independently at its own speed
+                if abs(dx) > 0.001:
+                    step_x = min(self._x_speed * dt, abs(dx))
+                    self._x += math.copysign(step_x, dx)
+                if abs(dy) > 0.001:
+                    step_y = min(self._y_speed * dt, abs(dy))
+                    self._y += math.copysign(step_y, dy)
+                self._x_movn = 1 if abs(self._tx - self._x) > 0.001 else 0
+                self._y_movn = 1 if abs(self._ty - self._y) > 0.001 else 0
+                if self._x_movn == 0 and self._y_movn == 0:
                     self._x, self._y = self._tx, self._ty
-                    self._x_movn = 0
-                    self._y_movn = 0
                     self._moving = False
                     return
-                step = min(self._speed * dt, dist)
-                r = step / dist
-                self._x += dx * r
-                self._y += dy * r
-                self._x_movn = 1 if abs(dx) > 0.001 else 0
-                self._y_movn = 1 if abs(dy) > 0.001 else 0
             time.sleep(dt)
 
 
