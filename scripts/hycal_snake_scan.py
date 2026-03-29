@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-HyCal Snake Scan -- PbWO4 Module Scanner
-=========================================
+HyCal Snake Scan -- Module Scanner
+===================================
 Tkinter GUI that drives the HyCal transporter in a snake pattern so the
-beam centres on every inner PbWO4 module, dwells for a configurable time,
+beam centres on each scanned module, dwells for a configurable time,
 then advances to the next module.
+
+Module positions are loaded from the HyCal module database JSON file,
+which contains PbWO4 (inner), PbGlass (outer), and LMS modules.
+The scan always includes all PbWO4 modules; the number of surrounding
+PbGlass layers to include is configurable in the GUI (0--6).
 
 Usage
 -----
-    python hycal_snake_scan.py              # simulation mode (no EPICS)
-    python hycal_snake_scan.py --real       # real EPICS mode
+    python hycal_snake_scan.py                          # simulation
+    python hycal_snake_scan.py --real                    # real EPICS
+    python hycal_snake_scan.py --database /path/to.json  # custom database
 
 Coordinate system
 -----------------
@@ -32,7 +38,9 @@ Requirements
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import random
 import threading
 import time
@@ -52,17 +60,15 @@ from typing import Dict, List, Optional, Tuple
 BEAM_CENTER_X: float = -126.75   # mm
 BEAM_CENTER_Y: float = 10.11     # mm
 
-# PbWO4 module grid parameters (from module position map)
-PBWO4_NX = 34           # columns
-PBWO4_NY = 34           # rows
-PBWO4_SX = 20.77        # module pitch x  (mm)
-PBWO4_SY = 20.75        # module pitch y  (mm)
-PBWO4_X0 = -342.705     # first column centre x  (HyCal frame)
-PBWO4_Y0 = 342.375      # first row centre y      (HyCal frame, top row)
-
 DEFAULT_DWELL = 120.0    # seconds
 DEFAULT_POS_THRESHOLD = 0.5   # mm  -- alert if |RBV - target| exceeds this
 MOVE_TIMEOUT = 300.0     # seconds per single move
+
+# Default database path (relative to this script)
+DEFAULT_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "database", "hycal_modules.json")
+
+MAX_LG_LAYERS = 6
 
 SPMG_LABELS = {0: "Stop", 1: "Pause", 2: "Move", 3: "Go"}
 
@@ -114,13 +120,18 @@ class C:
     YELLOW   = "#d29922"
     RED      = "#f85149"
     ORANGE   = "#db6d28"
-    # canvas module states
+    # canvas module states (scan targets)
     MOD_TODO      = "#21262d"
     MOD_CURRENT   = "#d29922"
     MOD_DWELL     = "#3fb950"
     MOD_DONE      = "#1f6feb"
     MOD_ERROR     = "#f85149"
     MOD_SELECTED  = "#db6d28"
+    # display-only module colours
+    MOD_GLASS     = "#162230"
+    MOD_PWO4_BG   = "#1a2a1a"
+    MOD_LMS       = "#2d1f3d"
+    MOD_EXCLUDED  = "#111418"     # greyed-out during active scan
 
 
 # ============================================================================
@@ -130,23 +141,52 @@ class C:
 @dataclass
 class Module:
     name: str
-    x: float          # centre x in HyCal frame (mm)
-    y: float          # centre y in HyCal frame (mm)
-    row: int           # grid row index  (0 = top)
-    col: int           # grid col index  (0 = left)
+    mod_type: str      # "PbWO4", "PbGlass", "LMS"
+    x: float           # centre x in HyCal frame (mm)
+    y: float           # centre y in HyCal frame (mm)
+    sx: float          # module width  (mm)
+    sy: float          # module height (mm)
+    row: int = 0       # grid row index  (assigned by assign_grid_indices)
+    col: int = 0       # grid col index  (assigned by assign_grid_indices)
 
 
-def generate_modules() -> List[Module]:
-    """Create the 34x34 PbWO4 module grid."""
+def load_modules(json_path: str) -> List[Module]:
+    """Load all modules from the HyCal module database JSON."""
+    with open(json_path) as f:
+        data = json.load(f)
     modules: List[Module] = []
-    idx = 1
-    for row in range(PBWO4_NY):
-        y = PBWO4_Y0 - row * PBWO4_SY
-        for col in range(PBWO4_NX):
-            x = PBWO4_X0 + col * PBWO4_SX
-            modules.append(Module(f"W{idx}", round(x, 3), round(y, 3), row, col))
-            idx += 1
+    for entry in data:
+        modules.append(Module(
+            name=entry["n"],
+            mod_type=entry["t"],
+            x=entry["x"],
+            y=entry["y"],
+            sx=entry["sx"],
+            sy=entry["sy"],
+        ))
     return modules
+
+
+def assign_grid_indices(modules: List[Module], y_tol: float = 0.5):
+    """Assign row/col indices by grouping modules by y position (top-down)."""
+    if not modules:
+        return
+    by_y = sorted(modules, key=lambda m: -m.y)  # top to bottom
+    rows: List[List[Module]] = []
+    current_row = [by_y[0]]
+    for m in by_y[1:]:
+        if abs(m.y - current_row[0].y) < y_tol:
+            current_row.append(m)
+        else:
+            rows.append(current_row)
+            current_row = [m]
+    rows.append(current_row)
+
+    for row_idx, row_mods in enumerate(rows):
+        row_mods.sort(key=lambda m: m.x)  # left to right
+        for col_idx, m in enumerate(row_mods):
+            m.row = row_idx
+            m.col = col_idx
 
 
 def generate_snake_path(modules: List[Module]) -> List[Module]:
@@ -215,6 +255,11 @@ class RealEPICS:
         n = sum(1 for p in self._pvs.values() if p.connected)
         return n, len(self._pvs)
 
+    def disconnected_pvs(self) -> List[str]:
+        """Return PV names that failed to connect."""
+        return [pvname for key, pvname in _PV_MAP
+                if key in self._pvs and not self._pvs[key].connected]
+
     def get(self, key: str, default=None):
         pv = self._pvs.get(key)
         if pv and pv.connected:
@@ -249,6 +294,9 @@ class SimulatedEPICS:
 
     def connect(self) -> Tuple[int, int]:
         return (0, 0)              # always "OK" in simulation
+
+    def disconnected_pvs(self) -> List[str]:
+        return []
 
     # -- read ----------------------------------------------------------------
 
@@ -575,30 +623,77 @@ class ScanEngine:
 
 class SnakeScanGUI:
 
-    CANVAS_SIZE = 510       # pixels
-    CANVAS_PAD  = 5
+    CANVAS_SIZE = 620       # pixels
+    CANVAS_PAD  = 8
+    MOD_SHRINK  = 0.90      # render modules at 90% size for visual gaps
 
-    def __init__(self, root: tk.Tk, epics, simulation: bool):
+    def __init__(self, root: tk.Tk, epics, simulation: bool,
+                 all_modules: List[Module]):
         self.root = root
         self.ep = epics
         self.simulation = simulation
+        self.all_modules = all_modules
+        self._lg_layers = 0
 
-        self.modules = generate_modules()
-        self.engine = ScanEngine(epics, self.modules, self._log)
+        # Precompute PbWO4 bounding box and PbGlass module size
+        pwo4 = [m for m in all_modules if m.mod_type == "PbWO4"]
+        self._pwo4_min_x = min(m.x for m in pwo4)
+        self._pwo4_max_x = max(m.x for m in pwo4)
+        self._pwo4_min_y = min(m.y for m in pwo4)
+        self._pwo4_max_y = max(m.y for m in pwo4)
+        glass = [m for m in all_modules if m.mod_type == "PbGlass"]
+        self._lg_sx = glass[0].sx if glass else 38.15
+        self._lg_sy = glass[0].sy if glass else 38.15
 
-        # module index lookup by (row, col)
-        self._mod_grid: Dict[Tuple[int, int], int] = {}
-        for idx, m in enumerate(self.engine.path):
-            self._mod_grid[(m.row, m.col)] = idx
+        # Split into scan targets vs display-only
+        self.scan_modules = self._filter_scan_modules(0)
+        assign_grid_indices(self.scan_modules)
+
+        self.engine = ScanEngine(epics, self.scan_modules, self._log)
+
+        # module name -> path index (scan modules only)
+        self._scan_name_to_idx: Dict[str, int] = {
+            m.name: i for i, m in enumerate(self.engine.path)
+        }
+        self._scan_names: set = {m.name for m in self.scan_modules}
 
         self._selected_start_idx = 0
         self._log_lines: List[str] = []
 
-        # canvas item ids per (row, col)
-        self._cell_ids: Dict[Tuple[int, int], int] = {}
+        # canvas item IDs:  module name -> rectangle id
+        self._cell_ids: Dict[str, int] = {}
+        self._display_greyed = False   # track greyed-out state for transitions
+
+        # canvas coordinate mapping (computed in _build_canvas)
+        self._scale = 1.0
+        self._ox = 0.0
+        self._oy = 0.0
+        self._x_min = 0.0
+        self._y_max = 0.0
 
         self._build_ui()
         self._poll()
+
+    def _filter_scan_modules(self, lg_layers: int) -> List[Module]:
+        """All PbWO4 + PbGlass within lg_layers of PbWO4 bounding box."""
+        scan = [m for m in self.all_modules if m.mod_type == "PbWO4"]
+        if lg_layers > 0:
+            margin_x = lg_layers * self._lg_sx
+            margin_y = lg_layers * self._lg_sy
+            for m in self.all_modules:
+                if m.mod_type == "PbGlass" and \
+                   self._pwo4_min_x - margin_x <= m.x <= self._pwo4_max_x + margin_x and \
+                   self._pwo4_min_y - margin_y <= m.y <= self._pwo4_max_y + margin_y:
+                    scan.append(m)
+        return scan
+
+    def _display_color(self, mod_type: str) -> str:
+        """Static colour for display-only (non-scanned) modules."""
+        if mod_type == "PbGlass":
+            return C.MOD_GLASS
+        elif mod_type == "PbWO4":
+            return C.MOD_PWO4_BG
+        return C.MOD_LMS
 
     # -----------------------------------------------------------------------
     #  UI construction
@@ -682,64 +777,136 @@ class SnakeScanGUI:
     # -- canvas (module map) -------------------------------------------------
 
     def _build_canvas(self, parent):
-        frm = ttk.LabelFrame(parent, text=" Module Map (PbWO4 34x34) ")
-        frm.pack(fill="both", expand=True)
+        self._canvas_frame = ttk.LabelFrame(parent, text="")
+        self._update_canvas_label()
+        self._canvas_frame.pack(fill="both", expand=True)
 
         sz = self.CANVAS_SIZE
-        self._canvas = tk.Canvas(frm, width=sz, height=sz,
+        self._canvas = tk.Canvas(self._canvas_frame, width=sz, height=sz,
                                   bg="#0a0e14", highlightthickness=0)
         self._canvas.pack(padx=4, pady=4)
         self._canvas.bind("<Button-1>", self._on_canvas_click)
 
+        self._compute_canvas_mapping()
         self._draw_modules()
 
         # legend
-        leg = tk.Frame(frm, bg=C.BG)
+        leg = tk.Frame(self._canvas_frame, bg=C.BG)
         leg.pack(fill="x", padx=4, pady=(0, 4))
-        for label, colour in [("Todo", C.MOD_TODO), ("Moving", C.MOD_CURRENT),
-                               ("Dwell", C.MOD_DWELL), ("Done", C.MOD_DONE),
-                               ("Error", C.MOD_ERROR), ("Start", C.MOD_SELECTED)]:
+        legend_items = [
+            ("Todo", C.MOD_TODO), ("Moving", C.MOD_CURRENT),
+            ("Dwell", C.MOD_DWELL), ("Done", C.MOD_DONE),
+            ("Error", C.MOD_ERROR), ("Start", C.MOD_SELECTED),
+            ("PbGlass", C.MOD_GLASS),
+        ]
+        for label, colour in legend_items:
             tk.Canvas(leg, width=10, height=10, bg=colour,
                       highlightthickness=0).pack(side="left", padx=(6, 1))
             tk.Label(leg, text=label, bg=C.BG, fg=C.DIM,
                      font=("Consolas", 8)).pack(side="left")
 
-    def _cell_size(self) -> float:
-        return (self.CANVAS_SIZE - 2 * self.CANVAS_PAD) / max(PBWO4_NX, PBWO4_NY)
+    def _update_canvas_label(self):
+        n_pwo4 = sum(1 for m in self.scan_modules if m.mod_type == "PbWO4")
+        n_lg = sum(1 for m in self.scan_modules if m.mod_type == "PbGlass")
+        if n_lg:
+            text = f" Module Map ({n_pwo4} PbWO4 + {n_lg} PbGlass = {n_pwo4 + n_lg}) "
+        else:
+            text = f" Module Map ({n_pwo4} PbWO4) "
+        self._canvas_frame.configure(text=text)
+
+    def _compute_canvas_mapping(self):
+        """Compute scale and offset to map HyCal mm -> canvas pixels."""
+        if not self.all_modules:
+            return
+        x_min = min(m.x - m.sx / 2 for m in self.all_modules)
+        x_max = max(m.x + m.sx / 2 for m in self.all_modules)
+        y_min = min(m.y - m.sy / 2 for m in self.all_modules)
+        y_max = max(m.y + m.sy / 2 for m in self.all_modules)
+
+        usable = self.CANVAS_SIZE - 2 * self.CANVAS_PAD
+        self._scale = min(usable / (x_max - x_min),
+                          usable / (y_max - y_min))
+
+        draw_w = (x_max - x_min) * self._scale
+        draw_h = (y_max - y_min) * self._scale
+        self._ox = self.CANVAS_PAD + (usable - draw_w) / 2
+        self._oy = self.CANVAS_PAD + (usable - draw_h) / 2
+        self._x_min = x_min
+        self._y_max = y_max
+
+    def _mod_to_canvas(self, m: Module) -> Tuple[float, float, float, float]:
+        """Module -> canvas rectangle (x0, y0, x1, y1)."""
+        cx = self._ox + (m.x - self._x_min) * self._scale
+        cy = self._oy + (self._y_max - m.y) * self._scale
+        hw = m.sx * self._scale * self.MOD_SHRINK / 2
+        hh = m.sy * self._scale * self.MOD_SHRINK / 2
+        return (cx - hw, cy - hh, cx + hw, cy + hh)
 
     def _draw_modules(self):
-        cs = self._cell_size()
-        pad = self.CANVAS_PAD
-        gap = max(1, int(cs * 0.06))
-        for m in self.modules:
-            x0 = pad + m.col * cs + gap
-            y0 = pad + m.row * cs + gap
-            x1 = pad + (m.col + 1) * cs - gap
-            y1 = pad + (m.row + 1) * cs - gap
+        """Draw all modules on the canvas."""
+        self._canvas.delete("all")
+        self._cell_ids.clear()
+
+        # Draw display-only modules first (background layer)
+        for m in self.all_modules:
+            if m.name in self._scan_names:
+                continue
+            if m.mod_type == "LMS":
+                continue  # skip LMS on map
+            x0, y0, x1, y1 = self._mod_to_canvas(m)
+            color = self._display_color(m.mod_type)
             rid = self._canvas.create_rectangle(
-                x0, y0, x1, y1, fill=C.MOD_TODO, outline="", width=0)
-            self._cell_ids[(m.row, m.col)] = rid
+                x0, y0, x1, y1, fill=color, outline="", width=0,
+                tags=(f"mod_{m.name}", "display"))
+            self._cell_ids[m.name] = rid
+
+        # Draw scan modules on top
+        for m in self.scan_modules:
+            x0, y0, x1, y1 = self._mod_to_canvas(m)
+            rid = self._canvas.create_rectangle(
+                x0, y0, x1, y1, fill=C.MOD_TODO, outline="", width=0,
+                tags=(f"mod_{m.name}", "scan"))
+            self._cell_ids[m.name] = rid
 
     def _on_canvas_click(self, event):
-        cs = self._cell_size()
-        col = int((event.x - self.CANVAS_PAD) / cs)
-        row = int((event.y - self.CANVAS_PAD) / cs)
-        col = max(0, min(col, PBWO4_NX - 1))
-        row = max(0, min(row, PBWO4_NY - 1))
-
-        # find this module's index in the snake path
-        idx = self._mod_grid.get((row, col))
-        if idx is not None:
-            self._selected_start_idx = idx
-            mod = self.engine.path[idx]
-            self._start_var.set(mod.name)
-            self._log(f"Selected start module: {mod.name} "
-                      f"(row {row}, col {col})")
+        items = self._canvas.find_closest(event.x, event.y)
+        if not items:
+            return
+        tags = self._canvas.gettags(items[0])
+        for tag in tags:
+            if tag.startswith("mod_"):
+                name = tag[4:]
+                if name in self._scan_name_to_idx:
+                    idx = self._scan_name_to_idx[name]
+                    self._selected_start_idx = idx
+                    mod = self.engine.path[idx]
+                    self._start_var.set(mod.name)
+                    self._log(f"Selected start module: {mod.name}")
+                break
 
     def _update_canvas(self):
         eng = self.engine
+        running = eng.state in (ScanState.MOVING, ScanState.DWELLING,
+                                ScanState.PAUSED, ScanState.ERROR)
+
+        # Grey out / restore display-only modules on state transitions
+        if running and not self._display_greyed:
+            self._display_greyed = True
+            for m in self.all_modules:
+                if m.name not in self._scan_names and m.name in self._cell_ids:
+                    self._canvas.itemconfigure(
+                        self._cell_ids[m.name], fill=C.MOD_EXCLUDED)
+        elif not running and self._display_greyed:
+            self._display_greyed = False
+            for m in self.all_modules:
+                if m.name not in self._scan_names and m.name in self._cell_ids:
+                    self._canvas.itemconfigure(
+                        self._cell_ids[m.name],
+                        fill=self._display_color(m.mod_type))
+
+        # Update scan module colours
         for i, mod in enumerate(eng.path):
-            rid = self._cell_ids.get((mod.row, mod.col))
+            rid = self._cell_ids.get(mod.name)
             if rid is None:
                 continue
             if i == eng.current_idx and eng.state == ScanState.DWELLING:
@@ -764,6 +931,20 @@ class SnakeScanGUI:
         # === Scan Control ===
         sc = ttk.LabelFrame(parent, text=" Scan Control ")
         sc.pack(fill="x", pady=(0, 4))
+
+        # lead-glass layer selector
+        r_lg = tk.Frame(sc, bg=C.BG)
+        r_lg.pack(fill="x", padx=6, pady=2)
+        tk.Label(r_lg, text="LG layers (0-6):", bg=C.BG, fg=C.TEXT,
+                 font=("Consolas", 9)).pack(side="left")
+        self._lg_layers_var = tk.IntVar(value=self._lg_layers)
+        self._lg_layers_spin = tk.Spinbox(
+            r_lg, from_=0, to=MAX_LG_LAYERS,
+            textvariable=self._lg_layers_var,
+            width=4, bg=C.PANEL, fg=C.TEXT, font=("Consolas", 9),
+            buttonbackground=C.BORDER, insertbackground=C.TEXT,
+            command=self._on_lg_layers_changed)
+        self._lg_layers_spin.pack(side="right")
 
         # dwell
         r = tk.Frame(sc, bg=C.BG)
@@ -794,7 +975,7 @@ class SnakeScanGUI:
         tk.Label(r3, text="Start module:", bg=C.BG, fg=C.TEXT,
                  font=("Consolas", 9)).pack(side="left")
         names = [m.name for m in self.engine.path]
-        self._start_var = tk.StringVar(value=names[0])
+        self._start_var = tk.StringVar(value=names[0] if names else "")
         self._start_combo = ttk.Combobox(r3, textvariable=self._start_var,
                                           values=names, width=10,
                                           font=("Consolas", 9))
@@ -942,6 +1123,37 @@ class SnakeScanGUI:
             if m.name == name:
                 self._selected_start_idx = i
                 break
+
+    def _on_lg_layers_changed(self):
+        """Rebuild scan engine when the user changes LG layers."""
+        new_layers = self._lg_layers_var.get()
+        if new_layers == self._lg_layers:
+            return
+        self._lg_layers = new_layers
+        self.scan_modules = self._filter_scan_modules(new_layers)
+        self._scan_names = {m.name for m in self.scan_modules}
+        assign_grid_indices(self.scan_modules)
+        self.engine = ScanEngine(self.ep, self.scan_modules, self._log)
+        self._scan_name_to_idx = {
+            m.name: i for i, m in enumerate(self.engine.path)
+        }
+        self._selected_start_idx = 0
+
+        # update start module dropdown
+        names = [m.name for m in self.engine.path]
+        self._start_combo["values"] = names
+        if names:
+            self._start_var.set(names[0])
+
+        # update canvas
+        self._update_canvas_label()
+        self._display_greyed = False
+        self._draw_modules()
+
+        n_pwo4 = sum(1 for m in self.scan_modules if m.mod_type == "PbWO4")
+        n_lg = sum(1 for m in self.scan_modules if m.mod_type == "PbGlass")
+        self._log(f"LG layers: {new_layers} "
+                  f"({n_pwo4} PbWO4 + {n_lg} PbGlass = {len(self.scan_modules)})")
 
     def _cmd_start(self):
         self._on_start_selected()
@@ -1118,6 +1330,8 @@ class SnakeScanGUI:
             state="normal" if eng.state == ScanState.ERROR else "disabled")
         self._start_combo.configure(
             state="readonly" if not running else "disabled")
+        self._lg_layers_spin.configure(
+            state="normal" if not running else "disabled")
 
 
 # ============================================================================
@@ -1126,10 +1340,22 @@ class SnakeScanGUI:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="HyCal Snake Scan -- PbWO4 module scanner")
+        description="HyCal Snake Scan -- module scanner")
     parser.add_argument("--real", action="store_true",
                         help="Use real EPICS (requires pyepics)")
+    parser.add_argument("--database", default=DEFAULT_DB_PATH,
+                        help="Path to hycal_modules.json "
+                             f"(default: {DEFAULT_DB_PATH})")
     args = parser.parse_args()
+
+    # Load modules from database
+    all_modules = load_modules(args.database)
+    by_type: Dict[str, int] = {}
+    for m in all_modules:
+        by_type[m.mod_type] = by_type.get(m.mod_type, 0) + 1
+    print(f"Loaded {len(all_modules)} modules from {args.database}")
+    for t, n in sorted(by_type.items()):
+        print(f"  {t}: {n}")
 
     simulation = not args.real
 
@@ -1141,11 +1367,15 @@ def main():
     n_ok, n_total = ep.connect()
     if not simulation:
         print(f"EPICS: connected {n_ok}/{n_total} PVs")
+        if n_ok < n_total:
+            disconnected = ep.disconnected_pvs()
+            for pv in disconnected:
+                print(f"  NOT connected: {pv}")
         if n_ok < n_total * 0.5:
             print("WARNING: many PVs not connected -- check IOC / network")
 
     root = tk.Tk()
-    SnakeScanGUI(root, ep, simulation)
+    SnakeScanGUI(root, ep, simulation, all_modules)
     root.mainloop()
 
 

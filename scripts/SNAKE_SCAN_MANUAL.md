@@ -1,15 +1,19 @@
 # HyCal Snake Scan -- Operator Manual
 
-**PbWO4 Module Scanner for PRad-II, Jefferson Lab Hall B**
+**HyCal Module Scanner for PRad-II, Jefferson Lab Hall B**
 
 ---
 
 ## Overview
 
-Automates beam calibration of the 1156 inner PbWO4 modules in a
-serpentine pattern. At each module the transporter pauses for a
-configurable dwell time (default 120 s), then advances to the next.
-A full scan takes ~40 hours at default settings.
+Automates beam calibration of HyCal modules in a serpentine pattern.
+Module positions are loaded from `database/hycal_modules.json`
+(1152 PbWO4, 576 PbGlass). The scan always includes all PbWO4 modules; surrounding PbGlass layers
+(0--6) are configurable in the GUI. The map always shows both types.
+
+At each module the transporter pauses for a configurable dwell time
+(default 120 s), then advances to the next.
+A full PbWO4 scan takes ~40 hours at default settings.
 
 **Safety:** The tool only writes to four EPICS PVs (`ptrans_{x,y}.VAL`
 and `ptrans_{x,y}.SPMG`). All other channels are read-only.
@@ -36,6 +40,9 @@ python scripts/hycal_snake_scan.py
 export EPICS_CA_ADDR_LIST="129.57.255.255"
 export EPICS_CA_AUTO_ADDR_LIST="YES"
 python scripts/hycal_snake_scan.py --real
+
+# Custom database path
+python scripts/hycal_snake_scan.py --database /path/to/hycal_modules.json
 ```
 
 ---
@@ -62,6 +69,7 @@ ptrans_y =   10.11 - my
 
 | Control | What it does |
 |---------|-------------|
+| **LG layers (0-6)** | Number of PbGlass layers around PbWO4 to include (0 = PbWO4 only, 6 = all). Locked during scan. |
 | **Dwell time** | Seconds at each module (default 120) |
 | **Pos. threshold** | Max allowed position error in mm (default 0.5) |
 | **Start module** | Pick via dropdown or click the module map |
@@ -151,7 +159,14 @@ The scan auto-pauses when position error exceeds threshold.
 
 ## Module Grid & Snake Path
 
-34x34 grid, modules W1--W1156. Even rows scan left-to-right, odd rows right-to-left.
+Module positions loaded from `database/hycal_modules.json`:
+
+| Type | Count | Size (mm) | Extent |
+|------|-------|-----------|--------|
+| PbWO4 | 1152 (34x34 minus beam hole) | 20.77 x 20.75 | +/-342.7 mm |
+| PbGlass | 576 (outer ring) | 38.15 x 38.15 | +/-562.9 mm |
+
+Even rows scan left-to-right, odd rows right-to-left (serpentine).
 
 ```
 Row 0:  W1  -> W2  -> ... -> W34    (L->R)
@@ -159,5 +174,3 @@ Row 1:  W68 -> W67 -> ... -> W35    (R->L)
 Row 2:  W69 -> W70 -> ... -> W102   (L->R)
 ...
 ```
-
-Module pitch: 20.77 mm (x) x 20.75 mm (y). Grid spans +/-342.7 mm in both axes.
