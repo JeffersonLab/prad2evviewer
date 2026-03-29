@@ -9,7 +9,7 @@
 
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
-#include "Replay.h"
+#include "MatchingTools.h"
 
 #include <TFile.h>
 #include <TTree.h>
@@ -23,8 +23,11 @@
 #define DATABASE_DIR "."
 #endif
 
+using namespace analysis;
+
 //hardcoded beam energy and position for yield histograms, can be made configurable if needed
 float hycal_z = 5646.f; // distance from target to HyCal front face in mm
+float gem_z[4] = {5407.+39.71/2., 5407.-39.71/2., 5807.+39.71/2., 5807.-39.71/2.}; //mm, the center of the two GEMs, 39.71 is the gap of 2 GEMs
 float Ebeam = 1100.f; // MeV
 //Todo: get run ID from filename or config
 int run_id = 12345;
@@ -85,8 +88,8 @@ TH1F *one_cluster_energy = new TH1F("one_cluster_energy", "Energy of single-clus
 TH1F *two_cluster_energy = new TH1F("two_cluster_energy", "Energy of 2-cluster events;Energy (MeV);Counts", 1000, 0, 4000);
 TH1F *clusters_energy = new TH1F("clusters_energy", "Energy of all clusters;Energy (MeV);Counts", 1000, 0, 4000);
 TH1F *total_energy = new TH1F("total_energy", "Total energy per event;Energy (MeV);Counts", 1000, 0, 4000);
-analysis::PhysicsTools::MollerEvent MollerPair;
-analysis::PhysicsTools::MollerData hycal_mollers;
+PhysicsTools::MollerEvent MollerPair;
+PhysicsTools::MollerData hycal_mollers;
 
 int main(int argc, char *argv[])
 {
@@ -118,7 +121,8 @@ int main(int argc, char *argv[])
     fdec::HyCalSystem hycal;
     hycal.Init(std::string(DATABASE_DIR) + "/hycal_modules.json",
                std::string(DATABASE_DIR) + "/daq_map.json");
-    analysis::PhysicsTools physics(hycal);
+    PhysicsTools physics(hycal);
+    MatchingTools matching;
 
     //setup input ROOT file and tree
     TFile *infile = TFile::Open(input_file.c_str(), "READ");
@@ -141,6 +145,7 @@ int main(int argc, char *argv[])
     int Nentries = tree->GetEntries();
     Nentries = (max_events > 0) ? std::min(Nentries, max_events) : Nentries;
     
+    // this event loop do not include GEM matching, very rough selection for quick analysis example, more strict selection can be implemented with GEM matching and other kinematic cuts
     for(int i = 0; i < Nentries; i++) {
         tree->GetEntry(i);
         if (i % 1000 == 0)
@@ -177,7 +182,7 @@ int main(int argc, char *argv[])
             //try to find good Moller with energy cut
             if(std::abs(ev.cl_energy[0] + ev.cl_energy[1] - Ebeam) < 3.*Ebeam*0.025/sqrt(Ebeam/1000.f)){
                 //save these 2-cluster events for Moller analysis
-                MollerPair = analysis::PhysicsTools::MollerEvent(
+                MollerPair = PhysicsTools::MollerEvent(
                                 {ev.cl_x[0], ev.cl_y[0], 0.f, ev.cl_energy[0]},
                                 {ev.cl_x[1], ev.cl_y[1], 0.f, ev.cl_energy[1]});
                 hycal_mollers.push_back(MollerPair);
@@ -190,8 +195,8 @@ int main(int argc, char *argv[])
             }
         }
     }
-
-    //analyze Moller events, get ditector position information and z-vertex distribution, fill histograms
+    //analyze Moller events saved in the loop,
+    // get detector position information and z-vertex distribution, fill histograms
     for (int i = 0; i < hycal_mollers.size(); i++) {
         float z = physics.GetMollerZdistance(hycal_mollers[i], Ebeam);
         physics.FillMollerZ(z);
@@ -199,6 +204,47 @@ int main(int argc, char *argv[])
             auto center = physics.GetMollerCenter(hycal_mollers[i-1], hycal_mollers[i]);
             physics.FillMollerXY(center[0], center[1]);
         } 
+    }
+    std::cerr << "\r" << Nentries << " events analyzed\n";
+
+    //this event loop will include GEM matching and coordinate transformation
+    // more strict event selection here for better e-p and e-e
+    for(int i = 0; i < Nentries; i++) {
+        tree->GetEntry(i);
+        if (i % 1000 == 0)
+            std::cerr << "Reading " << i << " events / " << Nentries << " total events\r" << std::flush;
+
+        //store all the hits on HyCal and GEMs in this event
+        std::vector<HCHit> hc_hits;
+        std::vector<GEMHit> gem_hits[4]; // separate vector for each GEM
+        for( int j = 0; j < ev.n_clusters; j++) {
+            float depth = physics.GetShowerDepth(ev.cl_center[j], ev.cl_energy[j]);
+            hc_hits.push_back(HCHit{ev.cl_x[j], ev.cl_y[j], depth,
+                               ev.cl_energy[j], ev.cl_center[j]});
+        }
+        for (int j = 0; j < ev.n_gem_hits; j++) {
+            gem_hits[ev.det_id[j]].push_back(GEMHit{ev.gem_x[j], ev.gem_y[j], gem_z[ev.det_id[j]], ev.det_id[j]});
+        }
+
+        //transform detector coordinates to target and beam center coordinates
+        physics.TransformDetData(hc_hits, 0.f, 0.f, hycal_z); // assuming beamX=beamY=0 for now
+        for(int d = 0; d < 4; d++) 
+            physics.TransformDetData(gem_hits[d], 0.f, 0.f, gem_z[d]);
+
+        //then matching between GEM hits and HyCal clusters
+        std::vector<MatchHit> matched_hits = matching.Match(hc_hits, gem_hits[0], gem_hits[1], gem_hits[2], gem_hits[3]);
+        //show how to access the matching result
+        for (auto &m : matched_hits) { 
+            HCHit hycal_hit = m.hycal_hit;  //the HyCal cluster be matched
+            GEMHit gem_hit = m.gem;  //the best-matched GEM hit (if any)
+            std::vector<GEMHit> gem1_matches = m.gem1_hits;
+            std::vector<GEMHit> gem2_matches = m.gem2_hits;
+            std::vector<GEMHit> gem3_matches = m.gem3_hits;
+            std::vector<GEMHit> gem4_matches = m.gem4_hits;
+
+            int hycal_idx = m.hycal_idx;  //index of the cluster in the original vector
+        }
+        
     }
 
     // write histograms into output ROOT file
@@ -246,7 +292,7 @@ int main(int argc, char *argv[])
     outfile.Close();
     physics.Resolution2Database(run_id); // example run ID
 
-    std::cerr << "\r" << Nentries << " events analyzed, the result saved -> " << output << "\n";
+    std::cerr << "The result saved -> " << output << "\n";
 
     return 0;
 }
