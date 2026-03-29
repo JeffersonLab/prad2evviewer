@@ -421,6 +421,23 @@ void AppState::init(const std::string &db_dir,
                       << " slots=" << epics_default_slots.size() << "\n";
         }
 
+        // GEM histogram config (optional section in config.json)
+        if (rcfg.contains("gem_histograms")) {
+            auto &gh = rcfg["gem_histograms"];
+            if (gh.contains("nclusters")) {
+                auto &nc = gh["nclusters"];
+                if (nc.contains("min"))  gem_ncl_min  = nc["min"];
+                if (nc.contains("max"))  gem_ncl_max  = nc["max"];
+                if (nc.contains("step")) gem_ncl_step = nc["step"];
+            }
+            if (gh.contains("theta")) {
+                auto &th = gh["theta"];
+                if (th.contains("min"))  gem_theta_min  = th["min"];
+                if (th.contains("max"))  gem_theta_max  = th["max"];
+                if (th.contains("step")) gem_theta_step = th["step"];
+            }
+        }
+
         std::cerr << "Reco      : " << main_config
                   << " (adc_to_mev=" << adc_to_mev << ")\n";
     }
@@ -437,6 +454,8 @@ void AppState::init(const std::string &db_dir,
     int ml_ny = std::max(1, (int)std::ceil((moller_xy_y_max - moller_xy_y_min) / moller_xy_y_step));
     moller_xy_hist.init(ml_nx, ml_ny);
     moller_energy_hist.init(std::max(1, (int)std::ceil((moller_e_max - moller_e_min) / moller_e_step)));
+    gem_nclusters_hist.init(std::max(1, (gem_ncl_max - gem_ncl_min) / gem_ncl_step));
+    gem_theta_hist.init(std::max(1, (int)std::ceil((gem_theta_max - gem_theta_min) / gem_theta_step)));
 }
 
 //=============================================================================
@@ -820,6 +839,24 @@ void AppState::processGemEvent(const ssp::SspEventData &ssp_evt)
             gem_occupancy[d].fill(lx, ly, -xSize/2, xStep, -ySize/2, yStep);
         }
     }
+
+    // accumulate GEM histograms
+    int total_clusters = 0;
+    for (int d = 0; d < gem_sys.GetNDetectors(); ++d) {
+        bool hasXform = d < (int)gem_transforms.size();
+        for (auto &h : gem_sys.GetHits(d)) {
+            float lx, ly, lz;
+            if (hasXform) gem_transforms[d].toLab(h.x, h.y, lx, ly, lz);
+            else { lx = h.x; ly = h.y; lz = 0.f; }
+            float r = std::sqrt(lx*lx + ly*ly);
+            float theta = std::atan2(r, lz) * (180.f / 3.14159265f);
+            gem_theta_hist.fill(theta, gem_theta_min, gem_theta_step);
+        }
+        total_clusters += static_cast<int>(gem_sys.GetHits(d).size());
+    }
+    gem_nclusters_hist.fill(static_cast<float>(total_clusters),
+                            static_cast<float>(gem_ncl_min),
+                            static_cast<float>(gem_ncl_step));
 }
 
 //=============================================================================
@@ -950,6 +987,22 @@ nlohmann::json AppState::apiGemOccupancy() const
     return result;
 }
 
+nlohmann::json AppState::apiGemHist() const
+{
+    std::lock_guard<std::mutex> lk(data_mtx);
+    auto histJson = [](const Histogram &h, float mn, float mx, float st) -> json {
+        if (h.bins.empty())
+            return {{"bins", json::array()}, {"underflow", 0}, {"overflow", 0},
+                    {"min", mn}, {"max", mx}, {"step", st}};
+        return {{"bins", h.bins}, {"underflow", h.underflow}, {"overflow", h.overflow},
+                {"min", mn}, {"max", mx}, {"step", st}};
+    };
+    return {
+        {"nclusters", histJson(gem_nclusters_hist, (float)gem_ncl_min, (float)gem_ncl_max, (float)gem_ncl_step)},
+        {"theta",     histJson(gem_theta_hist, gem_theta_min, gem_theta_max, gem_theta_step)}
+    };
+}
+
 //=============================================================================
 // Clearing
 //=============================================================================
@@ -971,6 +1024,8 @@ void AppState::clearHistograms()
     moller_events = 0;
     cluster_events_processed = 0;
     for (auto &h : gem_occupancy) h.clear();
+    gem_nclusters_hist.clear();
+    gem_theta_hist.clear();
 }
 
 void AppState::clearLms()
@@ -1382,5 +1437,7 @@ AppState::ApiResult AppState::handleReadApi(const std::string &uri) const
         return {true, apiGemConfig().dump()};
     if (uri == "/api/gem/occupancy")
         return {true, apiGemOccupancy().dump()};
+    if (uri == "/api/gem/hist")
+        return {true, apiGemHist().dump()};
     return {false, ""};
 }

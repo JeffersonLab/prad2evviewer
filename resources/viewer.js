@@ -699,7 +699,7 @@ function connectWebSocket() {
                     fetchOccupancy();
                     fetchClHist();
                     if(activeTab==='physics') fetchPhysics();
-                    if(activeTab==='gem') fetchGemOccupancy();
+                    if(activeTab==='gem') fetchGemAccum();
                 }
             } else if (msg.type === 'status') {
                 setEtStatus(msg.connected, msg.waiting, msg.retries);
@@ -709,7 +709,7 @@ function connectWebSocket() {
                 if (selectedModule) showHistograms(selectedModule);
                 clearPhysicsFrontend();
                 redrawGeo();
-                if(activeTab==='gem') fetchGemOccupancy();
+                if(activeTab==='gem') fetchGemAccum();
             } else if (msg.type === 'lms_event') {
                 // throttle LMS refresh to ~0.5 Hz
                 const now2 = Date.now();

@@ -50,6 +50,12 @@ struct AppState {
     static constexpr int GEM_OCC_NY = 30;
     std::vector<Histogram2D> gem_occupancy;  // one per detector
 
+    // GEM accumulated histograms
+    int   gem_ncl_min=0, gem_ncl_max=50, gem_ncl_step=1;
+    float gem_theta_min=0.f, gem_theta_max=10.f, gem_theta_step=0.2f;
+    Histogram gem_nclusters_hist;
+    Histogram gem_theta_hist;
+
     std::unordered_map<int, int> roc_to_crate;  // ROC tag → crate index
     nlohmann::json crate_roc_json;              // crate→ROC tag JSON
     nlohmann::json base_config;                 // modules, daq, crate_roc for /api/config
@@ -222,6 +228,7 @@ struct AppState {
     nlohmann::json apiGemHits() const;
     nlohmann::json apiGemConfig() const;
     nlohmann::json apiGemOccupancy() const;
+    nlohmann::json apiGemHist() const;
 
     // Fill common config fields into a JSON object (used by both viewer and monitor).
     void fillConfigJson(nlohmann::json &cfg) const;

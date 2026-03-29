@@ -58,12 +58,13 @@ function fetchGemData() {
 
     configReady.then(() => {
         fetch('/api/gem/hits').then(r => r.json()).then(plotGemHits).catch(() => {});
-        fetch('/api/gem/occupancy').then(r => r.json()).then(plotGemOccupancy).catch(() => {});
+        fetchGemAccum();
     });
 }
 
-function fetchGemOccupancy() {
+function fetchGemAccum() {
     fetch('/api/gem/occupancy').then(r => r.json()).then(plotGemOccupancy).catch(() => {});
+    fetch('/api/gem/hist').then(r => r.json()).then(plotGemHist).catch(() => {});
 }
 
 // --- event cluster scatter (left) -------------------------------------------
@@ -200,6 +201,38 @@ function plotGemOccupancy(data) {
     });
 }
 
+// --- GEM histograms (bottom right) ------------------------------------------
+
+const GEM_HIST_IDS = ['gem-ncl-hist', 'gem-theta-hist'];
+
+function plotGemHist(data) {
+    if (!data) return;
+
+    function plotOne(divId, hdata, title, xlabel, color) {
+        if (!hdata || !hdata.bins || hdata.bins.length === 0) {
+            Plotly.react(divId, [], Object.assign({}, PL_GEM_OCC, {
+                title: { text: title, font: { size: 12, color: '#e0e0e0' } },
+            }), { responsive: true, displayModeBar: false });
+            return;
+        }
+        const n = hdata.bins.length;
+        const x = Array.from({length: n}, (_, i) => hdata.min + (i + 0.5) * hdata.step);
+        Plotly.react(divId, [{
+            x: x, y: hdata.bins, type: 'bar',
+            marker: { color: color },
+            hovertemplate: xlabel + '=%{x:.1f}<br>count=%{y}<extra></extra>',
+        }], Object.assign({}, PL_GEM_OCC, {
+            title: { text: title, font: { size: 12, color: '#e0e0e0' } },
+            xaxis: { title: xlabel, gridcolor: '#333', zerolinecolor: '#555' },
+            yaxis: { title: 'Counts', gridcolor: '#333', zerolinecolor: '#555' },
+            bargap: 0.05,
+        }), { responsive: true, displayModeBar: false });
+    }
+
+    plotOne('gem-ncl-hist', data.nclusters, 'GEM Clusters / Event', 'N clusters', '#51cf66');
+    plotOne('gem-theta-hist', data.theta, 'GEM Hit Angle', 'θ (deg)', '#00b4d8');
+}
+
 // --- resize -----------------------------------------------------------------
 
 function resizeGem() {
@@ -207,6 +240,9 @@ function resizeGem() {
         try { Plotly.Plots.resize(plane.hitId); } catch (e) {}
     });
     GEM_OCC_IDS.forEach(id => {
+        try { Plotly.Plots.resize(id); } catch (e) {}
+    });
+    GEM_HIST_IDS.forEach(id => {
         try { Plotly.Plots.resize(id); } catch (e) {}
     });
 }

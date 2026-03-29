@@ -13,6 +13,10 @@
         }
     },
     "runinfo": "runinfo/2p2_general.json",
+    "gem_histograms": {
+        "nclusters": {"min": 0, "max": 50, "step": 1},
+        "theta": {"min": 0.0, "max": 10.0, "step": 0.2}
+    },
     "waveform": {
         "accept_trigger_bits": [],
         "time_cut": {"min": 160, "max": 220},
