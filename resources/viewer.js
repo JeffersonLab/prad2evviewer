@@ -508,6 +508,7 @@ function setupDivider(divId, axis, getTarget, getContainer, getOffset, minA, min
         const max_=(axis==='x'?rect.width:rect.height)-getOffset()-minB;
         const val=Math.max(minA,Math.min(max_,pos));
         const target=getTarget();
+        target.style.flex='none';  // override flex:1 so explicit size takes effect
         if(axis==='x') target.style.width=val+'px'; else target.style.height=val+'px';
         onResize();
     });
