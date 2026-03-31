@@ -30,15 +30,15 @@ function showWaveform(mod){
     if(d.s){
         renderWaveform(mod, key, d, d.s);
     } else {
+        // don't clear the plot while fetching — avoids flash in stacking mode
         fetch(`/api/waveform/${currentEvent}/${key}`).then(r=>r.json()).then(wf=>{
-            if(wf.error){ renderWaveform(mod, key, d, null); return; }
-            // cache samples in eventChannels so re-clicking doesn't re-fetch
+            if(wf.error){ if(!wfStackEnabled) renderWaveform(mod, key, d, null); return; }
             d.s=wf.s;
             if(wf.pk) d.pk=wf.pk;
             if(wf.pm!==undefined) d.pm=wf.pm;
             if(wf.pr!==undefined) d.pr=wf.pr;
             renderWaveform(mod, key, d, d.s);
-        }).catch(()=>renderWaveform(mod, key, d, null));
+        }).catch(()=>{ if(!wfStackEnabled) renderWaveform(mod, key, d, null); });
     }
 
     showHistograms(mod); redrawGeo();
