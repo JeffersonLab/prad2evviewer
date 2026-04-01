@@ -109,9 +109,14 @@ function updateClusterUI(){
         sel.appendChild(o);
     });
     // summary
-    const totalE=clusters.reduce((s,c)=>s+c.energy,0);
-    document.getElementById('cl-summary').textContent=
-        `${clusters.length} clusters, ${totalE.toFixed(0)} MeV total`;
+    const hits=clusterData.hits||{};
+    const moduleE=Object.values(hits).reduce((s,e)=>s+e,0);
+    const clusterE=clusters.reduce((s,c)=>s+c.energy,0);
+    const hi='color:var(--accent);font-weight:700';
+    document.getElementById('cl-summary').innerHTML=
+        `E Sum = <span style="${hi}">${moduleE.toFixed(0)} MeV</span>; `
+        + `NCl = <span style="${hi}">${clusters.length}</span>, `
+        + `ECl Sum = <span style="${hi}">${clusterE.toFixed(0)} MeV</span>`;
     updateClusterTable();
 }
 
