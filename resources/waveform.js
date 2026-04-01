@@ -68,6 +68,7 @@ function showWaveform(mod){
 
 function renderWaveform(mod, key, d, samples){
     if(!samples){
+        if(wfStackEnabled) return;  // skip empty events, keep existing stack
         currentWaveform=null;
         Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No samples`,font:{size:11,color:'#555'}}},PC2);
         document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No waveform data</td></tr>';
