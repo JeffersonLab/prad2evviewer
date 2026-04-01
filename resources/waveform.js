@@ -38,8 +38,8 @@ function showWaveform(mod){
             currentWaveform=null;
             Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No data`,font:{size:11,color:'#555'}}},PC2);
             document.getElementById('peaks-tbody').innerHTML='<tr><td colspan="8" style="text-align:center;color:var(--dim);padding:8px">No data</td></tr>';
-        } else {
-            // stacking mode, new module with empty event — show empty plot
+        } else if(wfStackTraces.length===0){
+            // stacking mode, new module with no data yet — show empty plot
             Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — Stacked (0)`,font:{size:11,color:'#555'}}},PC2);
         }
         showHistograms(mod); redrawGeo(); return;
@@ -67,7 +67,7 @@ function showWaveform(mod){
 }
 
 function renderWaveform(mod, key, d, samples){
-    if(!samples || samples.length===0){
+    if(!samples){
         if(wfStackEnabled) return;  // skip empty events, keep existing stack
         currentWaveform=null;
         Plotly.react('waveform-div',[],{...PL,title:{text:`${mod.n} — No samples`,font:{size:11,color:'#555'}}},PC2);
