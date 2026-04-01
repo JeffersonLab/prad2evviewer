@@ -78,6 +78,8 @@ DEFAULT_DWELL = 120.0    # seconds
 DEFAULT_POS_THRESHOLD = 0.5   # mm
 MOVE_TIMEOUT = 300.0     # seconds per single move
 MAX_LG_LAYERS = 2
+DEFAULT_VELO_X = 50.0    # mm/s  x-axis (fast)
+DEFAULT_VELO_Y = 5.0     # mm/s  y-axis (slow)
 
 SPMG_LABELS = {0: "Stop", 1: "Pause", 2: "Move", 3: "Go"}
 
@@ -206,6 +208,28 @@ def build_scan_path(scan_modules: List[Module]) -> Tuple[List[Module], int]:
 
     n_unopt = len(scan_modules) - len(path)
     return path, n_unopt
+
+
+def estimate_scan_time(path: List[Module], start: int, count: int,
+                       dwell: float, vx: float = DEFAULT_VELO_X,
+                       vy: float = DEFAULT_VELO_Y) -> float:
+    """Estimate total scan time from path geometry and motor velocities.
+
+    Both axes move simultaneously so move_time = max(|dx|/vx, |dy|/vy).
+    Total = sum(move_times) + n_modules * dwell_time.
+    """
+    end = min(start + count, len(path)) if count > 0 else len(path)
+    if end <= start:
+        return 0.0
+    total_move = 0.0
+    for i in range(start, end - 1):
+        dx = abs(path[i + 1].x - path[i].x)
+        dy = abs(path[i + 1].y - path[i].y)
+        tx = dx / vx if vx > 0 else 0.0
+        ty = dy / vy if vy > 0 else 0.0
+        total_move += max(tx, ty)
+    n_modules = end - start
+    return total_move + n_modules * dwell
 
 
 # ============================================================================
@@ -498,10 +522,16 @@ class ScanEngine:
 
     @property
     def eta_seconds(self) -> float:
+        if self.state == ScanState.IDLE:
+            return 0.0
         end = getattr(self, '_end_idx', len(self.path))
-        remaining = end - self.current_idx - 1 if self.state != ScanState.IDLE else 0
-        avg_move = 4.0    # rough estimate seconds per move
-        return max(0, remaining) * (avg_move + self.dwell_time)
+        next_idx = self.current_idx + 1
+        if next_idx >= end:
+            return self.dwell_remaining
+        remaining = end - next_idx
+        return estimate_scan_time(
+            self.path, next_idx, remaining, self.dwell_time,
+        ) + self.dwell_remaining
 
     def start(self, start_idx: int = 0, count: int = 0):
         if self._thread and self._thread.is_alive():
@@ -1528,8 +1558,13 @@ class SnakeScanGUI:
             self._btn_pause.configure(text="Resume")
 
     def _cmd_stop(self):
-        self.engine.stop_scan()
-        self._btn_pause.configure(text="Pause")
+        if self.engine.state != ScanState.IDLE:
+            self.engine.stop_scan()
+            self._btn_pause.configure(text="Pause")
+        else:
+            # No scan running — still send stop to halt any manual move
+            epics_stop(self.ep)
+            self._log("Motors stopped")
 
     def _cmd_skip(self):
         self.engine.skip_module()
@@ -1670,11 +1705,25 @@ class SnakeScanGUI:
             self._lbl_current.configure(text="Current:  --")
 
         # ETA
-        eta = eng.eta_seconds
         if eng.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED):
+            eta = eng.eta_seconds
             h, rem = divmod(int(eta), 3600)
             m, s = divmod(rem, 60)
             self._lbl_eta.configure(text=f"ETA:      {h}h {m:02d}m {s:02d}s")
+        elif eng.state == ScanState.IDLE and eng.path:
+            # Pre-scan estimate from path geometry and motor velocities
+            vx = self.ep.get("x_velo", DEFAULT_VELO_X) or DEFAULT_VELO_X
+            vy = self.ep.get("y_velo", DEFAULT_VELO_Y) or DEFAULT_VELO_Y
+            eta = estimate_scan_time(
+                eng.path, self._selected_start_idx,
+                self._count_var.get(), self._dwell_var.get(), vx, vy)
+            if eta > 0:
+                h, rem = divmod(int(eta), 3600)
+                m, s = divmod(rem, 60)
+                self._lbl_eta.configure(
+                    text=f"ETA:      ~{h}h {m:02d}m {s:02d}s")
+            else:
+                self._lbl_eta.configure(text="ETA:      --")
         else:
             self._lbl_eta.configure(text="ETA:      --")
 
@@ -1694,7 +1743,7 @@ class SnakeScanGUI:
         new_states = {
             "_btn_start":    "disabled" if running else "normal",
             "_btn_pause":    "normal" if running else "disabled",
-            "_btn_stop":     "normal" if running else "disabled",
+            "_btn_stop":     "normal",
             "_btn_skip":     "normal" if eng.state == ScanState.DWELLING
                              else "disabled",
             "_btn_ack":      "normal" if eng.state == ScanState.ERROR
