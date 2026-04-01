@@ -844,7 +844,7 @@ function init(){
     // mode toggle button — opens ET dialog when going online
     document.getElementById('btn-mode-toggle').onclick=()=>{
         if(mode==='online'){
-            fetch('/api/mode/file',{method:'POST'});
+            fetch('/api/mode/file',{method:'POST'}).then(()=>fetchConfigAndApply());
         } else {
             openEtDialog();
         }
@@ -873,6 +873,7 @@ function init(){
                 document.getElementById('et-status-msg').textContent='Error: '+d.error;
             } else {
                 closeEtDialog();
+                fetchConfigAndApply();
             }
         }).catch(()=>{
             document.getElementById('et-status-msg').textContent='Connection failed';

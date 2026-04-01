@@ -748,7 +748,18 @@ json ViewerServer::buildConfig()
     cfg["hist_enabled"] = (mode_.load() == Mode::Online) ? true : hist_enabled_.load();
 
     // data source capabilities
-    DataSourceCaps caps = data ? data->caps : DataSourceCaps{};
+    // In online mode without a file, report EVIO-native capabilities
+    DataSourceCaps caps;
+    if (data) {
+        caps = data->caps;
+    } else if (mode_.load() == Mode::Online) {
+        caps.source_type   = "evio";
+        caps.has_waveforms = true;
+        caps.has_peaks     = true;
+        caps.has_pedestals = true;
+        caps.has_epics     = true;
+        caps.has_sync      = true;
+    }
     cfg["source"] = {
         {"type", caps.source_type},
         {"has_waveforms", caps.has_waveforms},
