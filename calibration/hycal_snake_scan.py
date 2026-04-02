@@ -1764,6 +1764,8 @@ class SnakeScanGUI:
             self._lbl_dwell_cd.configure(text="")
 
     def _update_buttons(self):
+        if self.observer:
+            return
         eng = self.engine
         running = eng.state in (ScanState.MOVING, ScanState.DWELLING,
                                  ScanState.PAUSED, ScanState.ERROR)
