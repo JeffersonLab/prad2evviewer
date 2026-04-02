@@ -297,6 +297,13 @@ class RealEPICS:
             return True
         return False
 
+    def stop(self):
+        """Emergency stop -- bypasses writable and connection guards."""
+        for key in ("x_spmg", "y_spmg"):
+            pv = self._pvs.get(key)
+            if pv and pv.connected:
+                pv.put(int(SPMG.STOP))
+
 
 class SimulatedEPICS:
     """In-process motor simulation -- no EPICS needed."""
@@ -370,6 +377,10 @@ class SimulatedEPICS:
             self._evaluate_motion()
         return True
 
+    def stop(self):
+        self.put("x_spmg", int(SPMG.STOP))
+        self.put("y_spmg", int(SPMG.STOP))
+
     def _evaluate_motion(self):
         """Start / stop simulated motion based on SPMG state."""
         if self._x_spmg == SPMG.STOP or self._y_spmg == SPMG.STOP:
@@ -430,6 +441,9 @@ class ObserverEPICS:
     def put(self, key: str, value) -> bool:
         return False
 
+    def stop(self):
+        pass
+
 
 # -- helpers shared by both interfaces --------------------------------------
 
@@ -447,8 +461,7 @@ def epics_move_to(ep, x: float, y: float) -> bool:
     return True
 
 def epics_stop(ep):
-    ep.put("x_spmg", int(SPMG.STOP))
-    ep.put("y_spmg", int(SPMG.STOP))
+    ep.stop()
 
 def epics_pause(ep):
     ep.put("x_spmg", int(SPMG.PAUSE))
