@@ -162,6 +162,8 @@ private:
     void sleepMs(int ms);
 #endif
 
+    void joinAll();  // join all background threads (safe to call multiple times)
+
     // ── HTTP / resource handling ─────────────────────────────────────────
     void setupServer(int port);
     bool serveResource(const std::string &uri, WsServer::connection_ptr con);

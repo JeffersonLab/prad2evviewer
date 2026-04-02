@@ -51,7 +51,21 @@ void Progress::setFile(const std::string &f)
 
 ViewerServer::ViewerServer() = default;
 
-ViewerServer::~ViewerServer() { stop(); }
+ViewerServer::~ViewerServer()
+{
+    stop();
+    joinAll();
+}
+
+void ViewerServer::joinAll()
+{
+#ifdef WITH_ET
+    if (et_thread_.joinable()) et_thread_.join();
+#endif
+    { std::lock_guard<std::mutex> lk(load_mtx_);
+      if (load_thread_.joinable()) load_thread_.join(); }
+    if (server_thread_.joinable()) server_thread_.join();
+}
 
 void ViewerServer::init(const Config &cfg)
 {
@@ -214,14 +228,9 @@ void ViewerServer::run()
 
     server_->run();
 
-    // cleanup
-    running_ = false;
-#ifdef WITH_ET
-    et_active_ = false;
-    if (et_thread_.joinable()) et_thread_.join();
-#endif
-    { std::lock_guard<std::mutex> lk(load_mtx_);
-      if (load_thread_.joinable()) load_thread_.join(); }
+    // cleanup — stop() already set flags; joinAll() waits for threads
+    stop();
+    joinAll();
 }
 
 int ViewerServer::startAsync(int port)
@@ -262,12 +271,9 @@ void ViewerServer::stop()
         try { server_->stop_listening(); server_->stop(); } catch (...) {}
     }
 
-#ifdef WITH_ET
-    if (et_thread_.joinable()) et_thread_.join();
-#endif
-    { std::lock_guard<std::mutex> lk(load_mtx_);
-      if (load_thread_.joinable()) load_thread_.join(); }
-    if (server_thread_.joinable()) server_thread_.join();
+    // Thread joins are handled by run()/startAsync() cleanup — not here.
+    // stop() may be called from a signal handler where blocking on join()
+    // would hang if a thread is stuck in a library call (e.g. et_open).
 }
 
 // =========================================================================

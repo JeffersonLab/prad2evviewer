@@ -37,6 +37,13 @@ status EtChannel::Connect(const std::string &ip, int port, const std::string &et
 {
     if (IsETOpen()) {
         std::cout << "EtChannel Warning: a ET system has already been connected.\n";
+        return status::success;
+    }
+
+    // release stale handle (ET died but et_id not yet cleaned up)
+    if (et_id != nullptr) {
+        et_close(et_id);
+        et_id = nullptr;
     }
 
     // open et system
@@ -45,14 +52,16 @@ status EtChannel::Connect(const std::string &ip, int port, const std::string &et
     conf.set_cast(ET_DIRECT);
     conf.set_host(ip.c_str());
     conf.set_serverport(port);
+    // do not block forever — return immediately if ET is not available
+    conf.set_wait(ET_OPEN_NOWAIT);
 
     char *fname = strdup(et_file.c_str());
-    auto status = et_open(&et_id, fname, conf.configure().get());
+    auto st = et_open(&et_id, fname, conf.configure().get());
     free(fname);
-    if (status != ET_OK) {
+    if (st != ET_OK) {
         et_id = nullptr;  // et_open may leave et_id in an invalid state on failure
     }
-    return et_status(status, true);
+    return et_status(st, true);
 }
 
 // create a station and attach to it
