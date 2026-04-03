@@ -588,7 +588,7 @@ class PedestalMonitorWindow(QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle("HyCal Pedestal Monitor")
-        self.resize(1400, 900)
+        self.resize(1600, 1000)
         self._apply_dark_palette()
 
         central = QWidget()
@@ -642,11 +642,11 @@ class PedestalMonitorWindow(QMainWindow):
 
         # Right panel mode toggle
         self._right_mode_btn = QPushButton("Delta")
-        self._right_mode_btn.setFixedWidth(60)
+        self._right_mode_btn.setFixedWidth(75)
         self._right_mode_btn.setStyleSheet(
             "QPushButton{background:#21262d;color:#58a6ff;"
-            "border:1px solid #30363d;padding:3px 8px;"
-            "font:bold 10px Monospace;border-radius:3px;}"
+            "border:1px solid #30363d;padding:4px 10px;"
+            "font:bold 13px Monospace;border-radius:3px;}"
             "QPushButton:hover{background:#30363d;}")
         self._right_mode_btn.clicked.connect(self._toggle_right_mode)
         rng.addWidget(self._right_mode_btn)
