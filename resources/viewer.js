@@ -4,6 +4,7 @@
 // =========================================================================
 let modules=[], totalEvents=0, currentEvent=1;
 let currentEventNumber=0, currentTriggerBits=0;  // DAQ event number + trigger from last loaded event
+let triggerBitsDef=[];  // [{bit, mask, name, label}, ...]
 let eventChannels={};
 let selectedModule=null, hoveredModule=null;
 const PC=['#00b4d8','#ff6b6b','#51cf66','#ffd43b','#cc5de8','#ff922b','#20c997','#f06595'];
@@ -136,9 +137,21 @@ function sampleLabel(){
 }
 
 // Update status bar based on active tab
+function decodeTriggerBits(bits){
+    if(!bits) return '';
+    const names=[];
+    for(const d of triggerBitsDef){
+        if(bits & (1<<d.bit)) names.push(d.name);
+    }
+    // include hex and decoded names
+    let s=` trig=0x${bits.toString(16)}`;
+    if(names.length) s+=` [${names.join('+')}]`;
+    return s;
+}
+
 function updateStatusBar(){
     const modeTag = mode === 'online' ? ' [LIVE]' : '';
-    const trig = currentTriggerBits ? ` trig=0x${currentTriggerBits.toString(16)}` : '';
+    const trig = decodeTriggerBits(currentTriggerBits);
     const label = sampleLabel();
 
     if(activeTab==='cluster'){
@@ -1002,6 +1015,7 @@ function applyConfig(data){
     histEnabled=data.hist_enabled||false;
     histConfig=data.hist||{};
     refLines=data.ref_lines||{};
+    triggerBitsDef=data.trigger_bits||[];
     // cluster histogram configs
     if(data.cluster_hist){
         clHistMin=data.cluster_hist.min||0;

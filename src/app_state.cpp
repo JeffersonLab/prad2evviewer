@@ -140,6 +140,16 @@ void AppState::init(const std::string &db_dir,
                 ref_lines = j["ref_lines"];
         }
     }
+
+    // load trigger bit definitions
+    {
+        std::string tbpath = findFile("trigger_bits.json", db_dir);
+        std::string tbs = readFile(tbpath);
+        if (!tbs.empty()) {
+            auto tb = json::parse(tbs, nullptr, false);
+            if (tb.is_array()) trigger_bits_def = tb;
+        }
+    }
     if (!waveform_loaded) {
         std::string hcfg_path = findFile("hist_config.json", db_dir);
         std::string hcfg_str = readFile(hcfg_path);
@@ -1458,6 +1468,7 @@ void AppState::fillConfigJson(json &cfg) const
         {"height_step", hist_cfg.height_step},
     };
     cfg["ref_lines"] = ref_lines;
+    cfg["trigger_bits"] = trigger_bits_def;
     cfg["cluster_hist"] = {{"min", cl_hist_min}, {"max", cl_hist_max}, {"step", cl_hist_step}};
     cfg["nclusters_hist"] = {{"min", nclusters_hist_min}, {"max", nclusters_hist_max}, {"step", nclusters_hist_step}};
     cfg["nblocks_hist"] = {{"min", nblocks_hist_min}, {"max", nblocks_hist_max}, {"step", nblocks_hist_step}};

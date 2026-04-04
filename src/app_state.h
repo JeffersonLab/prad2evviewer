@@ -80,6 +80,9 @@ struct AppState {
     // key = plot name, value = array of {axis, pos, lw, ls, color}
     nlohmann::json ref_lines = nlohmann::json::object();
 
+    // trigger bit definitions (pass-through to frontend)
+    nlohmann::json trigger_bits_def = nlohmann::json::array();
+
     evc::DaqConfig daq_cfg;
     fdec::HyCalSystem hycal;
     fdec::ClusterConfig cluster_cfg;
