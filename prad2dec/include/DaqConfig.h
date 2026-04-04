@@ -70,8 +70,12 @@ struct DaqConfig
     // EPICS data bank tag (within EPICS events)
     uint32_t epics_bank_tag;
 
-    // SSP/MPD raw data bank tag (GEM readout)
-    uint32_t ssp_bank_tag;
+    // SSP/MPD raw data bank tags (GEM readout)
+    // Multiple tags: 0xE10C (SSP trigger in TI master), 0x0DEA (VTP/MPD GEM data)
+    std::vector<uint32_t> ssp_bank_tags;
+
+    // FADC250 hardware-format raw data bank tag (0xE109, used when rol2 is skipped)
+    uint32_t fadc_raw_tag = 0;
 
     // --- TI data format (fallback for single-event / non-CODA3 data) --------
     // TI bank layout: word[0]=header, word[1]=trigger#, word[2]=ts_low, word[3]=ts_high
@@ -111,6 +115,9 @@ struct DaqConfig
     // TI master crate tag (contains run info bank)
     uint32_t ti_master_tag;
 
+    // --- diagnostics -----------------------------------------------------------
+    bool verbose_decode = false;   // log unmatched bank tags in DecodeEvent
+
     // --- per-channel pedestals (ADC1881M) ------------------------------------
     struct PedEntry { float mean = 0.f; float rms = 0.f; };
 
@@ -134,7 +141,7 @@ struct DaqConfig
     bool is_physics(uint32_t tag) const
     {
         // built-in trigger range for physics (0xFF50-0xFF8F, 0x00A0-0x00BF)
-        if (((tag & 0x00FF) <= 0x00BF && (tag & 0x00FF) >= 0x00A0) || (tag >= 0xFF50 && tag <= 0xFF8F))
+        if ((tag >= 0x00A0 && tag <= 0x00BF) || (tag >= 0xFF50 && tag <= 0xFF8F))
             return true;
         // single-event tags
         for (auto t : physics_tags)
@@ -156,6 +163,13 @@ struct DaqConfig
     }
 
     bool is_epics(uint32_t tag) const { return tag == epics_tag; }
+
+    bool is_ssp_bank(uint32_t tag) const
+    {
+        for (auto t : ssp_bank_tags)
+            if (t == tag) return true;
+        return false;
+    }
 
     // CODA trigger bank identification (spec pages 21, 26, 31)
     // Built trigger bank: 0xFF20-0xFF2F (created by Event Builder)

@@ -1,5 +1,6 @@
 #include "EvChannel.h"
 #include "Fadc250Decoder.h"
+#include "Fadc250RawDecoder.h"
 #include "Adc1881mDecoder.h"
 #include "SspDecoder.h"
 #include "evio.h"
@@ -492,8 +493,25 @@ bool EvChannel::DecodeEvent(int i, fdec::EventData &evt,
                 continue;
             }
 
+            // --- FADC250 hardware-format raw banks (fallback when composite unavailable) ---
+            if (n.tag == config.fadc_raw_tag && n.type == DATA_UINT32
+                && n.data_words > 0 && roc_idx < fdec::MAX_ROCS)
+            {
+                uint32_t roc_tag = (n.parent >= 0) ? nodes[n.parent].tag : 0;
+
+                fdec::RocData &roc = evt.rocs[roc_idx];
+                roc.present = true;
+                roc.tag = roc_tag;
+
+                fdec::Fadc250RawDecoder::DecodeRoc(GetData(n), n.data_words, roc);
+
+                evt.roc_index[roc_idx] = roc_idx;
+                roc_idx++;
+                continue;
+            }
+
             // --- SSP/MPD raw data banks (GEM) ---
-            if (ssp_evt && n.tag == config.ssp_bank_tag
+            if (ssp_evt && config.is_ssp_bank(n.tag)
                 && n.data_words > 0 && n.type == DATA_UINT32)
             {
                 uint32_t roc_tag = (n.parent >= 0) ? nodes[n.parent].tag : 0;
@@ -511,6 +529,25 @@ bool EvChannel::DecodeEvent(int i, fdec::EventData &evt,
     }
 
     evt.nrocs = roc_idx;
+
+    // diagnostic: log depth-2 data banks that didn't match any configured tag
+    if (config.verbose_decode && roc_idx == 0 && !ssp_decoded) {
+        for (auto &n : nodes) {
+            if (n.depth < 2 || n.data_words == 0) continue;
+            if (n.tag == config.ti_bank_tag) continue;
+            if (n.tag == config.fadc_composite_tag) continue;
+            if (n.tag == config.fadc_raw_tag) continue;
+            if (config.is_ssp_bank(n.tag)) continue;
+            if (n.tag == config.run_info_tag || n.tag == config.daq_config_tag) continue;
+            if (n.type == DATA_CHARSTAR8 || n.type == DATA_CHAR8) continue;
+            uint32_t ptag = (n.parent >= 0) ? nodes[n.parent].tag : 0;
+            std::cerr << "DecodeEvent: unmatched bank tag=0x" << std::hex << n.tag
+                      << " type=" << TypeName(n.type) << " words=" << std::dec
+                      << n.data_words << " in ROC=0x" << std::hex << ptag
+                      << std::dec << "\n";
+        }
+    }
+
     return roc_idx > 0 || ssp_decoded;
 }
 

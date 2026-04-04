@@ -94,6 +94,7 @@ endif()
 set(PRAD2DEC_SOURCES
     src/EvChannel.cpp
     src/Fadc250Decoder.cpp
+    src/Fadc250RawDecoder.cpp
     src/Adc1881mDecoder.cpp
     src/SspDecoder.cpp
     src/WaveAnalyzer.cpp

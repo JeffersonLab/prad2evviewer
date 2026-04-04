@@ -71,7 +71,17 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
         if (bt.contains("run_info"))       cfg.run_info_tag       = parse_hex(bt["run_info"]);
         if (bt.contains("daq_config"))     cfg.daq_config_tag     = parse_hex(bt["daq_config"]);
         if (bt.contains("epics_data"))     cfg.epics_bank_tag     = parse_hex(bt["epics_data"]);
-        if (bt.contains("ssp_raw"))        cfg.ssp_bank_tag       = parse_hex(bt["ssp_raw"]);
+        if (bt.contains("ssp_raw")) {
+            cfg.ssp_bank_tags.clear();
+            auto &v = bt["ssp_raw"];
+            if (v.is_array()) {
+                for (auto &item : v)
+                    cfg.ssp_bank_tags.push_back(parse_hex(item));
+            } else {
+                cfg.ssp_bank_tags.push_back(parse_hex(v));
+            }
+        }
+        if (bt.contains("fadc_raw"))       cfg.fadc_raw_tag       = parse_hex(bt["fadc_raw"]);
     }
 
     // TI format
