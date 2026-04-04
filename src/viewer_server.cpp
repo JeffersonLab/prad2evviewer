@@ -22,6 +22,7 @@
 #include <cmath>
 #include <ctime>
 #include <chrono>
+#include <map>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -739,6 +740,7 @@ void ViewerServer::etReaderThread()
             auto bench_start = hrc::now();
             int64_t n_read = 0, n_empty = 0, n_scan = 0, n_decode = 0, n_filtered = 0;
             int64_t us_read = 0, us_scan = 0, us_decode = 0, us_process = 0, us_ring = 0;
+            std::map<uint8_t, int> bench_tt_decoded, bench_tt_filtered;
             auto last_bench = bench_start;
             constexpr auto bench_interval = std::chrono::seconds(10);
 
@@ -764,8 +766,18 @@ void ViewerServer::etReaderThread()
                                   << "decode=" << us_decode/1000 << "ms "
                                   << "process=" << us_process/1000 << "ms "
                                   << "ring=" << us_ring/1000 << "ms\n";
+                        if (!bench_tt_decoded.empty() || !bench_tt_filtered.empty()) {
+                            std::cerr << "  decoded:";
+                            for (auto &[tt,c] : bench_tt_decoded)
+                                std::cerr << " 0x" << std::hex << (int)tt << "=" << std::dec << c;
+                            std::cerr << " | filtered:";
+                            for (auto &[tt,c] : bench_tt_filtered)
+                                std::cerr << " 0x" << std::hex << (int)tt << "=" << std::dec << c;
+                            std::cerr << " | nrocs=" << event.nrocs << "\n";
+                        }
                         n_read = n_empty = n_scan = n_decode = n_filtered = 0;
                         us_read = us_scan = us_decode = us_process = us_ring = 0;
+                        bench_tt_decoded.clear(); bench_tt_filtered.clear();
                         last_bench = now;
                     }
                     continue;
@@ -804,8 +816,13 @@ void ViewerServer::etReaderThread()
                     auto td1 = hrc::now();
                     us_decode += std::chrono::duration_cast<std::chrono::microseconds>(td1 - td0).count();
 
-                    if (!decoded) { n_filtered++; continue; }
+                    if (!decoded) {
+                        n_filtered++;
+                        bench_tt_filtered[event.info.trigger_type]++;
+                        continue;
+                    }
                     n_decode++;
+                    bench_tt_decoded[event.info.trigger_type]++;
                     last_ti_ts = event.info.timestamp;
 
                     auto tp0 = hrc::now();
