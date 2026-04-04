@@ -9,8 +9,8 @@ Generates trigger mask config text (only disabled channels are written).
 Usage
 -----
     python trigger_mask_editor.py
-    python trigger_mask_editor.py -o output.trg          # auto-save path
-    python trigger_mask_editor.py -i existing.trg         # load existing mask
+    python trigger_mask_editor.py -o output.cnf          # auto-save path
+    python trigger_mask_editor.py -i existing.cnf         # load existing mask
 """
 
 from __future__ import annotations
@@ -498,8 +498,8 @@ class TriggerMaskEditor(QMainWindow):
 
     def _save_as(self):
         path, _ = QFileDialog.getSaveFileName(
-            self, "Save Trigger Mask", self._output_path or "trigger_mask.trg",
-            "Trigger Files (*.trg);;All Files (*)")
+            self, "Save Trigger Mask", self._output_path or "trigger_mask.cnf",
+            "Config Files (*.cnf);;All Files (*)")
         if path:
             self._output_path = path
             with open(path, "w") as f:
@@ -509,7 +509,7 @@ class TriggerMaskEditor(QMainWindow):
     def _load_file(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Load Trigger Mask", "",
-            "Trigger Files (*.trg);;All Files (*)")
+            "Config Files (*.cnf);;All Files (*)")
         if path:
             with open(path) as f:
                 text = f.read()

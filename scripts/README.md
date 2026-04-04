@@ -37,6 +37,16 @@ Pedestals must be measured **before the first DAQ run of each shift** while DAQ 
 
 Thresholds are defined at the top of the script and can be adjusted.
 
+## trigger_mask_editor.py
+
+PyQt6 visual editor for FAV3 trigger masks. Displays a HyCal geo view (with LMS1-3, LMSP, V1-V4 below) and lets you click or drag modules to toggle channels off/on. Generates trigger mask `.cnf` files -- only slots with disabled channels are written. Unmapped DAQ channels (slot positions with no module) are always masked off.
+
+```bash
+python scripts/trigger_mask_editor.py                     # start fresh
+python scripts/trigger_mask_editor.py -i existing.cnf     # load existing mask
+python scripts/trigger_mask_editor.py -o output.cnf       # set default save path
+```
+
 ## gem_layout.py
 
 Visualize GEM strip layout from `gem_map.json`.
