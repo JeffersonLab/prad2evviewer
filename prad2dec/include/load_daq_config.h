@@ -51,6 +51,7 @@ inline bool load_daq_config(const std::string &path, DaqConfig &cfg)
             for (auto &v : et["monitoring"])
                 cfg.monitoring_tags.push_back(parse_hex(v));
         }
+        if (et.contains("physics_base")) cfg.physics_base    = parse_hex(et["physics_base"]);
         if (et.contains("prestart"))     cfg.prestart_tag    = parse_hex(et["prestart"]);
         if (et.contains("go"))           cfg.go_tag          = parse_hex(et["go"]);
         if (et.contains("end"))          cfg.end_tag         = parse_hex(et["end"]);

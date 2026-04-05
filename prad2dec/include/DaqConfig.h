@@ -26,6 +26,9 @@ struct DaqConfig
     // Built-trigger mode: 0xFF50-0xFF8F (num = event count)
     std::vector<uint32_t> physics_tags;
 
+    // physics base offset: event_tag = physics_base + trigger_type
+    uint32_t physics_base = 0x80;
+
     // monitoring event tags — physics events with TI data but no waveforms
     // (e.g. 100Hz pulser, scaler triggers). Classified as physics by is_physics()
     // but skipped in file viewer navigation and event iteration.
