@@ -1065,6 +1065,14 @@ class SnakeScanWindow(QMainWindow):
 
     def _updateCanvas(self):
         if self.observer:
+            colors = {}
+            for m in self.all_modules:
+                if m.mod_type == "LMS": continue
+                if m.mod_type == "PbGlass": colors[m.name] = C.MOD_GLASS
+                elif m.mod_type == "PbWO4": colors[m.name] = C.MOD_PWO4_BG
+            for m in self.scan_modules:
+                colors[m.name] = C.MOD_TODO
+            self._map.setModuleColors(colors)
             rx, ry = self.ep.get("x_rbv", BEAM_CENTER_X), self.ep.get("y_rbv", BEAM_CENTER_Y)
             self._map.setMarkerPosition(*ptrans_to_module(rx, ry)); return
 
