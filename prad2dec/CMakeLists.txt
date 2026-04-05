@@ -47,17 +47,25 @@ endif()
 if(EVIO_SOURCE STREQUAL "fetch")
     # We only need the C library; skip C++ eviocc (which requires Boost,
     # LZ4, Disruptor).  evio-6.0 has a bug: find_package(Boost REQUIRED)
-    # runs unconditionally even with C_ONLY=ON, so suppress it.
+    # runs unconditionally even with C_ONLY=ON, so we patch it out after
+    # download but before add_subdirectory.
     set(C_ONLY ON CACHE BOOL "" FORCE)
     set(MAKE_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(CMAKE_DISABLE_FIND_PACKAGE_Boost TRUE)
     FetchContent_Declare(evio
         GIT_REPOSITORY https://github.com/JeffersonLab/evio.git
         GIT_TAG        evio-6.0
         GIT_PROGRESS   TRUE
     )
-    FetchContent_MakeAvailable(evio)
-    unset(CMAKE_DISABLE_FIND_PACKAGE_Boost)
+    FetchContent_GetProperties(evio)
+    if(NOT evio_POPULATED)
+        FetchContent_Populate(evio)
+        # Patch out unconditional REQUIRED on Boost (only C++ lib needs it)
+        file(READ "${evio_SOURCE_DIR}/CMakeLists.txt" _evio_cml)
+        string(REPLACE "find_package(Boost REQUIRED" "find_package(Boost"
+               _evio_cml "${_evio_cml}")
+        file(WRITE "${evio_SOURCE_DIR}/CMakeLists.txt" "${_evio_cml}")
+    endif()
+    add_subdirectory(${evio_SOURCE_DIR} ${evio_BINARY_DIR})
 elseif(EVIO_SOURCE STREQUAL "system")
     find_package(evio REQUIRED)
 endif()
