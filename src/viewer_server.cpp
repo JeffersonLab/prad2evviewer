@@ -22,7 +22,6 @@
 #include <cmath>
 #include <ctime>
 #include <chrono>
-#include <map>
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
@@ -740,7 +739,6 @@ void ViewerServer::etReaderThread()
             auto bench_start = hrc::now();
             int64_t n_read = 0, n_empty = 0, n_scan = 0, n_decode = 0, n_filtered = 0;
             int64_t us_read = 0, us_scan = 0, us_decode = 0, us_process = 0, us_ring = 0;
-            std::map<uint8_t, int> bench_tt_decoded, bench_tt_filtered;
             auto last_bench = bench_start;
             constexpr auto bench_interval = std::chrono::seconds(10);
 
@@ -757,36 +755,18 @@ void ViewerServer::etReaderThread()
                     auto now = hrc::now();
                     if (now - last_bench >= bench_interval) {
                         auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_bench).count();
-                        // build bench line as single string to avoid interleaved cerr
-                        {
-                            char buf[512];
-                            snprintf(buf, sizeof(buf),
-                                "ET bench (%ldms): %ld read, %ld empty, %ld scanned, "
-                                "%ld decoded, %ld filtered | "
-                                "read=%ldms scan=%ldms decode=%ldms process=%ldms ring=%ldms",
-                                (long)elapsed_ms, (long)n_read, (long)n_empty, (long)n_scan,
-                                (long)n_decode, (long)n_filtered,
-                                (long)(us_read/1000), (long)(us_scan/1000), (long)(us_decode/1000),
-                                (long)(us_process/1000), (long)(us_ring/1000));
-                            std::string line(buf);
-                            if (!bench_tt_decoded.empty() || !bench_tt_filtered.empty()) {
-                                line += "\n  decoded:";
-                                for (auto &[tt,c] : bench_tt_decoded) {
-                                    snprintf(buf, sizeof(buf), " 0x%02x=%d", (int)tt, c);
-                                    line += buf;
-                                }
-                                line += " | filtered:";
-                                for (auto &[tt,c] : bench_tt_filtered) {
-                                    snprintf(buf, sizeof(buf), " 0x%02x=%d", (int)tt, c);
-                                    line += buf;
-                                }
-                            }
-                            line += "\n";
-                            std::cerr << line;
-                        }
+                        char buf[256];
+                        snprintf(buf, sizeof(buf),
+                            "ET bench (%ldms): %ld read, %ld empty, %ld scanned, "
+                            "%ld decoded, %ld filtered | "
+                            "read=%ldms scan=%ldms decode=%ldms process=%ldms ring=%ldms\n",
+                            (long)elapsed_ms, (long)n_read, (long)n_empty, (long)n_scan,
+                            (long)n_decode, (long)n_filtered,
+                            (long)(us_read/1000), (long)(us_scan/1000), (long)(us_decode/1000),
+                            (long)(us_process/1000), (long)(us_ring/1000));
+                        std::cerr << buf;
                         n_read = n_empty = n_scan = n_decode = n_filtered = 0;
                         us_read = us_scan = us_decode = us_process = us_ring = 0;
-                        bench_tt_decoded.clear(); bench_tt_filtered.clear();
                         last_bench = now;
                     }
                     continue;
@@ -825,13 +805,8 @@ void ViewerServer::etReaderThread()
                     auto td1 = hrc::now();
                     us_decode += std::chrono::duration_cast<std::chrono::microseconds>(td1 - td0).count();
 
-                    if (!decoded) {
-                        n_filtered++;
-                        bench_tt_filtered[event.info.trigger_type]++;
-                        continue;
-                    }
+                    if (!decoded) { n_filtered++; continue; }
                     n_decode++;
-                    bench_tt_decoded[event.info.trigger_type]++;
                     last_ti_ts = event.info.timestamp;
 
                     auto tp0 = hrc::now();
