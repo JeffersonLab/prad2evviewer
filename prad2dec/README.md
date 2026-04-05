@@ -1,14 +1,16 @@
 # prad2dec
 
-Static library for reading CODA EVIO data and decoding FADC250/SSP waveforms.
+Static library for reading CODA EVIO data and decoding detector electronics.
 
 ## Components
 
-- **EvChannel** — Reads EVIO files, scans bank trees, decodes FADC250 composite data and SSP/MPD banks
-- **EtChannel** — Subclass that reads from a live ET system (requires `-DWITH_ET=ON`)
-- **Fadc250Decoder** — Decodes composite bank payload into `SlotData`/`ChannelData` structs
-- **SspDecoder** — Decodes SSP fiber data into `MpdData`/`ApvData` (GEM readout)
-- **WaveAnalyzer** — Waveform analysis: pedestal, peak search, integration
+- **EvChannel** — EVIO file reader with bank tree scanning and multi-format decoding
+- **EtChannel** — Subclass for live ET system reading (`-DWITH_ET=ON`)
+- **Fadc250Decoder** — FADC250 composite waveform decoding
+- **Fadc250RawDecoder** — FADC250 raw hardware format decoding
+- **Adc1881mDecoder** — ADC1881M decoding (original PRad)
+- **SspDecoder** — SSP/MPD fiber data for GEM readout
+- **WaveAnalyzer** — Pedestal subtraction, peak search, integration
 
 ## Usage
 
@@ -21,14 +23,15 @@ while (ch.Read() == evc::status::success) {
     if (!ch.Scan()) continue;
     for (int i = 0; i < ch.GetNEvents(); ++i) {
         ch.DecodeEvent(i, event);
-        // access event.rocs[r].slots[s].channels[c].samples[]
+        // event.info  — timestamp, trigger type/bits, run number
+        // event.rocs[r].slots[s].channels[c].samples[]
     }
 }
 ```
 
 ## Dependencies
 
-- [evio](https://github.com/JeffersonLab/evio) (evio-6.0) — always required
-- [et](https://github.com/JeffersonLab/et) — optional, for EtChannel (`-DWITH_ET=ON`)
+- [evio](https://github.com/JeffersonLab/evio) (evio-6.0) — required
+- [et](https://github.com/JeffersonLab/et) — optional, for EtChannel
 
-By default both are resolved from the Hall-B CODA installation; if not found, CMake falls back to fetching from GitHub. Override with `-DEVIO_SOURCE=fetch` / `-DET_SOURCE=fetch` (always fetch) or `=system` (use `find_package`).
+Both are resolved from the Hall-B CODA installation by default; if not found, CMake fetches from GitHub. Override with `-DEVIO_SOURCE=fetch` / `-DET_SOURCE=fetch`.

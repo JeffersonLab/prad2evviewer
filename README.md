@@ -1,6 +1,9 @@
-# PRad2 Event Viewer & Monitor
+# PRad-II Event Viewer & Monitor
 
-FADC250 waveform decoder, event viewer, and online monitor for PRad-II at Jefferson Lab. Also supports original PRad (ADC1881M) via DAQ configuration.
+EVIO decoder, event viewer, and online monitor for the PRad-II experiment at Jefferson Lab.
+Decodes FADC250 waveforms (HyCal) and SSP/MPD data (GEM), with a web-based GUI for
+waveform inspection, clustering, gain monitoring, and physics replay.
+Also supports original PRad (ADC1881M) via DAQ configuration.
 
 ## Building
 
@@ -11,31 +14,27 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-CMake >= 3.14, C++17. By default, `evio` and `et` are resolved from the Hall-B CODA installation (`EVIO_SOURCE=hallb`, `ET_SOURCE=hallb`). If the Hall-B libraries are not found, CMake automatically falls back to fetching them from GitHub. Other dependencies (`nlohmann/json`, `websocketpp`, `asio`) are always fetched automatically.
+CMake >= 3.14, C++17. Dependencies (`evio`, `et`) are resolved from the Hall-B CODA installation by default; if not found, CMake falls back to fetching from GitHub. Other dependencies (`nlohmann/json`, `websocketpp`, `asio`) are always fetched automatically.
 
 Optional flags:
-- `-DBUILD_ANALYSIS=ON` — ROOT-based replay tools (requires ROOT 6.0+)
+- `-DBUILD_ANALYSIS=ON` — ROOT-based replay and analysis tools (requires ROOT 6.0+)
 - `-DBUILD_GUI=ON` — Qt standalone viewer and remote client (requires Qt6 or Qt5 WebEngine)
+- `-DWITH_ET=OFF` — disable ET (live monitoring); required on Windows
+- `-DEVIO_SOURCE=fetch` — force fetching evio from GitHub (no CODA needed)
 
-To force fetching from source: `cmake -B build -DEVIO_SOURCE=fetch -DET_SOURCE=fetch`
+### Windows (MSYS2)
 
-### Windows
-
-File-based tools (`prad2_server`, `gem_dump`, `evio_dump`, `ped_calc`) build on Windows with `-DWITH_ET=OFF`, which skips the ET library and live monitor.
-
-**MSYS2 setup:**
-```bash
-pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-expat
-```
-
-**Build (PowerShell with MinGW in PATH):**
 ```powershell
+# MSYS2 packages
+pacman -S mingw-w64-x86_64-toolchain mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja mingw-w64-x86_64-expat
+
+# Build (PowerShell with MinGW in PATH)
 $env:PATH = "C:\msys64\mingw64\bin;" + $env:PATH
 cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWITH_ET=OFF
 cmake --build build
 ```
 
-**Alternative:** build natively in WSL2.
+Or build natively in WSL2.
 
 ## Server
 
@@ -123,11 +122,11 @@ prad2_client                            # connect to localhost:5051
 prad2_client -H clonpc19 -p 8080       # connect to remote server
 ```
 
-## Test & Analysis Tools
+## Tools
 
-See [test/README.md](test/README.md) (`evio_dump`, `ped_calc`, `gem_dump`, `evc_test`, `et_feeder`) and [analysis/README.md](analysis/README.md) (ROOT replay tools).
+See [test/README.md](test/README.md) (diagnostic: `evio_dump`, `gem_dump`, `ped_calc`, `livetime`, `ts_dump`) and [analysis/README.md](analysis/README.md) (ROOT replay and physics analysis).
 
-GEM visualization scripts: [scripts/README.md](scripts/README.md).
+Python utilities: [scripts/README.md](scripts/README.md) (HyCal scaler map, pedestal monitor, trigger mask editor, GEM visualization).
 
 ## Installation
 
@@ -153,14 +152,16 @@ PRad support: use `-D database/prad1/prad_daq_config.json` with the server.
 ## Project Structure
 
 ```
-database/           Config, DAQ maps, calibration, gem_map.json
-prad2dec/           libprad2dec (EVIO/ET decoder, FADC250, SSP, waveform analysis)
-prad2det/           libprad2det (HyCal/GEM clustering, reconstruction)
-resources/          Web GUI (HTML/CSS/JS), report generation
-src/                prad2_server, prad2evviewer, prad2_client, viewer_server, app_state
-analysis/           Replay + physics analysis (optional, requires ROOT)
-test/               Diagnostic tools (evio_dump, gem_dump, ped_calc, etc.)
-scripts/            Python visualization (gem_layout, gem_cluster_view)
+prad2dec/           libprad2dec — EVIO/ET reader, FADC250/SSP/ADC1881M decoders
+prad2det/           libprad2det — HyCal/GEM clustering and reconstruction
+src/                Server, Qt GUI, data source layer
+resources/          Web frontend (HTML/CSS/JS)
+database/           DAQ config, channel maps, calibration constants
+test/               Diagnostic CLI tools
+analysis/           ROOT-based replay and physics analysis (optional)
+calibration/        HyCal calibration scan tools
+scripts/            Python monitoring and visualization utilities
+docs/               ROL references, API documentation
 ```
 
 ## Contributors

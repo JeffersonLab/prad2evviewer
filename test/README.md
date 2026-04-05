@@ -10,6 +10,29 @@ evio_dump <file> [-m mode] [-n N] [-D daq_config.json]
 
 Modes: (default) summary by tag, `tree`, `tags`, `epics`, `event` (detail for event N), `triggers`.
 
+## livetime
+
+DAQ live time calculator. Two methods: DSC2 gated/ungated scalers from SYNC events, and pulser event counting. Accepts a single file, a base name (auto-discovers `.00000`, `.00001`, ...), or a directory.
+
+```bash
+livetime <input> [-D daq_config.json] [-f freq_hz] [-t interval_sec]
+```
+
+| Option | Description |
+|--------|-------------|
+| `-f <hz>` | Pulser frequency (default: 100 Hz) |
+| `-t <sec>` | Periodic report interval (default: 10 sec) |
+
+Outputs a periodic table (DSC2 and pulser live time vs elapsed time) followed by a summary with per-channel DSC2 breakdowns.
+
+## ts_dump
+
+Dump TI timestamp and trigger information for each event.
+
+```bash
+ts_dump <file> [-n max_events] [-D daq_config.json]
+```
+
 ## ped_calc
 
 Compute HyCal per-channel pedestals from trigger-selected events.
@@ -41,23 +64,9 @@ gem_dump <evio_file> [options]
 | `-z <sigma>` | Override zero-suppression threshold |
 | `-f <filter>` | APV filter for `evdump` (see below) |
 
-The `evdump` mode outputs JSON with three pipeline layers: `raw_apvs` (raw ADC), `zs_apvs` (zero-suppressed channels by APV address), and per-detector `clusters` + `hits_2d`. Use with `scripts/gem_cluster_view.py`.
+The `evdump` mode outputs JSON with three pipeline layers: `raw_apvs`, `zs_apvs`, and per-detector `clusters` + `hits_2d`. Use with `scripts/gem_cluster_view.py`.
 
-By default evdump selects the first event with 2D hits. Use `-n K` for first K matching events, `-e N` for a specific event, or `-f` for custom APV-based filtering:
-
-```
--f field=val[,val]:min_dets
-```
-Fields: `pos`, `plane` (X/Y), `match` (+Y/-Y), `orient`, `det`.
-
-Examples:
-```bash
-gem_dump data.evio -m ped -o gem_ped.json                       # pedestals
-gem_dump data.evio -P gem_ped.json -m summary -n 50             # overview
-gem_dump data.evio -P gem_ped.json -m evdump -e 42              # dump event 42
-gem_dump data.evio -P gem_ped.json -m evdump -f pos=10,11:3 -n 5  # beam-hole APVs in >=3 GEMs
-python scripts/gem_cluster_view.py gem_event.json database/gem_map.json
-```
+Filter syntax: `-f field=val[,val]:min_dets` (fields: `pos`, `plane`, `match`, `orient`, `det`).
 
 ## ET tools (requires `-DWITH_ET=ON`)
 
