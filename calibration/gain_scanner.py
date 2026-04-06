@@ -171,7 +171,13 @@ class HVClient:
         self._read_only = read_only
 
     def connect(self, password: str = ""):
-        import websocket
+        try:
+            import websocket
+        except ImportError:
+            if self._read_only:
+                self._log("HV: websocket-client not installed — running without HV (read-only)", level="warn")
+                return
+            raise ImportError("pip install websocket-client  (required for HV control)")
         self._log(f"HV: connecting to {self.url}")
         self._ws = websocket.create_connection(self.url, timeout=10)
         init_msg = json.loads(self._ws.recv())
@@ -208,6 +214,9 @@ class HVClient:
 
         Returns dict with vset, vmon, limit, on, status, or None on error.
         """
+        if self._ws is None:
+            self._log(f"HV: GET {name} → not connected", level="warn")
+            return None
         self._send({"type": "get_voltage", "name": name})
         resp = self._recv_until("get_voltage_response", timeout=5)
         if resp:
