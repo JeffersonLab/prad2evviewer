@@ -6,6 +6,9 @@ PyQt6 GUI that drives the HyCal transporter in a snake pattern so the
 beam centres on each scanned module, dwells for a configurable time,
 then advances to the next module.
 
+Includes a live FADC scaler overlay so the beam spot is visible as a
+hot region on the HyCal map.
+
 Usage
 -----
     python hycal_snake_scan.py                          # simulation
@@ -35,22 +38,18 @@ import html as html_mod
 import json
 import math
 import os
-import random
 import sys
-import threading
-import time
 from datetime import datetime
-from enum import IntEnum
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QGroupBox, QPushButton, QLabel, QComboBox, QSpinBox,
     QDoubleSpinBox, QTextEdit, QProgressBar, QMessageBox, QSplitter,
-    QSizePolicy, QFrame, QDialog,
+    QSizePolicy, QFrame, QDialog, QLineEdit, QScrollArea, QSlider,
 )
-from PyQt6.QtCore import Qt, QRectF, QPointF, QTimer, pyqtSignal
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+from PyQt6.QtGui import QFont
 
 from scan_utils import (
     C, Module, load_modules, module_to_ptrans, ptrans_to_module,
@@ -58,590 +57,17 @@ from scan_utils import (
     BEAM_CENTER_X, BEAM_CENTER_Y, DEFAULT_DB_PATH,
     PTRANS_X_MIN, PTRANS_X_MAX, PTRANS_Y_MIN, PTRANS_Y_MAX,
 )
-
-
-# ============================================================================
-#  SCAN-SPECIFIC CONSTANTS
-# ============================================================================
-
-DEFAULT_DWELL = 120.0         # seconds
-DEFAULT_POS_THRESHOLD = 0.5   # mm
-DEFAULT_BEAM_THRESHOLD = 0.3  # nA
-ENCODER_DRIFT_WARN = 0.5     # mm -- warn if calibrated encoder drifts from RBV
-MOVE_TIMEOUT = 300.0          # seconds per single move
-MAX_LG_LAYERS = 2
-DEFAULT_VELO_X = 50.0         # mm/s
-DEFAULT_VELO_Y = 5.0          # mm/s
-
-SPMG_LABELS = {0: "Stop", 1: "Pause", 2: "Move", 3: "Go"}
-
-
-class SPMG(IntEnum):
-    STOP = 0; PAUSE = 1; MOVE = 2; GO = 3
-
-
-class PV:
-    X_VAL  = "ptrans_x.VAL";   Y_VAL  = "ptrans_y.VAL"
-    X_SPMG = "ptrans_x.SPMG";  Y_SPMG = "ptrans_y.SPMG"
-    X_ENCODER = "hallb_ptrans_x_encoder"
-    Y_ENCODER = "hallb_ptrans_y1_encoder"
-    BEAM_CUR = "hallb_IPM2C21A_CUR"
-    X_RBV  = "ptrans_x.RBV";   Y_RBV  = "ptrans_y.RBV"
-    X_MOVN = "ptrans_x.MOVN";  Y_MOVN = "ptrans_y.MOVN"
-    X_VELO = "ptrans_x.VELO";  Y_VELO = "ptrans_y.VELO"
-    X_ACCL = "ptrans_x.ACCL";  Y_ACCL = "ptrans_y.ACCL"
-    X_TDIR = "ptrans_x.TDIR";  Y_TDIR = "ptrans_y.TDIR"
-    X_MSTA = "ptrans_x.MSTA";  Y_MSTA = "ptrans_y.MSTA"
-    X_ATHM = "ptrans_x.ATHM";  Y_ATHM = "ptrans_y.ATHM"
-    X_PREC = "ptrans_x.PREC";  Y_PREC = "ptrans_y.PREC"
-    X_BVEL = "ptrans_x.BVEL";  Y_BVEL = "ptrans_y.BVEL"
-    X_BACC = "ptrans_x.BACC";  Y_BACC = "ptrans_y.BACC"
-    X_VBAS = "ptrans_x.VBAS";  Y_VBAS = "ptrans_y.VBAS"
-    X_BDST = "ptrans_x.BDST";  Y_BDST = "ptrans_y.BDST"
-    X_FRAC = "ptrans_x.FRAC";  Y_FRAC = "ptrans_y.FRAC"
-
-
-# -- path building -----------------------------------------------------------
-
-def _snake_sector(modules, going_right, top_to_bottom):
-    if not modules:
-        return [], going_right
-    by_y = sorted(modules, key=lambda m: -m.y)
-    rows = []
-    cur_row = [by_y[0]]
-    for m in by_y[1:]:
-        if abs(m.y - cur_row[0].y) < 0.5:
-            cur_row.append(m)
-        else:
-            rows.append(cur_row)
-            cur_row = [m]
-    rows.append(cur_row)
-    if not top_to_bottom:
-        rows.reverse()
-    path = []
-    for row in rows:
-        row.sort(key=lambda m: m.x, reverse=not going_right)
-        path.extend(row)
-        going_right = not going_right
-    return path, going_right
-
-
-def build_scan_path(scan_modules):
-    if not scan_modules:
-        return [], 0
-    center = [m for m in scan_modules if m.sector == "Center"]
-    lg_sectors = {}
-    for m in scan_modules:
-        if m.sector in ("Top", "Right", "Bottom", "Left"):
-            lg_sectors.setdefault(m.sector, []).append(m)
-    path = []
-    going = True
-    if center:
-        seg, going = _snake_sector(center, going, True)
-        path.extend(seg)
-    remaining = dict(lg_sectors)
-    while remaining:
-        last = path[-1] if path else None
-        best_name = None
-        best_dist = float('inf')
-        best_cr = True
-        best_cd = True
-        for name, mods in remaining.items():
-            xs = [m.x for m in mods]
-            ys = [m.y for m in mods]
-            for cx, cy, gr, gd in [
-                (min(xs), max(ys), True, True), (max(xs), max(ys), False, True),
-                (min(xs), min(ys), True, False), (max(xs), min(ys), False, False),
-            ]:
-                d = (abs(last.x - cx) + abs(last.y - cy)) if last else 0
-                if d < best_dist:
-                    best_dist, best_name, best_cr, best_cd = d, name, gr, gd
-        seg, going = _snake_sector(remaining.pop(best_name), best_cr, best_cd)
-        path.extend(seg)
-    return path, len(scan_modules) - len(path)
-
-
-def estimate_scan_time(path, start, count, dwell, vx=DEFAULT_VELO_X, vy=DEFAULT_VELO_Y):
-    end = min(start + count, len(path)) if count > 0 else len(path)
-    if end <= start:
-        return 0.0
-    total_move = 0.0
-    for i in range(start, end - 1):
-        dx = abs(path[i + 1].x - path[i].x)
-        dy = abs(path[i + 1].y - path[i].y)
-        total_move += max(dx / vx if vx > 0 else 0, dy / vy if vy > 0 else 0)
-    return total_move + (end - start) * dwell
-
-
-# ============================================================================
-#  EPICS INTERFACES
-# ============================================================================
-
-_PV_MAP = [
-    ("x_val", PV.X_VAL), ("y_val", PV.Y_VAL),
-    ("x_spmg", PV.X_SPMG), ("y_spmg", PV.Y_SPMG),
-    ("x_encoder", PV.X_ENCODER), ("y_encoder", PV.Y_ENCODER),
-    ("beam_cur", PV.BEAM_CUR),
-    ("x_rbv", PV.X_RBV), ("y_rbv", PV.Y_RBV),
-    ("x_movn", PV.X_MOVN), ("y_movn", PV.Y_MOVN),
-    ("x_velo", PV.X_VELO), ("y_velo", PV.Y_VELO),
-    ("x_accl", PV.X_ACCL), ("y_accl", PV.Y_ACCL),
-    ("x_tdir", PV.X_TDIR), ("y_tdir", PV.Y_TDIR),
-    ("x_msta", PV.X_MSTA), ("y_msta", PV.Y_MSTA),
-    ("x_athm", PV.X_ATHM), ("y_athm", PV.Y_ATHM),
-    ("x_prec", PV.X_PREC), ("y_prec", PV.Y_PREC),
-    ("x_bvel", PV.X_BVEL), ("y_bvel", PV.Y_BVEL),
-    ("x_bacc", PV.X_BACC), ("y_bacc", PV.Y_BACC),
-    ("x_vbas", PV.X_VBAS), ("y_vbas", PV.Y_VBAS),
-    ("x_bdst", PV.X_BDST), ("y_bdst", PV.Y_BDST),
-    ("x_frac", PV.X_FRAC), ("y_frac", PV.Y_FRAC),
-]
-
-
-class RealEPICS:
-    def __init__(self, writable=False):
-        import epics as _epics
-        self._epics = _epics
-        self._pvs = {}
-        self._writable = writable
-
-    def connect(self):
-        for key, pvname in _PV_MAP:
-            self._pvs[key] = self._epics.PV(pvname, connection_timeout=5.0)
-        time.sleep(2.0)
-        n = sum(1 for p in self._pvs.values() if p.connected)
-        self._all_connected = (n == len(self._pvs))
-        return n, len(self._pvs)
-
-    def disconnected_pvs(self):
-        return [pv for k, pv in _PV_MAP if k in self._pvs and not self._pvs[k].connected]
-
-    def get(self, key, default=None):
-        pv = self._pvs.get(key)
-        if pv and pv.connected:
-            v = pv.get()
-            return v if v is not None else default
-        return default
-
-    def put(self, key, value):
-        if not self._writable or not self._all_connected:
-            return False
-        pv = self._pvs.get(key)
-        if pv and pv.connected:
-            pv.put(value)
-            return True
-        return False
-
-    def stop(self):
-        for key in ("x_spmg", "y_spmg"):
-            pv = self._pvs.get(key)
-            if pv and pv.connected:
-                pv.put(int(SPMG.STOP))
-
-
-class SimulatedEPICS:
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._x = BEAM_CENTER_X
-        self._y = BEAM_CENTER_Y
-        self._tx = self._x
-        self._ty = self._y
-        self._x_spmg = int(SPMG.GO)
-        self._y_spmg = int(SPMG.GO)
-        self._x_movn = 0
-        self._y_movn = 0
-        self._x_speed = 0.5
-        self._y_speed = 0.2
-        self._moving = False
-
-    def connect(self):
-        return (0, 0)
-
-    def disconnected_pvs(self):
-        return []
-
-    def get(self, key, default=None):
-        with self._lock:
-            return {
-                "x_encoder": round(self._x + random.gauss(0, 0.002), 4),
-                "y_encoder": round(self._y + random.gauss(0, 0.002), 4),
-                "x_rbv": round(self._x, 3), "y_rbv": round(self._y, 3),
-                "x_val": round(self._tx, 3), "y_val": round(self._ty, 3),
-                "x_movn": self._x_movn, "y_movn": self._y_movn,
-                "x_spmg": self._x_spmg, "y_spmg": self._y_spmg,
-                "x_velo": self._x_speed, "y_velo": self._y_speed,
-                "x_accl": 0.2, "y_accl": 1.0,
-                "x_tdir": 1 if self._tx >= self._x else 0,
-                "y_tdir": 1 if self._ty >= self._y else 0,
-                "x_msta": 0x10B, "y_msta": 0x10B,
-                "x_athm": int(abs(self._x - BEAM_CENTER_X) < 1.0),
-                "y_athm": int(abs(self._y - BEAM_CENTER_Y) < 1.0),
-                "x_prec": 3, "y_prec": 3,
-                "x_bvel": 1.0, "y_bvel": 1.0,
-                "x_bacc": 1.0, "y_bacc": 1.0,
-                "x_vbas": 0.5, "y_vbas": 0.5,
-                "x_bdst": 0.0, "y_bdst": 0.0,
-                "x_frac": 1.0, "y_frac": 1.0,
-                "beam_cur": 50.0,
-            }.get(key, default)
-
-    def put(self, key, value):
-        with self._lock:
-            if key == "x_val":      self._tx = float(value)
-            elif key == "y_val":    self._ty = float(value)
-            elif key == "x_spmg":   self._x_spmg = int(value)
-            elif key == "y_spmg":   self._y_spmg = int(value)
-            else: return False
-            self._evaluate_motion()
-        return True
-
-    def stop(self):
-        self.put("x_spmg", int(SPMG.STOP))
-        self.put("y_spmg", int(SPMG.STOP))
-
-    def _evaluate_motion(self):
-        if self._x_spmg == SPMG.STOP or self._y_spmg == SPMG.STOP:
-            self._moving = False; self._x_movn = 0; self._y_movn = 0
-        elif self._x_spmg == SPMG.PAUSE or self._y_spmg == SPMG.PAUSE:
-            self._moving = False; self._x_movn = 0; self._y_movn = 0
-        elif self._x_spmg == SPMG.GO and self._y_spmg == SPMG.GO:
-            if not self._moving:
-                self._moving = True
-                threading.Thread(target=self._run_move, daemon=True).start()
-
-    def _run_move(self):
-        dt = 0.02
-        while True:
-            with self._lock:
-                if not self._moving:
-                    self._x_movn = 0; self._y_movn = 0; return
-                dx, dy = self._tx - self._x, self._ty - self._y
-                if abs(dx) > 0.001:
-                    self._x += math.copysign(min(self._x_speed * dt, abs(dx)), dx)
-                if abs(dy) > 0.001:
-                    self._y += math.copysign(min(self._y_speed * dt, abs(dy)), dy)
-                self._x_movn = 1 if abs(self._tx - self._x) > 0.001 else 0
-                self._y_movn = 1 if abs(self._ty - self._y) > 0.001 else 0
-                if self._x_movn == 0 and self._y_movn == 0:
-                    self._x, self._y = self._tx, self._ty
-                    self._moving = False; return
-            time.sleep(dt)
-
-
-class ObserverEPICS:
-    def __init__(self):
-        self._real = RealEPICS()
-    def connect(self):           return self._real.connect()
-    def disconnected_pvs(self):  return self._real.disconnected_pvs()
-    def get(self, key, default=None): return self._real.get(key, default)
-    def put(self, key, value):   return False
-    def stop(self):              pass
-
-
-def epics_move_to(ep, x, y):
-    if not ptrans_in_limits(x, y): return False
-    ep.put("x_val", x); ep.put("y_val", y)
-    ep.put("x_spmg", int(SPMG.GO)); ep.put("y_spmg", int(SPMG.GO))
-    return True
-
-def epics_stop(ep):     ep.stop()
-def epics_pause(ep):    ep.put("x_spmg", int(SPMG.PAUSE)); ep.put("y_spmg", int(SPMG.PAUSE))
-def epics_resume(ep):   ep.put("x_spmg", int(SPMG.GO));    ep.put("y_spmg", int(SPMG.GO))
-def epics_is_moving(ep): return bool(ep.get("x_movn", 0)) or bool(ep.get("y_movn", 0))
-def epics_read_rbv(ep): return (ep.get("x_rbv", 0.0), ep.get("y_rbv", 0.0))
-
-
-# ============================================================================
-#  SCAN ENGINE
-# ============================================================================
-
-class ScanState:
-    IDLE = "IDLE"; MOVING = "MOVING"; DWELLING = "DWELLING"
-    PAUSED = "PAUSED"; ERROR = "ERROR"; COMPLETED = "COMPLETED"
-
-
-class ScanEngine:
-    def __init__(self, epics, modules, log_fn):
-        self.ep = epics
-        self.all_modules = modules
-        self.path, n_unopt = build_scan_path(modules)
-        self.log = log_fn
-        if n_unopt:
-            self.log(f"WARNING: {n_unopt} modules with unoptimized path", level="warn")
-
-        self.dwell_time = DEFAULT_DWELL
-        self.pos_threshold = DEFAULT_POS_THRESHOLD
-        self.beam_threshold = DEFAULT_BEAM_THRESHOLD
-
-        self.state = ScanState.IDLE
-        self.current_idx = 0
-        self.dwell_remaining = 0.0
-        self.completed = set()
-        self.error_modules = set()
-        self.beam_tripped = False
-
-        self._thread = None
-        self._stop = threading.Event()
-        self._skip = threading.Event()
-        self._paused = False
-        self._ack_error = threading.Event()
-
-    @property
-    def current_module(self):
-        if 0 <= self.current_idx < len(self.path):
-            return self.path[self.current_idx]
-        return None
-
-    @property
-    def eta_seconds(self):
-        if self.state == ScanState.IDLE: return 0.0
-        end = getattr(self, '_end_idx', len(self.path))
-        nxt = self.current_idx + 1
-        if nxt >= end: return self.dwell_remaining
-        return estimate_scan_time(self.path, nxt, end - nxt, self.dwell_time) + self.dwell_remaining
-
-    def start(self, start_idx=0, count=0):
-        if self._thread and self._thread.is_alive(): return
-        self._stop.clear(); self._skip.clear(); self._paused = False
-        self.current_idx = start_idx
-        self._start_idx = start_idx
-        self._end_idx = min(start_idx + count, len(self.path)) if count > 0 else len(self.path)
-        self.completed.clear(); self.error_modules.clear()
-        self.state = ScanState.MOVING
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-
-    def resume_scan(self):
-        if self.state == ScanState.PAUSED:
-            self._paused = False; epics_resume(self.ep)
-            self.state = ScanState.MOVING; self.log("Scan resumed")
-
-    def pause_scan(self):
-        if self.state in (ScanState.MOVING, ScanState.DWELLING):
-            self._paused = True; epics_pause(self.ep)
-            self.state = ScanState.PAUSED; self.log("Scan paused", level="warn")
-
-    def stop_scan(self):
-        self._stop.set(); self._skip.set(); self._ack_error.set()
-        self._paused = False; epics_stop(self.ep)
-        self.log("Scan stopped", level="warn")
-
-    def skip_module(self):       self._skip.set()
-    def acknowledge_error(self): self._ack_error.set()
-
-    def _run(self):
-        self.log(f"Scan started from {self.path[self.current_idx].name}, "
-                 f"dwell {self.dwell_time:.0f}s, {self._end_idx - self.current_idx} modules")
-        try:
-            for i in range(self.current_idx, self._end_idx):
-                if self._stop.is_set(): break
-                self.current_idx = i
-                mod = self.path[i]
-                px, py = module_to_ptrans(mod.x, mod.y)
-                self.state = ScanState.MOVING
-                self.log(f"[{i+1}/{len(self.path)}] Moving to {mod.name}  ptrans({px:.3f}, {py:.3f})")
-                if not epics_move_to(self.ep, px, py):
-                    self.log(f"SKIPPED {mod.name}: outside limits", level="warn"); continue
-                if not self._wait_move_done(): break
-                rbv_x, rbv_y = epics_read_rbv(self.ep)
-                err = math.sqrt((rbv_x - px)**2 + (rbv_y - py)**2)
-                if err > self.pos_threshold:
-                    self.error_modules.add(i); self.state = ScanState.ERROR
-                    self.log(f"POSITION ERROR at {mod.name}: {err:.3f} mm", level="error")
-                    self._ack_error.clear(); self._ack_error.wait()
-                    if self._stop.is_set(): break
-                self.state = ScanState.DWELLING
-                self.dwell_remaining = self.dwell_time
-                self.log(f"Dwelling at {mod.name} for {self.dwell_time:.0f}s")
-                if self._wait_dwell() == "stop": break
-                self.completed.add(i); self.dwell_remaining = 0.0
-        finally:
-            if self._stop.is_set():
-                self.state = ScanState.IDLE; self.log("Scan stopped by user")
-            elif self.current_idx >= self._end_idx - 1:
-                self.state = ScanState.COMPLETED; self.log("Scan COMPLETE!", level="warn")
-            else:
-                self.state = ScanState.IDLE
-
-    def _wait_move_done(self):
-        t0 = time.time()
-        while not self._stop.is_set():
-            while self._paused and not self._stop.is_set():
-                self.state = ScanState.PAUSED; time.sleep(0.1)
-            if self._stop.is_set(): return False
-            self.state = ScanState.MOVING
-            if not epics_is_moving(self.ep): return True
-            if time.time() - t0 > MOVE_TIMEOUT:
-                self.log(f"MOVE TIMEOUT after {MOVE_TIMEOUT:.0f}s", level="error"); return False
-            time.sleep(0.1)
-        return False
-
-    def _wait_dwell(self):
-        end = time.time() + self.dwell_time
-        while time.time() < end:
-            if self._stop.is_set(): return "stop"
-            if self._skip.is_set():
-                self._skip.clear(); self.log("Module skipped"); return "skip"
-            if self._paused:
-                self.state = ScanState.PAUSED
-                while self._paused and not self._stop.is_set(): time.sleep(0.1)
-                if self._stop.is_set(): return "stop"
-                end = time.time() + self.dwell_time
-                self.log("Dwell restarted after resume")
-            # -- beam trip pause (dwell only) --
-            if self.beam_threshold > 0:
-                bc = self.ep.get("beam_cur", None)
-                if bc is not None and bc < self.beam_threshold:
-                    self.beam_tripped = True
-                    self.log(f"BEAM TRIP: {bc:.3f} nA < {self.beam_threshold} nA -- dwell paused", level="warn")
-                    while not self._stop.is_set() and not self._skip.is_set():
-                        bc2 = self.ep.get("beam_cur", 0.0)
-                        if bc2 is not None and bc2 >= self.beam_threshold: break
-                        time.sleep(0.5)
-                    self.beam_tripped = False
-                    if self._stop.is_set(): return "stop"
-                    if self._skip.is_set():
-                        self._skip.clear(); self.log("Module skipped"); return "skip"
-                    bc2 = self.ep.get("beam_cur", 0.0)
-                    self.log(f"BEAM RECOVERED: {bc2:.3f} nA -- restarting full dwell", level="warn")
-                    end = time.time() + self.dwell_time
-            self.state = ScanState.DWELLING
-            self.dwell_remaining = max(0.0, end - time.time())
-            time.sleep(0.1)
-        return "done"
-
-
-# ============================================================================
-#  MAP WIDGET
-# ============================================================================
-
-class HyCalScanMapWidget(QWidget):
-    moduleClicked = pyqtSignal(str)
-    PAD = 8
-    SHRINK = 0.90
-
-    def __init__(self, all_modules, parent=None):
-        super().__init__(parent)
-        self._drawn = [m for m in all_modules if m.mod_type != "LMS"]
-        self._mod_by_name = {m.name: m for m in all_modules}
-        self._colors = {}
-        self._path_line = []
-        self._dash_line = []
-        self._marker_hx = self._marker_hy = None
-        self._highlight = None
-        self._hover_name = None
-        self._lim_hx_min = PTRANS_X_MIN - BEAM_CENTER_X
-        self._lim_hx_max = PTRANS_X_MAX - BEAM_CENTER_X
-        self._lim_hy_min = BEAM_CENTER_Y - PTRANS_Y_MAX
-        self._lim_hy_max = BEAM_CENTER_Y - PTRANS_Y_MIN
-        self._scale = 1.0
-        self._ox = self._oy = 0.0
-        self._x_min = self._y_max = 0.0
-        self._rects = {}
-        self.setMouseTracking(True)
-        self.setMinimumSize(400, 400)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-
-    def setModuleColors(self, c):  self._colors = c; self.update()
-    def setPathPreview(self, p):   self._path_line = p; self.update()
-    def setDashPreview(self, p):   self._dash_line = p; self.update()
-    def setHighlight(self, n):     self._highlight = n; self.update()
-
-    def setMarkerPosition(self, hx, hy):
-        self._marker_hx = hx; self._marker_hy = hy; self.update()
-
-    def modCenter(self, m):
-        cx = self._ox + (m.x - self._x_min) * self._scale
-        cy = self._oy + (self._y_max - m.y) * self._scale
-        return QPointF(cx, cy)
-
-    def _updateLayout(self):
-        if not self._drawn: return
-        x_min = min(m.x - m.sx / 2 for m in self._drawn)
-        x_max = max(m.x + m.sx / 2 for m in self._drawn)
-        y_min = min(m.y - m.sy / 2 for m in self._drawn)
-        y_max = max(m.y + m.sy / 2 for m in self._drawn)
-        w, h = self.width(), self.height()
-        uw, uh = w - 2 * self.PAD, h - 2 * self.PAD
-        self._scale = min(uw / max(x_max - x_min, 1), uh / max(y_max - y_min, 1))
-        dw = (x_max - x_min) * self._scale
-        dh = (y_max - y_min) * self._scale
-        self._ox = self.PAD + (uw - dw) / 2
-        self._oy = self.PAD + (uh - dh) / 2
-        self._x_min = x_min; self._y_max = y_max
-        self._rects.clear()
-        for m in self._drawn:
-            cx = self._ox + (m.x - self._x_min) * self._scale
-            cy = self._oy + (self._y_max - m.y) * self._scale
-            hw = m.sx * self._scale * self.SHRINK / 2
-            hh = m.sy * self._scale * self.SHRINK / 2
-            self._rects[m.name] = QRectF(cx - hw, cy - hh, 2 * hw, 2 * hh)
-
-    def paintEvent(self, event):
-        self._updateLayout()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        p.fillRect(self.rect(), QColor("#0a0e14"))
-        for m in self._drawn:
-            r = self._rects.get(m.name)
-            if r: p.fillRect(r, QColor(self._colors.get(m.name, C.MOD_EXCLUDED)))
-        # limit box
-        bx0 = self._ox + (self._lim_hx_min - self._x_min) * self._scale
-        by0 = self._oy + (self._y_max - self._lim_hy_max) * self._scale
-        bx1 = self._ox + (self._lim_hx_max - self._x_min) * self._scale
-        by1 = self._oy + (self._y_max - self._lim_hy_min) * self._scale
-        p.setPen(QPen(QColor(C.RED), 1, Qt.PenStyle.DashLine))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(QRectF(bx0, by0, bx1 - bx0, by1 - by0))
-        # path lines
-        for pts, style, w in [(self._path_line, Qt.PenStyle.SolidLine, 1.5),
-                               (self._dash_line, Qt.PenStyle.DashLine, 1.0)]:
-            if len(pts) >= 2:
-                p.setPen(QPen(QColor(C.PATH_LINE), w, style))
-                for i in range(len(pts) - 1):
-                    p.drawLine(pts[i], pts[i + 1])
-        # highlight
-        if self._highlight and self._highlight in self._rects:
-            p.setPen(QPen(QColor(C.ACCENT), 2))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(self._rects[self._highlight])
-        # motor crosshair
-        if self._marker_hx is not None:
-            cx = self._ox + (self._marker_hx - self._x_min) * self._scale
-            cy = self._oy + (self._y_max - self._marker_hy) * self._scale
-            p.setPen(QPen(QColor(C.RED), 1.5))
-            p.drawLine(QPointF(cx - 5, cy), QPointF(cx + 5, cy))
-            p.drawLine(QPointF(cx, cy - 5), QPointF(cx, cy + 5))
-        p.end()
-
-    def mousePressEvent(self, e):
-        if e.button() != Qt.MouseButton.LeftButton: return
-        pos = e.position()
-        for name in reversed(list(self._rects)):
-            if self._rects[name].contains(pos):
-                self.moduleClicked.emit(name); return
-
-    def mouseMoveEvent(self, e):
-        pos = e.position()
-        found = None
-        for name in reversed(list(self._rects)):
-            if self._rects[name].contains(pos): found = name; break
-        if found != self._hover_name:
-            self._hover_name = found
-            if found:
-                m = self._mod_by_name.get(found)
-                if m:
-                    px, py = module_to_ptrans(m.x, m.y)
-                    self.setToolTip(f"{m.name} ({m.mod_type})\nHyCal({m.x:.1f}, {m.y:.1f})\nptrans({px:.1f}, {py:.1f})")
-            else:
-                self.setToolTip("")
-
-    def resizeEvent(self, e):
-        self._updateLayout(); super().resizeEvent(e)
-
-    def sizeHint(self):
-        from PyQt6.QtCore import QSize
-        return QSize(680, 680)
+from scan_epics import (
+    SPMG, SPMG_LABELS, MotorEPICS, ObserverEPICS, SimulatedMotorEPICS,
+    ScalerPVGroup, SimulatedScalerEPICS,
+    epics_move_to, epics_stop,
+)
+from scan_engine import (
+    ScanState, ScanEngine, build_scan_path, estimate_scan_time,
+    DEFAULT_DWELL, DEFAULT_POS_THRESHOLD, DEFAULT_BEAM_THRESHOLD,
+    DEFAULT_VELO_X, DEFAULT_VELO_Y, MAX_LG_LAYERS,
+)
+from scan_geoview import HyCalScanMapWidget, PALETTES, PALETTE_NAMES
 
 
 # ============================================================================
@@ -662,7 +88,6 @@ class ModuleInfoDialog(QDialog):
 
         lo = QVBoxLayout(self)
 
-        # -- info grid --
         px, py = module_to_ptrans(mod.x, mod.y)
         in_limits = ptrans_in_limits(px, py)
 
@@ -691,7 +116,6 @@ class ModuleInfoDialog(QDialog):
 
         lo.addSpacing(8)
 
-        # -- buttons --
         btn_row = QHBoxLayout()
         btn_move = QPushButton(f"Move To {mod.name}")
         btn_move.setProperty("cssClass", "accent")
@@ -713,17 +137,22 @@ class ModuleInfoDialog(QDialog):
 
 
 # ============================================================================
-#  GUI
+#  MAIN WINDOW
 # ============================================================================
+
+SCALER_POLL_MS = 5_000  # 5 seconds (default, adjustable via slider)
+
 
 class SnakeScanWindow(QMainWindow):
     _logSignal = pyqtSignal(str, str)
     AUTOGEN = "(autogen)"
     NONE = "(none)"
 
-    def __init__(self, epics, simulation, all_modules, profiles=None, observer=False):
+    def __init__(self, motor_ep, scaler_ep, simulation, all_modules,
+                 profiles=None, observer=False):
         super().__init__()
-        self.ep = epics
+        self.ep = motor_ep
+        self.scaler_ep = scaler_ep
         self.simulation = simulation
         self.observer = observer
         self.all_modules = all_modules
@@ -744,14 +173,13 @@ class SnakeScanWindow(QMainWindow):
             datetime.now().strftime("snake_scan_%Y%m%d_%H%M%S.log")), "w")
 
         self.scan_modules = filter_scan_modules(all_modules, 0, self._lg_sx, self._lg_sy)
-        self.engine = ScanEngine(epics, self.scan_modules, self._log)
+        self.engine = ScanEngine(motor_ep, self.scan_modules, self._log)
         self._scan_name_to_idx = {m.name: i for i, m in enumerate(self.engine.path)}
         self._scan_names = {m.name for m in self.scan_modules}
         self._selected_start_idx = 0
         self._selected_mod_name = None
-        self._status_labels = {}
+        self._status_labels: Dict[str, QLabel] = {}
 
-        # Encoder calibration: offset = encoder - RBV (computed once)
         self._enc_offset_x: Optional[float] = None
         self._enc_offset_y: Optional[float] = None
 
@@ -767,20 +195,26 @@ class SnakeScanWindow(QMainWindow):
                 QMessageBox.critical(self, "PV Connection Error",
                     "Not connected:\n" + "\n".join(f"  {p}" for p in disc))
 
+        # main poll timer (5 Hz)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._poll)
         self._timer.start(200)
 
-    # -----------------------------------------------------------------------
-    #  Layout
+        # scaler poll timer (10 s)
+        self._scaler_timer = QTimer(self)
+        self._scaler_timer.timeout.connect(self._pollScalers)
+        self._scaler_timer.start(SCALER_POLL_MS)
+        self._pollScalers()  # initial read
+
+    # =======================================================================
+    #  Layout — 16:9
     #
-    #  [TOP BAR: title | mode | ===BEAM=== | state]
-    #  [LEFT column              | RIGHT column (full height)       ]
-    #  [  map + legend           |   Scan Control                   ]
-    #  [  event log              |   Direct Control                 ]
-    #  [                         |   Motor Status                   ]
-    #  [                         |   Position Check                 ]
-    # -----------------------------------------------------------------------
+    #  [TOP BAR: title | mode | ===BEAM=== | state              ]
+    #  [LEFT half                 | RIGHT half                   ]
+    #  [  HyCal geo view          |  Controls (scrollable)       ]
+    #  [  legend row              |  ─────────────────────────── ]
+    #  [  scaler controls         |  Event Log                   ]
+    # =======================================================================
 
     def _buildUI(self):
         if self.observer:       suffix = "  [OBSERVER]"
@@ -788,7 +222,7 @@ class SnakeScanWindow(QMainWindow):
         else:                   suffix = "  [EXPERT OPERATOR]"
         self.setWindowTitle("HyCal Snake Scan" + suffix)
         self.setStyleSheet(DARK_QSS)
-        self.resize(1200, 820)
+        self.resize(1440, 810)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -813,10 +247,9 @@ class SnakeScanWindow(QMainWindow):
         lbl_mode = QLabel(mt)
         lbl_mode.setStyleSheet(f"color: {mf}; font: bold 9pt 'Consolas'; background: transparent;")
         tl.addWidget(lbl_mode)
-
         tl.addSpacing(16)
 
-        # ── prominent beam current ──
+        # prominent beam current
         beam_frame = QFrame()
         beam_frame.setStyleSheet(
             "QFrame { background: #161b22; border: 1px solid #30363d; border-radius: 4px; }")
@@ -847,29 +280,36 @@ class SnakeScanWindow(QMainWindow):
 
         root.addWidget(top)
 
-        # ── main area ────────────────────────────────────────────────────
-        body = QHBoxLayout()
-        body.setContentsMargins(6, 4, 6, 6)
-        body.setSpacing(6)
+        # ── main body — horizontal splitter ──────────────────────────────
+        body_splitter = QSplitter(Qt.Orientation.Horizontal)
+        body_splitter.setContentsMargins(6, 4, 6, 6)
 
-        # LEFT column: map (top) + log (bottom), stacked in a splitter
-        left_splitter = QSplitter(Qt.Orientation.Vertical)
-
-        # map container
-        map_container = QWidget()
-        mc_layout = QVBoxLayout(map_container)
-        mc_layout.setContentsMargins(0, 0, 0, 0)
-        mc_layout.setSpacing(2)
+        # --- LEFT half: map + legend + scaler controls ---
+        left = QWidget()
+        left_lo = QVBoxLayout(left)
+        left_lo.setContentsMargins(0, 0, 0, 0)
+        left_lo.setSpacing(2)
 
         self._canvas_label = QLabel()
         self._canvas_label.setStyleSheet(f"color: {C.ACCENT}; font: bold 9pt 'Consolas';")
-        mc_layout.addWidget(self._canvas_label)
+        left_lo.addWidget(self._canvas_label)
 
         self._map = HyCalScanMapWidget(self.all_modules)
         self._map.moduleClicked.connect(self._onCanvasClick)
-        mc_layout.addWidget(self._map, stretch=1)
+        left_lo.addWidget(self._map, stretch=1)
 
-        # legend
+        # reset button overlaid at bottom-right corner, outside the map drawing area
+        self._btn_reset_view = QPushButton("Reset", self._map)
+        self._btn_reset_view.setFixedSize(50, 22)
+        self._btn_reset_view.setStyleSheet(
+            f"QPushButton{{background:rgba(22,27,34,220);color:{C.DIM};"
+            f"border:1px solid #30363d;border-radius:2px;padding:0;"
+            f"font:8pt Consolas;}}"
+            f"QPushButton:hover{{color:{C.TEXT};border-color:{C.ACCENT};}}")
+        self._btn_reset_view.clicked.connect(self._map.resetView)
+        self._map.installEventFilter(self)
+
+        # legend row
         leg = QHBoxLayout()
         leg.setSpacing(4); leg.setContentsMargins(0, 0, 0, 0)
         for label, colour in [("Todo", C.MOD_TODO), ("Skipped", C.MOD_SKIPPED),
@@ -882,9 +322,101 @@ class SnakeScanWindow(QMainWindow):
             ll = QLabel(label); ll.setStyleSheet(f"color: {C.DIM}; font: 8pt 'Consolas';")
             leg.addWidget(ll)
         leg.addStretch()
-        mc_layout.addLayout(leg)
+        left_lo.addLayout(leg)
 
-        left_splitter.addWidget(map_container)
+        # scaler controls row
+        sc_row = QHBoxLayout()
+        sc_row.setSpacing(4); sc_row.setContentsMargins(0, 2, 0, 0)
+
+        self._btn_scaler_toggle = QPushButton("Scalers: ON")
+        self._btn_scaler_toggle.setStyleSheet(self._scaler_btn_ss(True))
+        self._btn_scaler_toggle.setFixedHeight(22)
+        self._btn_scaler_toggle.clicked.connect(self._toggleScaler)
+        sc_row.addWidget(self._btn_scaler_toggle)
+
+        self._btn_scaler_auto = QPushButton("Auto")
+        self._btn_scaler_auto.setFixedHeight(22)
+        self._btn_scaler_auto.clicked.connect(self._toggleScalerAuto)
+        self._scaler_auto_on = True
+        self._updateScalerAutoBtn()
+        sc_row.addWidget(self._btn_scaler_auto)
+
+        self._scaler_min_edit = QLineEdit("0")
+        self._scaler_min_edit.setFixedWidth(50); self._scaler_min_edit.setFixedHeight(22)
+        self._scaler_min_edit.setFont(QFont("Consolas", 8))
+        self._scaler_min_edit.setStyleSheet(
+            "QLineEdit{background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:2px;padding:1px 4px;}")
+        self._scaler_min_edit.returnPressed.connect(self._applyScalerRange)
+        sc_row.addWidget(self._scaler_min_edit)
+
+        sc_row.addWidget(QLabel("-"))
+
+        self._scaler_max_edit = QLineEdit("1000")
+        self._scaler_max_edit.setFixedWidth(50); self._scaler_max_edit.setFixedHeight(22)
+        self._scaler_max_edit.setFont(QFont("Consolas", 8))
+        self._scaler_max_edit.setStyleSheet(self._scaler_min_edit.styleSheet())
+        self._scaler_max_edit.returnPressed.connect(self._applyScalerRange)
+        sc_row.addWidget(self._scaler_max_edit)
+
+        btn_apply = QPushButton("Apply"); btn_apply.setFixedHeight(22)
+        btn_apply.clicked.connect(self._applyScalerRange)
+        sc_row.addWidget(btn_apply)
+
+        self._btn_scaler_log = QPushButton("Log: OFF"); self._btn_scaler_log.setFixedHeight(22)
+        self._btn_scaler_log.setStyleSheet(self._small_btn_ss(C.DIM))
+        self._btn_scaler_log.clicked.connect(self._toggleScalerLog)
+        sc_row.addWidget(self._btn_scaler_log)
+
+        self._btn_palette = QPushButton(); self._btn_palette.setFixedSize(80, 22)
+        self._btn_palette.setToolTip("Click to cycle colour palette")
+        self._btn_palette.clicked.connect(self._cycleScalerPalette)
+        self._updatePaletteBtn()
+        sc_row.addWidget(self._btn_palette)
+
+        sc_row.addStretch()
+        left_lo.addLayout(sc_row)
+
+        body_splitter.addWidget(left)
+
+        # --- RIGHT half: controls (top 2/3) + log (bottom 1/3) ---
+        right_splitter = QSplitter(Qt.Orientation.Vertical)
+
+        # top area: two columns — left: scan/direct/position, right: motor status
+        ctrl_columns = QWidget()
+        ctrl_cols_lo = QHBoxLayout(ctrl_columns)
+        ctrl_cols_lo.setContentsMargins(0, 0, 0, 0)
+        ctrl_cols_lo.setSpacing(4)
+
+        # left column: scan control + direct control + position check
+        left_col_scroll = QScrollArea()
+        left_col_scroll.setWidgetResizable(True)
+        left_col_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        left_col_widget = QWidget()
+        left_col_lo = QVBoxLayout(left_col_widget)
+        left_col_lo.setSpacing(4)
+        left_col_lo.setContentsMargins(0, 0, 0, 0)
+        self._buildScanControl(left_col_lo)
+        self._buildDirectControl(left_col_lo)
+        left_col_lo.addStretch()
+        left_col_scroll.setWidget(left_col_widget)
+        ctrl_cols_lo.addWidget(left_col_scroll, stretch=1)
+
+        # right column: position check + motor status
+        right_col_scroll = QScrollArea()
+        right_col_scroll.setWidgetResizable(True)
+        right_col_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        right_col_widget = QWidget()
+        right_col_lo = QVBoxLayout(right_col_widget)
+        right_col_lo.setSpacing(4)
+        right_col_lo.setContentsMargins(0, 0, 0, 0)
+        self._buildPositionCheck(right_col_lo)
+        self._buildMotorStatus(right_col_lo)
+        self._buildScalerControl(right_col_lo)
+        right_col_lo.addStretch()
+        right_col_scroll.setWidget(right_col_widget)
+        ctrl_cols_lo.addWidget(right_col_scroll, stretch=1)
+
+        right_splitter.addWidget(ctrl_columns)
 
         # event log
         log_group = QGroupBox("Event Log")
@@ -893,30 +425,111 @@ class SnakeScanWindow(QMainWindow):
         self._log_text = QTextEdit()
         self._log_text.setReadOnly(True)
         log_layout.addWidget(self._log_text)
-        left_splitter.addWidget(log_group)
+        right_splitter.addWidget(log_group)
 
-        left_splitter.setStretchFactor(0, 3)  # map gets more space
-        left_splitter.setStretchFactor(1, 1)  # log gets less
-        body.addWidget(left_splitter, stretch=1)
+        right_splitter.setStretchFactor(0, 3)  # controls
+        right_splitter.setStretchFactor(1, 2)  # log
 
-        # RIGHT column: full-height controls
-        right = QVBoxLayout()
-        right.setSpacing(4)
-        right.setContentsMargins(0, 0, 0, 0)
+        body_splitter.addWidget(right_splitter)
+        body_splitter.setStretchFactor(0, 1)  # left half
+        body_splitter.setStretchFactor(1, 1)  # right half
 
-        self._buildScanControl(right)
-        self._buildDirectControl(right)
-        self._buildMotorStatus(right)
-        self._buildPositionCheck(right)
-        right.addStretch()
-
-        right_widget = QWidget()
-        right_widget.setLayout(right)
-        right_widget.setFixedWidth(340)
-        body.addWidget(right_widget)
-
-        root.addLayout(body, stretch=1)
+        root.addWidget(body_splitter, stretch=1)
         self._updateCanvasLabel()
+
+    # -- scaler control helpers ----------------------------------------------
+
+    @staticmethod
+    def _scaler_btn_ss(on):
+        fg = C.GREEN if on else C.RED
+        return (f"QPushButton{{background:#21262d;color:{fg};"
+                f"border:1px solid #30363d;padding:1px 8px;"
+                f"font:bold 8pt Consolas;border-radius:2px;}}"
+                f"QPushButton:hover{{background:#30363d;}}")
+
+    @staticmethod
+    def _small_btn_ss(fg):
+        return (f"QPushButton{{background:#21262d;color:{fg};"
+                f"border:1px solid #30363d;padding:1px 8px;"
+                f"font:bold 8pt Consolas;border-radius:2px;}}"
+                f"QPushButton:hover{{background:#30363d;}}")
+
+    def _toggleScaler(self):
+        on = not self._map._scaler_enabled
+        self._map.setScalerEnabled(on)
+        self._btn_scaler_toggle.setText("Scalers: ON" if on else "Scalers: OFF")
+        self._btn_scaler_toggle.setStyleSheet(self._scaler_btn_ss(on))
+
+    def _toggleScalerAuto(self):
+        self._scaler_auto_on = not self._scaler_auto_on
+        self._map.setScalerAutoRange(self._scaler_auto_on)
+        self._updateScalerAutoBtn()
+        if self._scaler_auto_on:
+            vmin, vmax = self._map.scalerRange()
+            self._scaler_min_edit.setText(f"{vmin:.0f}")
+            self._scaler_max_edit.setText(f"{vmax:.0f}")
+
+    def _updateScalerAutoBtn(self):
+        if self._scaler_auto_on:
+            self._btn_scaler_auto.setStyleSheet(
+                "QPushButton{background:#d29922;color:#0d1117;"
+                "border:1px solid #d29922;padding:1px 8px;"
+                "font:bold 8pt Consolas;border-radius:2px;}"
+                "QPushButton:hover{background:#e0a82b;}")
+        else:
+            self._btn_scaler_auto.setStyleSheet(self._small_btn_ss(C.YELLOW))
+
+    def _applyScalerRange(self):
+        try:
+            vmin = float(self._scaler_min_edit.text())
+            vmax = float(self._scaler_max_edit.text())
+            if vmin < vmax:
+                self._map.setScalerRange(vmin, vmax)
+                self._scaler_auto_on = False
+                self._map.setScalerAutoRange(False)
+                self._updateScalerAutoBtn()
+        except ValueError:
+            pass
+
+    def _toggleScalerLog(self):
+        on = not self._map._scaler_log
+        self._map.setScalerLogScale(on)
+        self._btn_scaler_log.setText("Log: ON" if on else "Log: OFF")
+        self._btn_scaler_log.setStyleSheet(
+            self._small_btn_ss(C.ACCENT if on else C.DIM))
+
+    def _cycleScalerPalette(self):
+        self._map.cyclePalette()
+        self._updatePaletteBtn()
+
+    def _updatePaletteBtn(self):
+        """Set the palette button background to a CSS linear-gradient of the current palette."""
+        idx = self._map._palette_idx
+        stops = list(PALETTES.values())[idx]
+        css_stops = ", ".join(
+            f"rgb({r},{g},{b}) {int(t * 100)}%" for t, (r, g, b) in stops)
+        self._btn_palette.setStyleSheet(
+            f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,{self._palette_grad_stops(stops)});"
+            f"border:1px solid #30363d;border-radius:2px;color:#c9d1d9;"
+            f"font:bold 7pt Consolas;padding:0 4px;}}"
+            f"QPushButton:hover{{border-color:#58a6ff;}}")
+        self._btn_palette.setText(PALETTE_NAMES[idx])
+
+    @staticmethod
+    def _palette_grad_stops(stops):
+        parts = []
+        for t, (r, g, b) in stops:
+            parts.append(f"stop:{t:.2f} rgb({r},{g},{b})")
+        return ",".join(parts)
+
+    def _pollScalers(self):
+        vals = self.scaler_ep.get_all()
+        if vals:
+            self._map.setScalerValues(vals)
+            if self._scaler_auto_on:
+                vmin, vmax = self._map.scalerRange()
+                self._scaler_min_edit.setText(f"{vmin:.0f}")
+                self._scaler_max_edit.setText(f"{vmax:.0f}")
 
     # -- Scan Control --------------------------------------------------------
 
@@ -1006,17 +619,29 @@ class SnakeScanWindow(QMainWindow):
 
     def _buildMotorStatus(self, parent):
         ms = QGroupBox("Motor Status"); lo = QVBoxLayout(ms)
-        for title, fields in [("X Motor", [
+        self._motor_state_labels = {}
+        for title, axis, fields in [
+            ("X Motor", "x", [
                 ("Encoder", "x_encoder"), ("RBV", "x_rbv"), ("VAL", "x_val"),
                 ("MOVN", "x_movn"), ("SPMG", "x_spmg"), ("VELO", "x_velo"),
                 ("ACCL", "x_accl"), ("TDIR", "x_tdir"), ("MSTA", "x_msta"), ("ATHM", "x_athm")]),
-            ("Y Motor", [
+            ("Y Motor", "y", [
                 ("Encoder", "y_encoder"), ("RBV", "y_rbv"), ("VAL", "y_val"),
                 ("MOVN", "y_movn"), ("SPMG", "y_spmg"), ("VELO", "y_velo"),
                 ("ACCL", "y_accl"), ("TDIR", "y_tdir"), ("MSTA", "y_msta"), ("ATHM", "y_athm")])]:
+            # title row with inline state badge
+            tr = QHBoxLayout()
             tl = QLabel(title)
             tl.setStyleSheet(f"color: {C.ACCENT}; font: bold 9pt 'Consolas';")
-            lo.addWidget(tl)
+            tr.addWidget(tl)
+            sl = QLabel("Idle")
+            sl.setStyleSheet(f"color: {C.DIM}; font: bold 8pt 'Consolas'; "
+                             f"background: #21262d; border: 1px solid #30363d; "
+                             f"border-radius: 3px; padding: 1px 6px;")
+            tr.addWidget(sl)
+            tr.addStretch()
+            self._motor_state_labels[axis] = sl
+            lo.addLayout(tr)
             g = QGridLayout(); g.setSpacing(2)
             half = (len(fields) + 1) // 2
             for i, (label, key) in enumerate(fields):
@@ -1040,6 +665,37 @@ class SnakeScanWindow(QMainWindow):
         self._lbl_enc_drift = QLabel("Encoder:  awaiting calibration")
         self._lbl_enc_drift.setStyleSheet(f"color: {C.DIM};"); lo.addWidget(self._lbl_enc_drift)
         parent.addWidget(pe)
+
+    def _buildScalerControl(self, parent):
+        sc = QGroupBox("Scalers"); lo = QVBoxLayout(sc)
+
+        r = QHBoxLayout()
+        btn_refresh = QPushButton("Refresh Now")
+        btn_refresh.clicked.connect(self._pollScalers)
+        r.addWidget(btn_refresh)
+        r.addStretch()
+        lo.addLayout(r)
+
+        r = QHBoxLayout()
+        r.addWidget(QLabel("Poll:"))
+        self._scaler_interval_slider = QSlider(Qt.Orientation.Horizontal)
+        self._scaler_interval_slider.setRange(20, 100)  # 2.0s - 10.0s in 0.1s steps
+        self._scaler_interval_slider.setValue(50)        # default 5.0s
+        self._scaler_interval_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._scaler_interval_slider.setTickInterval(10)
+        self._scaler_interval_slider.valueChanged.connect(self._onScalerIntervalChanged)
+        r.addWidget(self._scaler_interval_slider)
+        self._lbl_scaler_interval = QLabel("5.0 s")
+        self._lbl_scaler_interval.setMinimumWidth(40)
+        r.addWidget(self._lbl_scaler_interval)
+        lo.addLayout(r)
+
+        parent.addWidget(sc)
+
+    def _onScalerIntervalChanged(self, val):
+        sec = val / 10.0
+        self._lbl_scaler_interval.setText(f"{sec:.1f} s")
+        self._scaler_timer.setInterval(int(sec * 1000))
 
     def _disableControls(self):
         for w in (self._btn_start, self._btn_pause, self._btn_stop,
@@ -1078,12 +734,17 @@ class SnakeScanWindow(QMainWindow):
 
         eng = self.engine
         running = eng.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED, ScanState.ERROR)
+        idle = eng.state in (ScanState.IDLE, ScanState.COMPLETED)
+
+        # Build scan-state colours.  When scaler overlay is on, these are
+        # drawn as borders (heat map fill stays visible).  When off, they
+        # are drawn as fills.
         colors = {}
         for m in self.all_modules:
             if m.name in self._scan_names or m.mod_type == "LMS": continue
             colors[m.name] = C.MOD_EXCLUDED if running else (
                 C.MOD_GLASS if m.mod_type == "PbGlass" else C.MOD_PWO4_BG if m.mod_type == "PbWO4" else C.MOD_LMS)
-        idle = eng.state in (ScanState.IDLE, ScanState.COMPLETED)
+
         count = self._count_spin.value()
         si = self._selected_start_idx
         ei = min(si + count, len(eng.path)) if count > 0 else len(eng.path)
@@ -1128,7 +789,6 @@ class SnakeScanWindow(QMainWindow):
             self._drawPathPreview()
         self._map.setHighlight(name); self._updateCanvasLabel()
 
-        # When idle, pop up module info dialog
         idle = self.engine.state in (ScanState.IDLE, ScanState.COMPLETED)
         if idle and not self.observer:
             mod = self._mod_by_name.get(name)
@@ -1237,6 +897,15 @@ class SnakeScanWindow(QMainWindow):
         self._log(f"Resetting to beam centre ptrans({BEAM_CENTER_X}, {BEAM_CENTER_Y})")
         epics_move_to(self.ep, BEAM_CENTER_X, BEAM_CENTER_Y)
 
+    # -- event filter (reposition overlay button on map resize) ---------------
+
+    def eventFilter(self, obj, event):
+        if obj is self._map and event.type() == event.Type.Resize:
+            btn = self._btn_reset_view
+            btn.move(self._map.width() - btn.width() - 2,
+                     self._map.height() - btn.height() - 2)
+        return super().eventFilter(obj, event)
+
     # -- logging -------------------------------------------------------------
 
     def _log(self, msg, level="info"):
@@ -1288,35 +957,27 @@ class SnakeScanWindow(QMainWindow):
             self._lbl_beam_val.setStyleSheet(f"color: {C.GREEN}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
             self._lbl_beam_status.setText("")
 
+    ENCODER_DRIFT_WARN = 0.5
+
     def _checkEncoder(self):
-        """Calibrate encoder offset on first read, then monitor drift."""
         enc_x = self.ep.get("x_encoder", None)
         enc_y = self.ep.get("y_encoder", None)
         rbv_x = self.ep.get("x_rbv", None)
         rbv_y = self.ep.get("y_rbv", None)
         if enc_x is None or enc_y is None or rbv_x is None or rbv_y is None:
             return
-
-        # First valid read: compute offsets
         if self._enc_offset_x is None:
             self._enc_offset_x = enc_x - rbv_x
             self._enc_offset_y = enc_y - rbv_y
-            self._log(f"Encoder calibrated: offset X={self._enc_offset_x:+.4f}  "
-                      f"Y={self._enc_offset_y:+.4f} mm")
-            self._lbl_enc_drift.setText(
-                f"Encoder:  calibrated (dX={self._enc_offset_x:+.4f}  dY={self._enc_offset_y:+.4f})")
-            self._lbl_enc_drift.setStyleSheet(f"color: {C.GREEN};")
+            self._log(f"Encoder calibrated: offset X={self._enc_offset_x:.4f} Y={self._enc_offset_y:.4f}")
             return
-
-        # Subsequent reads: check drift
-        drift_x = (enc_x - self._enc_offset_x) - rbv_x
-        drift_y = (enc_y - self._enc_offset_y) - rbv_y
-        drift = math.sqrt(drift_x**2 + drift_y**2)
-
-        if drift > ENCODER_DRIFT_WARN:
+        drift = math.sqrt(
+            ((enc_x - self._enc_offset_x) - rbv_x)**2 +
+            ((enc_y - self._enc_offset_y) - rbv_y)**2)
+        if drift > self.ENCODER_DRIFT_WARN:
             self._lbl_enc_drift.setText(
-                f"Encoder:  DRIFT {drift:.3f} mm  (X={drift_x:+.3f} Y={drift_y:+.3f})")
-            self._lbl_enc_drift.setStyleSheet(f"color: {C.RED}; font: bold 9pt 'Consolas';")
+                f"Encoder:  DRIFT {drift:.4f} mm")
+            self._lbl_enc_drift.setStyleSheet(f"color: {C.RED};")
         else:
             self._lbl_enc_drift.setText(
                 f"Encoder:  OK  drift {drift:.4f} mm")
@@ -1338,6 +999,22 @@ class SnakeScanWindow(QMainWindow):
                 sv = int(val)
                 fg = C.RED if sv == SPMG.STOP else C.ORANGE if sv == SPMG.PAUSE else C.GREEN
             lbl.setText(txt); lbl.setStyleSheet(f"color: {fg};")
+
+        # update motor state badges
+        for axis, sl in self._motor_state_labels.items():
+            spmg = self.ep.get(f"{axis}_spmg", None)
+            movn = self.ep.get(f"{axis}_movn", None)
+            if spmg is not None and int(spmg) == SPMG.STOP:
+                sl.setText("Stop"); fg, bg = C.RED, "#3d1214"
+            elif spmg is not None and int(spmg) == SPMG.PAUSE:
+                sl.setText("Pause"); fg, bg = C.ORANGE, "#3d2a0e"
+            elif movn is not None and int(movn) == 1:
+                sl.setText("Moving"); fg, bg = C.YELLOW, "#3d3010"
+            else:
+                sl.setText("Idle"); fg, bg = C.DIM, "#21262d"
+            sl.setStyleSheet(f"color: {fg}; font: bold 8pt 'Consolas'; "
+                             f"background: {bg}; border: 1px solid #30363d; "
+                             f"border-radius: 3px; padding: 1px 6px;")
         # position check
         eng = self.engine
         rx, ry = self.ep.get("x_rbv", 0.0), self.ep.get("y_rbv", 0.0)
@@ -1425,6 +1102,7 @@ class SnakeScanWindow(QMainWindow):
 
 PATHS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "paths.json")
 
+
 def main():
     parser = argparse.ArgumentParser(description="HyCal Snake Scan")
     parser.add_argument("--expert", action="store_true")
@@ -1434,14 +1112,14 @@ def main():
     args = parser.parse_args()
 
     all_modules = load_modules(args.database)
-    by_type = {}
+    by_type: Dict[str, int] = {}
     for m in all_modules:
         by_type[m.mod_type] = by_type.get(m.mod_type, 0) + 1
     print(f"Loaded {len(all_modules)} modules from {args.database}")
     for t, n in sorted(by_type.items()):
         print(f"  {t}: {n}")
 
-    profiles = {}
+    profiles: Dict[str, List[str]] = {}
     if os.path.exists(args.paths):
         with open(args.paths) as f:
             profiles = json.load(f)
@@ -1450,18 +1128,26 @@ def main():
     observer = args.observer
     simulation = not args.expert and not observer
 
-    if observer:        ep = ObserverEPICS()
-    elif simulation:    ep = SimulatedEPICS()
-    else:               ep = RealEPICS(writable=True)
+    # motor EPICS
+    if observer:        motor_ep = ObserverEPICS()
+    elif simulation:    motor_ep = SimulatedMotorEPICS()
+    else:               motor_ep = MotorEPICS(writable=True)
 
-    n_ok, n_total = ep.connect()
+    n_ok, n_total = motor_ep.connect()
     if not simulation:
         print(f"EPICS: {n_ok}/{n_total} PVs connected")
-        for pv in ep.disconnected_pvs():
+        for pv in motor_ep.disconnected_pvs():
             print(f"  NOT connected: {pv}")
 
+    # scaler EPICS
+    if simulation:
+        scaler_ep = SimulatedScalerEPICS(all_modules)
+    else:
+        scaler_ep = ScalerPVGroup(all_modules)
+
     app = QApplication(sys.argv)
-    win = SnakeScanWindow(ep, simulation, all_modules, profiles, observer=observer)
+    win = SnakeScanWindow(motor_ep, scaler_ep, simulation, all_modules,
+                          profiles, observer=observer)
     win.show()
     sys.exit(app.exec())
 

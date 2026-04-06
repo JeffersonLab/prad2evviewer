@@ -60,7 +60,7 @@ class C:
     MOD_LMS       = "#2d1f3d"
     MOD_EXCLUDED  = "#111418"
     MOD_SKIPPED   = "#15181d"
-    PATH_LINE     = "#30506e"
+    PATH_LINE     = "#ffffff"
 
 
 # ============================================================================
