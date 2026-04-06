@@ -53,10 +53,10 @@ function pollLivetime(){
         if(!el) return;
         el.style.display='';
         if(d.livetime>=0){
-            el.textContent='Livetime: '+d.livetime.toFixed(1)+'%';
+            el.textContent='DAQ Livetime: '+d.livetime.toFixed(1)+'%';
             el.style.color=d.livetime>=90?'#51cf66':d.livetime>=80?'#ffd43b':'#f66';
         } else {
-            el.textContent='Livetime: N/A';
+            el.textContent='DAQ Livetime: N/A';
             el.style.color='#888';
         }
     }).catch(()=>{});
