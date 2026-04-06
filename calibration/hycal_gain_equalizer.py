@@ -857,6 +857,13 @@ class GainEqualizerWindow(QMainWindow):
         if eng is None: return
         running = eng.state not in (GainScanState.IDLE, GainScanState.COMPLETED)
         self._path_group.setVisible(not running)
+        self._btn_start.setEnabled(not running)
+        for w in (self._ge_server_edit, self._ge_hv_edit, self._ge_hv_pw,
+                  self._ge_target, self._ge_counts, self._ge_maxiter, self._ge_tol):
+            w.setEnabled(not running)
+        self._btn_pause.setEnabled(running)
+        self._btn_stop.setEnabled(running)
+        self._btn_skip.setEnabled(running)
         sc = {GainScanState.IDLE: C.DIM, GainScanState.MOVING: C.YELLOW,
               GainScanState.COLLECTING: C.ACCENT, GainScanState.ANALYZING: C.ACCENT,
               GainScanState.ADJUSTING: C.ORANGE, GainScanState.CONVERGED: C.GREEN,

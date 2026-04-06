@@ -646,13 +646,14 @@ class GainScanEngine:
         return False
 
     LOW_RATE_THRESHOLD = 10.0  # Hz — warn if collection rate drops below this
+    LOW_RATE_RESET_POLLS = 10  # reset data after this many consecutive low-rate polls
 
     def _wait_for_counts(self, mod: Module, key: str) -> bool:
         """Poll occupancy until the target module has min_counts hits."""
         retries = 0
         prev_counts = 0
         prev_time = time.time()
-        low_rate_warned = False
+        low_rate_streak = 0
         self.collect_rate = 0.0
         while not self._stop.is_set() and not self._skip.is_set():
             self._check_paused()
@@ -675,7 +676,7 @@ class GainScanEngine:
                         self.server.clear_histograms()
                     except Exception:
                         pass
-                    prev_counts = 0; prev_time = time.time(); low_rate_warned = False
+                    prev_counts = 0; prev_time = time.time(); low_rate_streak = 0
             try:
                 occ = self.server.get_occupancy()
                 counts = occ.get("occ", {}).get(key, 0)
@@ -686,12 +687,21 @@ class GainScanEngine:
                 if dt > 0.5:
                     self.collect_rate = (counts - prev_counts) / dt
                     if self.collect_rate < self.LOW_RATE_THRESHOLD and counts > 0:
-                        if not low_rate_warned:
+                        low_rate_streak += 1
+                        if low_rate_streak == 1:
                             self.log(f"{mod.name}: low rate {self.collect_rate:.1f} Hz "
                                      f"(< {self.LOW_RATE_THRESHOLD:.0f} Hz)", level="warn")
-                            low_rate_warned = True
+                        if low_rate_streak >= self.LOW_RATE_RESET_POLLS:
+                            self.log(f"{mod.name}: low rate persisted for "
+                                     f"{low_rate_streak} polls — resetting data",
+                                     level="warn")
+                            try:
+                                self.server.clear_histograms()
+                            except Exception:
+                                pass
+                            prev_counts = 0; low_rate_streak = 0
                     else:
-                        low_rate_warned = False
+                        low_rate_streak = 0
                     prev_counts = counts; prev_time = now
                 if counts >= self.min_counts:
                     return True
