@@ -120,7 +120,7 @@ int main(int argc, char *argv[])
     TH1F *peak_hist_module[1156];
     for (int i = 0; i < 1156; i++) {
         std::string name = "peak_module_" + std::to_string(i+1);
-        peak_hist_module[i] = new TH1F(name.c_str(), name.c_str(), 100, 0, 500);
+        peak_hist_module[i] = new TH1F(name.c_str(), name.c_str(), 400, 0, 4000);
     }
     TH1F *peak_hist_LG_module[1000];
     for (int i = 0; i < 1000; i++) {
