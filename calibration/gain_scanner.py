@@ -413,7 +413,13 @@ class GainScanState:
 
 
 class GainScanEngine:
-    """Orchestrates the automatic gain equalization scan."""
+    """Orchestrates the automatic gain equalization scan.
+
+    Each module is processed as a self-contained step: fresh server/HV
+    connections are created, the module is equalized (or fails), then
+    connections are closed.  This avoids stale WebSocket state between
+    modules.
+    """
 
     # defaults (configurable before start)
     target_adc: float = 3200.0
@@ -428,16 +434,23 @@ class GainScanEngine:
     edge_adc_min: float = 500.0      # reject edges below this
     edge_adc_max: float = 3900.0     # reject edges above this
 
-    def __init__(self, motor_ep, server: ServerClient, hv: HVClient,
+    def __init__(self, motor_ep,
+                 server_url: str, hv_url: str, hv_password: str,
+                 read_only: bool,
                  modules: List[Module], log_fn,
                  key_map: Dict[str, str]):
         self.ep = motor_ep
-        self.server = server
-        self.hv = hv
+        self._server_url = server_url
+        self._hv_url = hv_url
+        self._hv_password = hv_password
+        self._read_only = read_only
         self.path, _ = build_scan_path(modules)
         self.log = log_fn
         self.key_map = key_map
         self.analyzer = SpectrumAnalyzer(target_adc=self.target_adc)
+        # current step's connections (created per module, visible to UI)
+        self.server: Optional[ServerClient] = None
+        self.hv: Optional[HVClient] = None
 
         self.state = GainScanState.IDLE
         self.current_idx = 0
@@ -474,14 +487,20 @@ class GainScanEngine:
     def start(self, start_idx: int = 0, count: int = 0):
         if self._thread and self._thread.is_alive():
             return
+        resuming = self.state == GainScanState.FAILED
         self._stop.clear()
         self._skip.clear()
         self._paused = False
-        self.current_idx = start_idx
-        self._start_idx = start_idx
-        self._end_idx = min(start_idx + count, len(self.path)) if count > 0 else len(self.path)
-        self.converged.clear()
-        self.failed.clear()
+        if resuming:
+            # resume from next module after the failed one
+            self._start_idx = self.current_idx + 1
+            self.log(f"Resuming from module {self._start_idx + 1}/{len(self.path)}")
+        else:
+            self.current_idx = start_idx
+            self._start_idx = start_idx
+            self._end_idx = min(start_idx + count, len(self.path)) if count > 0 else len(self.path)
+            self.converged.clear()
+            self.failed.clear()
         self.state = GainScanState.MOVING
         self.analyzer.target_adc = self.target_adc
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -509,6 +528,27 @@ class GainScanEngine:
 
     # -- main loop ----------------------------------------------------------
 
+    def _connect_step(self) -> bool:
+        """Create fresh server + HV connections for one module step."""
+        try:
+            self.server = ServerClient(self._server_url,
+                                       log_fn=self.log, read_only=self._read_only)
+            self.hv = HVClient(self._hv_url,
+                                log_fn=self.log, read_only=self._read_only)
+            self.hv.connect(password=self._hv_password)
+            return True
+        except Exception as e:
+            self.log(f"Connection failed: {e}", level="error")
+            return False
+
+    def _disconnect_step(self):
+        """Close connections after one module step."""
+        if self.hv:
+            try: self.hv.close()
+            except Exception: pass
+            self.hv = None
+        self.server = None
+
     def _run(self):
         n = self._end_idx - self._start_idx
         self.log(f"Gain scan started: {n} modules, target ADC {self.target_adc:.0f}")
@@ -516,6 +556,8 @@ class GainScanEngine:
             for i in range(self._start_idx, self._end_idx):
                 if self._stop.is_set():
                     break
+
+                # -- reset per-module state --
                 self.current_idx = i
                 self.current_iteration = 0
                 self.last_edge_adc = None
@@ -524,158 +566,175 @@ class GainScanEngine:
                 self.last_bins = []
                 self.last_vset = None
                 self.last_vmon = None
+                self.module_counts = 0
+                self.collect_rate = 0.0
                 self.iteration_history = []
                 mod = self.path[i]
-                px, py = module_to_ptrans(mod.x, mod.y)
 
-                # -- move --
-                self.state = GainScanState.MOVING
-                self.log(f"[{i+1}/{len(self.path)}] Moving to {mod.name}")
-                if not epics_move_to(self.ep, px, py):
-                    self.log(f"SKIPPED {mod.name}: outside limits", level="warn")
-                    continue
-                if not self._wait_move_done():
-                    break
+                self.log(f"── [{i+1}/{len(self.path)}] {mod.name} ──")
 
-                # check DAQ key
-                key = self.key_map.get(mod.name)
-                if not key:
-                    self.log(f"SKIPPED {mod.name}: no DAQ mapping", level="warn")
-                    continue
+                # -- fresh connections --
+                if not self._connect_step():
+                    self._mark_failed(i, mod)
+                    self.log(f"{mod.name}: STOPPED — click Start to retry from here",
+                             level="error")
+                    return  # stop scan, user must restart
 
-                # -- iterate: collect → analyze → adjust --
-                success = False
-                for iteration in range(self.max_iterations):
-                    if self._stop.is_set():
-                        break
-                    if self._skip.is_set():
-                        self._skip.clear()
-                        self.log(f"Module {mod.name} skipped")
-                        break
-                    self.current_iteration = iteration + 1
+                try:
+                    self._process_module(i, mod)
+                finally:
+                    self._disconnect_step()
 
-                    # collect
-                    self.state = GainScanState.COLLECTING
-                    self.module_counts = 0
-                    try:
-                        self.server.clear_histograms()
-                    except Exception as e:
-                        self.log(f"Server error (clear): {e}", level="error")
-                        self._mark_failed(i, mod)
-                        break
-                    if not self._wait_for_counts(mod, key):
-                        if self._stop.is_set():
-                            break
-                        self._mark_failed(i, mod)
-                        break
+                self._skip.clear()
 
-                    # read current HV before analysis (for report)
-                    try:
-                        hv_info = self.hv.get_voltage(mod.name)
-                        if hv_info:
-                            self.last_vset = hv_info.get("vset")
-                            self.last_vmon = hv_info.get("vmon")
-                    except Exception:
-                        pass  # vset stays as previous value or None
+                # if this module failed, pause the scan for user intervention
+                if i in self.failed:
+                    self.log(f"{mod.name}: STOPPED — click Start to continue from next module",
+                             level="error")
+                    return
 
-                    # analyze
-                    self.state = GainScanState.ANALYZING
-                    try:
-                        hist = self.server.get_height_histogram(key)
-                    except Exception as e:
-                        self.log(f"Server error (hist): {e}", level="error")
-                        self._mark_failed(i, mod)
-                        break
-                    bins = hist.get("bins", [])
-                    self.last_bins = bins
-                    edge = self.analyzer.find_right_edge(bins)
-                    self.last_edge_bin = edge
-                    if edge is None:
-                        self.log(f"{mod.name} iter {iteration+1}: no edge found",
-                                 level="error")
-                        self._mark_failed(i, mod)
-                        break
-                    edge_adc = self.analyzer.edge_to_adc(edge)
-                    self.last_edge_adc = edge_adc
-
-                    # record iteration snapshot for report
-                    self.iteration_history.append({
-                        "iteration": iteration + 1,
-                        "bins": list(bins),
-                        "edge_bin": edge,
-                        "edge_adc": edge_adc,
-                        "vset": self.last_vset,
-                        "vmon": self.last_vmon,
-                        "time": datetime.now().strftime("%H:%M:%S"),
-                    })
-
-                    if edge_adc < self.edge_adc_min or edge_adc > self.edge_adc_max:
-                        self.log(f"{mod.name} iter {iteration+1}: edge {edge_adc:.0f} "
-                                 f"out of range [{self.edge_adc_min:.0f}, {self.edge_adc_max:.0f}]",
-                                 level="error")
-                        self._mark_failed(i, mod)
-                        break
-
-                    # check convergence
-                    if abs(edge_adc - self.target_adc) <= self.convergence_tol:
-                        self.converged.add(i)
-                        self.state = GainScanState.CONVERGED
-                        self.log(f"{mod.name}: CONVERGED at {edge_adc:.0f} "
-                                 f"(iter {iteration+1})")
-                        self._save_module_report(mod, "success")
-                        success = True
-                        break
-
-                    # adjust HV
-                    self.state = GainScanState.ADJUSTING
-                    info = self.hv.get_voltage(mod.name)
-                    if info is None:
-                        if self.hv._read_only:
-                            # no HV connection in read-only mode — use dummy values
-                            info = {"vset": 1000.0, "limit": 2000.0}
-                            self.log(f"{mod.name}: HV not connected, using dummy V={info['vset']:.0f}",
-                                     level="warn")
-                        else:
-                            self.log(f"{mod.name}: HV read failed", level="error")
-                            self._mark_failed(i, mod)
-                            break
-                    current_v = info.get("vset", 0)
-                    self.last_vset = current_v
-                    limit_v = info.get("limit", 99999)
-                    dv = self.analyzer.compute_voltage_step(edge_adc, current_v)
-                    self.last_dv = dv
-                    new_v = current_v + dv
-
-                    if new_v > limit_v:
-                        self.log(f"{mod.name}: would exceed limit "
-                                 f"({new_v:.1f} > {limit_v:.1f})", level="error")
-                        self._mark_failed(i, mod)
-                        break
-
-                    self.log(f"{mod.name} iter {iteration+1}: edge={edge_adc:.0f} "
-                             f"ΔV={dv:+.0f} ({current_v:.1f}→{new_v:.1f})")
-                    if not self.hv.set_voltage(mod.name, new_v, old_value=current_v):
-                        self.log(f"{mod.name}: HV set failed", level="error")
-                        self._mark_failed(i, mod)
-                        break
-
-                    # wait for HV to settle
-                    self._wait_paused(self.hv_settle_time)
-                    if self._stop.is_set():
-                        break
-                else:
-                    if not success and i not in self.failed:
-                        self.log(f"{mod.name}: max iterations reached "
-                                 f"(last edge={self.last_edge_adc:.0f})", level="warn")
-                        self._mark_failed(i, mod)
         finally:
+            self._disconnect_step()
             if self._stop.is_set():
                 self.state = GainScanState.IDLE
                 self.log("Gain scan stopped by user")
-            else:
+            elif self.state != GainScanState.FAILED:
                 self.state = GainScanState.COMPLETED
                 self.log(f"Gain scan COMPLETE: {len(self.converged)} converged, "
                          f"{len(self.failed)} failed", level="warn")
+
+    def _process_module(self, i: int, mod: Module):
+        """Process one module: move → (collect → analyze → adjust) × N."""
+        px, py = module_to_ptrans(mod.x, mod.y)
+
+        # -- move --
+        self.state = GainScanState.MOVING
+        self.log(f"Moving to {mod.name}  ptrans({px:.3f}, {py:.3f})")
+        if not epics_move_to(self.ep, px, py):
+            self.log(f"SKIPPED {mod.name}: outside limits", level="warn")
+            return
+        if not self._wait_move_done():
+            return
+
+        # check DAQ key
+        key = self.key_map.get(mod.name)
+        if not key:
+            self.log(f"SKIPPED {mod.name}: no DAQ mapping", level="warn")
+            return
+
+        # -- iterate: collect → analyze → adjust --
+        for iteration in range(self.max_iterations):
+            if self._stop.is_set():
+                return
+            if self._skip.is_set():
+                self._skip.clear()
+                self.log(f"Module {mod.name} skipped")
+                return
+            self.current_iteration = iteration + 1
+
+            # collect
+            self.state = GainScanState.COLLECTING
+            self.module_counts = 0
+            try:
+                self.server.clear_histograms()
+            except Exception as e:
+                self.log(f"Server error (clear): {e}", level="error")
+                self._mark_failed(i, mod); return
+            if not self._wait_for_counts(mod, key):
+                if self._stop.is_set():
+                    return
+                self._mark_failed(i, mod); return
+
+            # read current HV before analysis
+            try:
+                hv_info = self.hv.get_voltage(mod.name)
+                if hv_info:
+                    self.last_vset = hv_info.get("vset")
+                    self.last_vmon = hv_info.get("vmon")
+            except Exception:
+                pass
+
+            # analyze
+            self.state = GainScanState.ANALYZING
+            try:
+                hist = self.server.get_height_histogram(key)
+            except Exception as e:
+                self.log(f"Server error (hist): {e}", level="error")
+                self._mark_failed(i, mod); return
+            bins = hist.get("bins", [])
+            self.last_bins = bins
+            edge = self.analyzer.find_right_edge(bins)
+            self.last_edge_bin = edge
+            if edge is None:
+                self.log(f"{mod.name} iter {iteration+1}: no edge found", level="error")
+                self._mark_failed(i, mod); return
+            edge_adc = self.analyzer.edge_to_adc(edge)
+            self.last_edge_adc = edge_adc
+
+            # record iteration snapshot
+            self.iteration_history.append({
+                "iteration": iteration + 1,
+                "bins": list(bins),
+                "edge_bin": edge,
+                "edge_adc": edge_adc,
+                "vset": self.last_vset,
+                "vmon": self.last_vmon,
+                "time": datetime.now().strftime("%H:%M:%S"),
+            })
+
+            if edge_adc < self.edge_adc_min or edge_adc > self.edge_adc_max:
+                self.log(f"{mod.name} iter {iteration+1}: edge {edge_adc:.0f} "
+                         f"out of range [{self.edge_adc_min:.0f}, {self.edge_adc_max:.0f}]",
+                         level="error")
+                self._mark_failed(i, mod); return
+
+            # check convergence
+            if abs(edge_adc - self.target_adc) <= self.convergence_tol:
+                self.converged.add(i)
+                self.state = GainScanState.CONVERGED
+                self.log(f"{mod.name}: CONVERGED at {edge_adc:.0f} (iter {iteration+1})")
+                self._save_module_report(mod, "success")
+                return
+
+            # adjust HV
+            self.state = GainScanState.ADJUSTING
+            info = self.hv.get_voltage(mod.name)
+            if info is None:
+                if self._read_only:
+                    info = {"vset": 1000.0, "limit": 2000.0}
+                    self.log(f"{mod.name}: HV not connected, using dummy V={info['vset']:.0f}",
+                             level="warn")
+                else:
+                    self.log(f"{mod.name}: HV read failed", level="error")
+                    self._mark_failed(i, mod); return
+            current_v = info.get("vset", 0)
+            self.last_vset = current_v
+            limit_v = info.get("limit", 99999)
+            dv = self.analyzer.compute_voltage_step(edge_adc, current_v)
+            self.last_dv = dv
+            new_v = current_v + dv
+
+            if new_v > limit_v:
+                self.log(f"{mod.name}: would exceed limit ({new_v:.1f} > {limit_v:.1f})",
+                         level="error")
+                self._mark_failed(i, mod); return
+
+            self.log(f"{mod.name} iter {iteration+1}: edge={edge_adc:.0f} "
+                     f"ΔV={dv:+.0f} ({current_v:.1f}→{new_v:.1f})")
+            if not self.hv.set_voltage(mod.name, new_v, old_value=current_v):
+                self.log(f"{mod.name}: HV set failed", level="error")
+                self._mark_failed(i, mod); return
+
+            # wait for HV to settle
+            self._wait_paused(self.hv_settle_time)
+            if self._stop.is_set():
+                return
+
+        # max iterations exhausted
+        if i not in self.converged and i not in self.failed:
+            self.log(f"{mod.name}: max iterations reached "
+                     f"(last edge={self.last_edge_adc:.0f})", level="warn")
+            self._mark_failed(i, mod)
 
     def _mark_failed(self, idx: int, mod: Module):
         self.failed.add(idx)

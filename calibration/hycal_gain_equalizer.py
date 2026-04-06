@@ -572,43 +572,56 @@ class GainEqualizerWindow(QMainWindow):
 
     def _cmdStart(self):
         if self._gain_engine and self._gain_engine.state not in (
-                GainScanState.IDLE, GainScanState.COMPLETED):
+                GainScanState.IDLE, GainScanState.COMPLETED, GainScanState.FAILED):
             return
+
+        # resume from failure — reuse existing engine
+        if self._gain_engine and self._gain_engine.state == GainScanState.FAILED:
+            self._gain_engine.start()
+            return
+
         if not self.scan_modules:
             self._log("Select a path first", level="error"); return
         # sync start index from combo selection
         self._onStartSelected(0)
 
         ro = self.simulation
-        if not ro and not self._ge_hv_pw.text().strip():
+        server_url = self._ge_server_edit.text().strip()
+        hv_url = self._ge_hv_edit.text().strip()
+        hv_pw = self._ge_hv_pw.text()
+
+        if not ro and not hv_pw.strip():
             self._log("Expert mode requires HV password", level="error")
             QMessageBox.warning(self, "HV Password Required",
                                 "Enter the prad2hvd password before starting in expert mode.")
             return
 
+        # pre-flight: verify server is reachable and build key map
         try:
-            server = ServerClient(self._ge_server_edit.text().strip(),
-                                  log_fn=self._log, read_only=ro)
-            key_map = server.build_key_map()
+            test_server = ServerClient(server_url, log_fn=self._log, read_only=ro)
+            key_map = test_server.build_key_map()
             mode = "read-only" if ro else "read-write"
-            self._log(f"Server connected ({mode}), {len(key_map)} DAQ channels")
+            self._log(f"Server OK ({mode}), {len(key_map)} DAQ channels")
         except Exception as e:
             self._log(f"Server error: {e}", level="error"); return
 
-        try:
-            hv = HVClient(self._ge_hv_edit.text().strip(),
-                          log_fn=self._log, read_only=ro)
-            hv.connect(password=self._ge_hv_pw.text())
-        except Exception as e:
-            self._log(f"HV error: {e}", level="error")
-            if not ro:
+        # pre-flight: verify HV is reachable (connections are per-module during scan)
+        if not ro:
+            try:
+                test_hv = HVClient(hv_url, log_fn=self._log, read_only=False)
+                test_hv.connect(password=hv_pw)
+                test_hv.close()
+                self._log("HV pre-flight OK")
+            except Exception as e:
+                self._log(f"HV error: {e}", level="error")
                 QMessageBox.critical(self, "HV Connection Failed", str(e))
-            return
+                return
 
         eng = GainScanEngine(
-            motor_ep=self.ep, server=server, hv=hv,
+            motor_ep=self.ep,
+            server_url=server_url, hv_url=hv_url,
+            hv_password=hv_pw, read_only=ro,
             modules=self.scan_modules, log_fn=self._log, key_map=key_map)
-        # use profile order if a named path is selected
         if self._use_profile_order:
             eng.path = list(self._ordered_path)
         eng.target_adc = self._ge_target.value()
@@ -955,7 +968,7 @@ class GainEqualizerWindow(QMainWindow):
         self._histogram.setInfo("  ".join(info_parts))
 
         # fetch live histogram during collection for preview (~every 2s)
-        if eng.state == GainScanState.COLLECTING and mod:
+        if eng.state == GainScanState.COLLECTING and mod and eng.server:
             import time as _time
             now = _time.time()
             if now - getattr(self, '_last_hist_fetch', 0) > 2.0:
