@@ -219,6 +219,8 @@ class GainEqualizerWindow(QMainWindow):
         self.scan_modules: List[Module] = []
         self._scan_names: set = set()
         self._scan_name_to_idx: Dict[str, int] = {}
+        self._ordered_path: List[Module] = []
+        self._use_profile_order = False
         self._selected_start_idx = 0
         self._selected_mod_name: Optional[str] = None
         self._mod_dlg = None
@@ -574,6 +576,8 @@ class GainEqualizerWindow(QMainWindow):
             return
         if not self.scan_modules:
             self._log("Select a path first", level="error"); return
+        # sync start index from combo selection
+        self._onStartSelected(0)
 
         try:
             ro = self.simulation
@@ -596,6 +600,9 @@ class GainEqualizerWindow(QMainWindow):
         eng = GainScanEngine(
             motor_ep=self.ep, server=server, hv=hv,
             modules=self.scan_modules, log_fn=self._log, key_map=key_map)
+        # use profile order if a named path is selected
+        if self._use_profile_order:
+            eng.path = list(self._ordered_path)
         eng.target_adc = self._ge_target.value()
         eng.min_counts = self._ge_counts.value()
         eng.max_iterations = self._ge_maxiter.value()
@@ -631,7 +638,7 @@ class GainEqualizerWindow(QMainWindow):
         self._onStartSelected(0)
         names = [m.name for m in (self._gain_engine.path if self._gain_engine else [])]
         if not names: return
-        path, _ = build_scan_path(self.scan_modules)
+        path = self._ordered_path
         if self._selected_start_idx >= len(path): return
         mod = path[self._selected_start_idx]
         px, py = module_to_ptrans(mod.x, mod.y)
@@ -650,7 +657,7 @@ class GainEqualizerWindow(QMainWindow):
 
     def _onStartSelected(self, _):
         name = self._start_combo.currentText()
-        path, _ = build_scan_path(self.scan_modules) if self.scan_modules else ([], 0)
+        path = self._ordered_path
         for i, m in enumerate(path):
             if m.name == name:
                 self._selected_start_idx = i; self._drawPathPreview(); break
@@ -673,7 +680,7 @@ class GainEqualizerWindow(QMainWindow):
         path_mods = [mod_by_name[n] for n in self._profiles.get(name, []) if n in mod_by_name]
         if not path_mods:
             self._log(f"Profile '{name}' empty", level="error"); return
-        self._setPath(path_mods)
+        self._setPath(path_mods, use_profile_order=True)
         self._log(f"Path profile: {name} ({len(path_mods)} modules)")
 
     def _onLgLayersChanged(self, value=0, force=False):
@@ -687,10 +694,15 @@ class GainEqualizerWindow(QMainWindow):
         ng = sum(1 for m in mods if m.mod_type == "PbGlass")
         self._log(f"LG layers: {nl} ({np_} PbWO4 + {ng} PbGlass = {len(mods)})")
 
-    def _setPath(self, mods):
+    def _setPath(self, mods, use_profile_order=False):
         self.scan_modules = mods
         self._scan_names = {m.name for m in mods}
-        path, _ = build_scan_path(mods)
+        self._use_profile_order = use_profile_order
+        if use_profile_order:
+            path = mods  # preserve order from paths.json
+        else:
+            path, _ = build_scan_path(mods)
+        self._ordered_path = path
         self._scan_name_to_idx = {m.name: i for i, m in enumerate(path)}
         self._selected_start_idx = 0
         ns = [m.name for m in path]
@@ -719,7 +731,7 @@ class GainEqualizerWindow(QMainWindow):
                                   else C.MOD_PWO4_BG if m.mod_type == "PbWO4" else C.MOD_LMS)
 
         # scan path modules
-        path, _ = build_scan_path(self.scan_modules) if self.scan_modules else ([], 0)
+        path = self._ordered_path
         if eng and eng.state not in (GainScanState.IDLE, GainScanState.COMPLETED):
             for i, mod in enumerate(path):
                 if i == eng.current_idx and eng.state in (GainScanState.MOVING,):
@@ -756,7 +768,7 @@ class GainEqualizerWindow(QMainWindow):
         self._map.update()
 
     def _drawPathPreview(self):
-        path, _ = build_scan_path(self.scan_modules) if self.scan_modules else ([], 0)
+        path = self._ordered_path
         s = self._selected_start_idx
         if s >= len(path): self._map.setPathPreview([]); return
         c = self._count_spin.value()
@@ -1014,14 +1026,19 @@ class GainEqualizerWindow(QMainWindow):
         self._scaler_timer.stop()
         if self._gain_engine:
             self._gain_engine.stop()
-            # wait briefly for engine thread to finish
             t = getattr(self._gain_engine, '_thread', None)
             if t and t.is_alive():
                 t.join(timeout=2.0)
+            # close HV WebSocket to unblock reader thread
+            if hasattr(self._gain_engine, 'hv'):
+                self._gain_engine.hv.close()
         if self._log_file and not self._log_file.closed:
             self._log_file.close()
         self._log_file = None
         super().closeEvent(e)
+        # force exit in case daemon threads are still blocked
+        import os
+        os._exit(0)
 
 
 # ============================================================================
