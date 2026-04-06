@@ -43,7 +43,7 @@ DB_DIR = SCRIPT_DIR / ".." / "database"
 MODULES_JSON = DB_DIR / "hycal_modules.json"
 
 SCALER_PV = "B_DET_HYCAL_FADC_{label}:c"
-POLL_INTERVAL_MS = 10_000   # 10 seconds
+POLL_INTERVAL_MS = 3_000   # 1 seconds
 
 
 # ===========================================================================
@@ -522,6 +522,8 @@ class ScalerMapWindow(QMainWindow):
         W_totalSum = W_totalSum/1000.0
         y_asym = (topSum-botSum)/1000.0
         x_asym = (rightSum-leftSum)/1000.0
+        x_COM = x_asym/340.0
+        y_COM = y_asym/340.0
 
         if self._auto_range_on and self._values:
             self._do_auto_range()
@@ -536,11 +538,11 @@ class ScalerMapWindow(QMainWindow):
             lo = min(self._values.values())/1000.0
             hi = max(self._values.values())/1000.0
             self.statusBar().showMessage(
-                f"Data: {lo:.0f}kHz .. {hi:.0f}kHz    "
-                f"Channels: {len(self._values)}    "
-                f"Crystal Total: {W_totalSum:.2f}kHz    "
-                f"X-Asym: {x_asym:.3f}kHz    "
-                f"Y-Asym: {y_asym:.3f}kHz")
+                f"Data: {lo:.0f}kHz .. {hi:.0f}kHz  "
+                f"Channels: {len(self._values)}  "
+                f"PbWO4 Total: {W_totalSum:.2f}kHz  "
+                f"Asym (kHz): [{x_asym:.3f}, {y_asym:.3f}]  "
+                f"CoR (mm): [{x_COM:.3f},{y_COM:.3f}]")
 
     def _toggle_polling(self):
         self._polling = not self._polling
