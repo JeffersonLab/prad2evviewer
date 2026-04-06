@@ -188,11 +188,12 @@ class HVClient:
         auth_required = init_msg.get("auth_required", False)
         if auth_required and password:
             self._log("HV: authenticating (Expert)")
-            self._send({"type": "auth", "password": password})
-            resp = self._recv_until("auth_response", timeout=5)
-            if not resp or resp.get("access_level", 0) < 2:
-                raise RuntimeError("HV authentication failed (Expert level required)")
-            self._log("HV: authenticated OK")
+            self._send({"type": "auth", "password": password, "level": 2})
+            resp = self._recv_until("auth_result", timeout=10)
+            if not resp or resp.get("granted", 0) < 2:
+                reason = resp.get("reason", "unknown") if resp else "no response"
+                raise RuntimeError(f"HV authentication failed: {reason}")
+            self._log(f"HV: authenticated OK (level {resp.get('granted')})")
         self._log("HV: connected")
 
     def _send(self, msg: dict):
