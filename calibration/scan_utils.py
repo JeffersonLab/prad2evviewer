@@ -149,16 +149,16 @@ def filter_scan_modules(all_modules: List[Module], lg_layers: int,
 
 DARK_QSS = """
 QMainWindow, QWidget { background: #0d1117; color: #c9d1d9; }
-QLabel { color: #c9d1d9; font: 9pt 'Consolas'; }
+QLabel { color: #c9d1d9; font: 13pt 'Consolas'; }
 QGroupBox {
-    color: #58a6ff; font: bold 9pt 'Consolas';
+    color: #58a6ff; font: bold 13pt 'Consolas';
     border: 1px solid #30363d; border-radius: 4px;
     margin-top: 8px; padding-top: 14px;
 }
 QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }
 QPushButton {
     background: #161b22; color: #c9d1d9; border: 1px solid #30363d;
-    border-radius: 3px; padding: 5px 12px; font: 9pt 'Consolas';
+    border-radius: 3px; padding: 5px 12px; font: 13pt 'Consolas';
 }
 QPushButton:hover { background: #21262d; border-color: #58a6ff; }
 QPushButton:pressed { background: #0d1117; }
@@ -173,7 +173,7 @@ QPushButton[cssClass="accent"] { background: #1f6feb; color: white; border-color
 QPushButton[cssClass="accent"]:hover { background: #388bfd; }
 QComboBox {
     background: #161b22; color: #c9d1d9; border: 1px solid #30363d;
-    border-radius: 3px; padding: 3px 8px; font: 9pt 'Consolas'; min-height: 20px;
+    border-radius: 3px; padding: 3px 8px; font: 13pt 'Consolas'; min-height: 20px;
 }
 QComboBox::drop-down { border: none; width: 20px; }
 QComboBox::down-arrow { image: none; border-left: 4px solid transparent;
@@ -184,7 +184,7 @@ QComboBox QAbstractItemView {
 }
 QSpinBox, QDoubleSpinBox {
     background: #161b22; color: #c9d1d9; border: 1px solid #30363d;
-    border-radius: 3px; padding: 3px 4px; font: 9pt 'Consolas'; min-height: 20px;
+    border-radius: 3px; padding: 3px 4px; font: 13pt 'Consolas'; min-height: 20px;
 }
 QSpinBox::up-button, QSpinBox::down-button,
 QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
@@ -192,11 +192,11 @@ QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
 }
 QTextEdit, QPlainTextEdit {
     background: #0d1117; color: #8b949e; border: 1px solid #30363d;
-    border-radius: 3px; font: 9pt 'Consolas';
+    border-radius: 3px; font: 13pt 'Consolas';
 }
 QProgressBar {
     background: #161b22; border: 1px solid #30363d; border-radius: 3px;
-    text-align: center; color: #c9d1d9; font: 8pt 'Consolas'; max-height: 16px;
+    text-align: center; color: #c9d1d9; font: 12pt 'Consolas'; max-height: 18px;
 }
 QProgressBar::chunk { background: #1f6feb; border-radius: 2px; }
 QScrollArea { border: none; background: transparent; }
@@ -204,5 +204,5 @@ QScrollBar:vertical { background: #0d1117; width: 8px; border: none; }
 QScrollBar::handle:vertical { background: #30363d; border-radius: 3px; min-height: 20px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 QToolTip { background: #161b22; color: #c9d1d9; border: 1px solid #30363d;
-    font: 9pt 'Consolas'; padding: 4px; }
+    font: 13pt 'Consolas'; padding: 4px; }
 """

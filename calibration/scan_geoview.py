@@ -110,7 +110,10 @@ class HyCalScanMapWidget(QWidget):
         self._zoom = 1.0
         self._pan_x = 0.0
         self._pan_y = 0.0
-        self._drag_last = None  # QPointF during right-button drag
+        self._drag_last = None   # QPointF during button drag
+        self._drag_origin = None # press position (for click vs drag)
+        self._dragging = False
+        self._layout_dirty = True  # recompute rects on next paint
 
         self.setMouseTracking(True)
         self.setMinimumSize(400, 400)
@@ -183,7 +186,8 @@ class HyCalScanMapWidget(QWidget):
     # -- layout ----------------------------------------------------------
 
     def _updateLayout(self):
-        if not self._drawn: return
+        if not self._layout_dirty or not self._drawn: return
+        self._layout_dirty = False
         x_min = min(m.x - m.sx / 2 for m in self._drawn)
         x_max = max(m.x + m.sx / 2 for m in self._drawn)
         y_min = min(m.y - m.sy / 2 for m in self._drawn)
@@ -207,43 +211,58 @@ class HyCalScanMapWidget(QWidget):
 
     # -- painting --------------------------------------------------------
 
+    # pre-built QColors for static colours used every frame
+    _BG_COLOR = QColor("#0a0e14")
+    _NO_DATA_COLOR = QColor("#15181d")
+    _EXCLUDED_COLOR = QColor(C.MOD_EXCLUDED)
+
     def paintEvent(self, event):
         self._updateLayout()
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        w, h = self.width(), self.height()
-        p.fillRect(self.rect(), QColor("#0a0e14"))
+        p.fillRect(self.rect(), self._BG_COLOR)
 
         stops = list(PALETTES.values())[self._palette_idx]
-        show_scaler = self._scaler_enabled and self._scaler_values
+        show_scaler = self._scaler_enabled and bool(self._scaler_values)
+        colors = self._colors
+        scaler_vals = self._scaler_values
+        value_to_t = self._value_to_t
+        no_data = self._NO_DATA_COLOR
+        excluded = self._EXCLUDED_COLOR
 
-        BORDER_W = 2.0  # state-indicator border width
+        BORDER_W = 2.0
+        # cache QColor objects for state colours to avoid re-creating per module
+        _qcolor_cache: Dict[str, QColor] = {}
 
         for m in self._drawn:
             r = self._rects.get(m.name)
             if not r:
                 continue
-            state_color = self._colors.get(m.name)
+            sc_hex = colors.get(m.name)
 
             if show_scaler:
-                # Fill: scaler heat map colour
-                sv = self._scaler_values.get(m.name)
+                sv = scaler_vals.get(m.name)
                 if sv is not None:
-                    t = self._value_to_t(sv)
-                    p.fillRect(r, _cmap_qcolor(t, stops))
+                    p.fillRect(r, _cmap_qcolor(value_to_t(sv), stops))
                 else:
-                    p.fillRect(r, QColor("#15181d"))
-                # Border: scan state colour (so heat map stays visible)
-                if state_color:
-                    p.setPen(QPen(QColor(state_color), BORDER_W))
+                    p.fillRect(r, no_data)
+                if sc_hex:
+                    qc = _qcolor_cache.get(sc_hex)
+                    if qc is None:
+                        qc = QColor(sc_hex)
+                        _qcolor_cache[sc_hex] = qc
+                    p.setPen(QPen(qc, BORDER_W))
                     p.setBrush(Qt.BrushStyle.NoBrush)
                     p.drawRect(r)
             else:
-                # Scalers off: fill with state colour (original behaviour)
-                if state_color:
-                    p.fillRect(r, QColor(state_color))
+                if sc_hex:
+                    qc = _qcolor_cache.get(sc_hex)
+                    if qc is None:
+                        qc = QColor(sc_hex)
+                        _qcolor_cache[sc_hex] = qc
+                    p.fillRect(r, qc)
                 else:
-                    p.fillRect(r, QColor(C.MOD_EXCLUDED))
+                    p.fillRect(r, excluded)
 
         # limit box
         bx0 = self._ox + (self._lim_hx_min - self._x_min) * self._scale
@@ -280,32 +299,46 @@ class HyCalScanMapWidget(QWidget):
 
     # -- mouse / wheel events --------------------------------------------
 
+    _CLICK_THRESHOLD = 4  # pixels — below this is a click, above is a drag
+
     def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.RightButton:
-            self._drag_last = e.position()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            return
         if e.button() == Qt.MouseButton.MiddleButton:
             self.resetView(); return
-        if e.button() == Qt.MouseButton.LeftButton:
-            pos = e.position()
-            for name in reversed(list(self._rects)):
-                if self._rects[name].contains(pos):
-                    self.moduleClicked.emit(name); return
+        if e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            self._drag_last = e.position()
+            self._drag_origin = e.position()
+            self._dragging = False
 
     def mouseReleaseEvent(self, e):
-        if e.button() == Qt.MouseButton.RightButton:
+        if e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
+            if self._dragging:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+            elif e.button() == Qt.MouseButton.LeftButton:
+                # short click — select module
+                pos = e.position()
+                for name in reversed(list(self._rects)):
+                    if self._rects[name].contains(pos):
+                        self.moduleClicked.emit(name); break
             self._drag_last = None
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._drag_origin = None
+            self._dragging = False
 
     def mouseMoveEvent(self, e):
-        # right-button drag → pan
+        # drag (left or right button held)
         if self._drag_last is not None:
             pos = e.position()
-            self._pan_x += pos.x() - self._drag_last.x()
-            self._pan_y += pos.y() - self._drag_last.y()
-            self._drag_last = pos
-            self.update()
+            if not self._dragging:
+                dx = pos.x() - self._drag_origin.x()
+                dy = pos.y() - self._drag_origin.y()
+                if dx * dx + dy * dy > self._CLICK_THRESHOLD ** 2:
+                    self._dragging = True
+                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            if self._dragging:
+                self._pan_x += pos.x() - self._drag_last.x()
+                self._pan_y += pos.y() - self._drag_last.y()
+                self._drag_last = pos
+                self._layout_dirty = True
+                self.update()
             return
         # hover tooltip
         pos = e.position()
@@ -332,14 +365,15 @@ class HyCalScanMapWidget(QWidget):
         self._pan_x = pos.x() + (self._pan_x - pos.x()) * ratio
         self._pan_y = pos.y() + (self._pan_y - pos.y()) * ratio
         self._zoom = new_zoom
+        self._layout_dirty = True
         self.update()
 
     def resetView(self):
         self._zoom = 1.0; self._pan_x = 0.0; self._pan_y = 0.0
-        self.update()
+        self._layout_dirty = True; self.update()
 
     def resizeEvent(self, e):
-        self._updateLayout(); super().resizeEvent(e)
+        self._layout_dirty = True; super().resizeEvent(e)
 
     def sizeHint(self):
         from PyQt6.QtCore import QSize

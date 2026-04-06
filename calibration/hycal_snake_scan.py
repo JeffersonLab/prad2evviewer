@@ -75,65 +75,84 @@ from scan_geoview import HyCalScanMapWidget, PALETTES, PALETTE_NAMES
 # ============================================================================
 
 class ModuleInfoDialog(QDialog):
-    """Pop-up showing module details with a Move To button."""
+    """Pop-up showing module details with a Move To button.
 
-    def __init__(self, mod: Module, ep, log_fn, parent=None):
+    Call :meth:`setModule` to refresh the content for a different module
+    without closing and re-opening the dialog.
+    """
+
+    _FIELDS = ("Name", "Type", "Sector", "Row/Col", "Size", "HyCal", "Ptrans", "In limits")
+
+    def __init__(self, ep, log_fn, parent=None):
         super().__init__(parent)
-        self._mod = mod
+        self._mod: Optional[Module] = None
         self._ep = ep
         self._log = log_fn
-        self.setWindowTitle(f"Module {mod.name}")
         self.setStyleSheet(DARK_QSS)
-        self.setFixedWidth(320)
+        self.setFixedWidth(360)
 
         lo = QVBoxLayout(self)
 
-        px, py = module_to_ptrans(mod.x, mod.y)
-        in_limits = ptrans_in_limits(px, py)
-
         grid = QGridLayout()
         grid.setSpacing(4)
-        rows = [
-            ("Name",     mod.name),
-            ("Type",     mod.mod_type),
-            ("Sector",   mod.sector or "--"),
-            ("Row/Col",  f"{mod.row} / {mod.col}" if mod.row else "--"),
-            ("Size",     f"{mod.sx:.2f} x {mod.sy:.2f} mm"),
-            ("HyCal",    f"({mod.x:.2f}, {mod.y:.2f}) mm"),
-            ("Ptrans",   f"({px:.2f}, {py:.2f}) mm"),
-            ("In limits", "Yes" if in_limits else "No"),
-        ]
-        for r, (label, value) in enumerate(rows):
+        self._value_labels: Dict[str, QLabel] = {}
+        for r, label in enumerate(self._FIELDS):
             lk = QLabel(f"{label}:")
-            lk.setStyleSheet(f"color: {C.DIM}; font: 9pt 'Consolas';")
+            lk.setStyleSheet(f"color: {C.DIM}; font: 13pt 'Consolas';")
             lk.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             grid.addWidget(lk, r, 0)
-            lv = QLabel(str(value))
-            if label == "In limits" and not in_limits:
-                lv.setStyleSheet(f"color: {C.RED}; font: bold 9pt 'Consolas';")
+            lv = QLabel("--")
             grid.addWidget(lv, r, 1)
+            self._value_labels[label] = lv
         lo.addLayout(grid)
 
         lo.addSpacing(8)
 
         btn_row = QHBoxLayout()
-        btn_move = QPushButton(f"Move To {mod.name}")
-        btn_move.setProperty("cssClass", "accent")
-        btn_move.setEnabled(in_limits)
-        btn_move.clicked.connect(self._doMove)
-        btn_row.addWidget(btn_move)
+        self._btn_move = QPushButton("Move To")
+        self._btn_move.setProperty("cssClass", "accent")
+        self._btn_move.clicked.connect(self._doMove)
+        btn_row.addWidget(self._btn_move)
         btn_close = QPushButton("Close")
         btn_close.clicked.connect(self.close)
         btn_row.addWidget(btn_close)
         lo.addLayout(btn_row)
 
+    def setModule(self, mod: Module):
+        self._mod = mod
+        px, py = module_to_ptrans(mod.x, mod.y)
+        in_limits = ptrans_in_limits(px, py)
+        vals = {
+            "Name":      mod.name,
+            "Type":      mod.mod_type,
+            "Sector":    mod.sector or "--",
+            "Row/Col":   f"{mod.row} / {mod.col}" if mod.row else "--",
+            "Size":      f"{mod.sx:.2f} x {mod.sy:.2f} mm",
+            "HyCal":     f"({mod.x:.2f}, {mod.y:.2f}) mm",
+            "Ptrans":    f"({px:.2f}, {py:.2f}) mm",
+            "In limits": "Yes" if in_limits else "No",
+        }
+        for label, lv in self._value_labels.items():
+            lv.setText(vals.get(label, "--"))
+            if label == "In limits" and not in_limits:
+                lv.setStyleSheet(f"color: {C.RED}; font: bold 13pt 'Consolas';")
+            else:
+                lv.setStyleSheet("")
+        self._btn_move.setText(f"Move To {mod.name}")
+        self._btn_move.setEnabled(in_limits)
+        self.setWindowTitle(f"Module {mod.name}")
+
     def _doMove(self):
         mod = self._mod
+        if not mod: return
         px, py = module_to_ptrans(mod.x, mod.y)
         self._log(f"Direct move to {mod.name}  ptrans({px:.3f}, {py:.3f})")
-        if not epics_move_to(self._ep, px, py):
+        if epics_move_to(self._ep, px, py):
+            win = self.parent()
+            if hasattr(win, '_setTarget'):
+                win._setTarget(px, py, mod.name)
+        else:
             self._log(f"BLOCKED: ptrans({px:.3f}, {py:.3f}) outside limits", level="error")
-        self.close()
 
 
 # ============================================================================
@@ -157,7 +176,7 @@ class SnakeScanWindow(QMainWindow):
         self.observer = observer
         self.all_modules = all_modules
         self._profiles = profiles or {}
-        self._active_profile = self.AUTOGEN
+        self._active_profile = self.NONE
         self._lg_layers = 0
 
         glass = [m for m in all_modules if m.mod_type == "PbGlass"]
@@ -172,16 +191,23 @@ class SnakeScanWindow(QMainWindow):
         self._log_file = open(os.path.join(log_dir,
             datetime.now().strftime("snake_scan_%Y%m%d_%H%M%S.log")), "w")
 
-        self.scan_modules = filter_scan_modules(all_modules, 0, self._lg_sx, self._lg_sy)
+        self.scan_modules = []
         self.engine = ScanEngine(motor_ep, self.scan_modules, self._log)
         self._scan_name_to_idx = {m.name: i for i, m in enumerate(self.engine.path)}
         self._scan_names = {m.name for m in self.scan_modules}
         self._selected_start_idx = 0
         self._selected_mod_name = None
+        self._mod_dlg: Optional[ModuleInfoDialog] = None
         self._status_labels: Dict[str, QLabel] = {}
 
         self._enc_offset_x: Optional[float] = None
         self._enc_offset_y: Optional[float] = None
+
+        # target position — set once when a move is commanded
+        self._target_px: Optional[float] = None
+        self._target_py: Optional[float] = None
+        self._target_name: str = ""
+        self._last_scan_idx: int = -1  # track scan engine moves
 
         self._logSignal.connect(self._appendLog)
         self._buildUI()
@@ -222,7 +248,7 @@ class SnakeScanWindow(QMainWindow):
         else:                   suffix = "  [EXPERT OPERATOR]"
         self.setWindowTitle("HyCal Snake Scan" + suffix)
         self.setStyleSheet(DARK_QSS)
-        self.resize(1440, 810)
+        self.resize(1600, 900)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -238,14 +264,14 @@ class SnakeScanWindow(QMainWindow):
         tl.setContentsMargins(12, 0, 12, 0)
 
         lbl = QLabel("HYCAL SNAKE SCAN")
-        lbl.setStyleSheet(f"color: {C.GREEN}; font: bold 13pt 'Consolas'; background: transparent;")
+        lbl.setStyleSheet(f"color: {C.GREEN}; font: bold 17pt 'Consolas'; background: transparent;")
         tl.addWidget(lbl)
 
         if self.observer:       mt, mf = "OBSERVER", C.ORANGE
         elif self.simulation:   mt, mf = "SIMULATION", C.YELLOW
         else:                   mt, mf = "EXPERT", C.GREEN
         lbl_mode = QLabel(mt)
-        lbl_mode.setStyleSheet(f"color: {mf}; font: bold 9pt 'Consolas'; background: transparent;")
+        lbl_mode.setStyleSheet(f"color: {mf}; font: bold 13pt 'Consolas'; background: transparent;")
         tl.addWidget(lbl_mode)
         tl.addSpacing(16)
 
@@ -258,16 +284,16 @@ class SnakeScanWindow(QMainWindow):
         bf_layout.setContentsMargins(10, 0, 10, 0)
         bf_layout.setSpacing(6)
         beam_icon = QLabel("BEAM")
-        beam_icon.setStyleSheet("color: #8b949e; font: bold 8pt 'Consolas'; background: transparent; border: none;")
+        beam_icon.setStyleSheet("color: #8b949e; font: bold 12pt 'Consolas'; background: transparent; border: none;")
         bf_layout.addWidget(beam_icon)
         self._lbl_beam_val = QLabel("-- nA")
         self._lbl_beam_val.setStyleSheet(
-            f"color: {C.GREEN}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
+            f"color: {C.GREEN}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
         self._lbl_beam_val.setMinimumWidth(140)
         bf_layout.addWidget(self._lbl_beam_val)
         self._lbl_beam_status = QLabel("")
         self._lbl_beam_status.setStyleSheet(
-            "color: transparent; font: bold 9pt 'Consolas'; background: transparent; border: none;")
+            "color: transparent; font: bold 13pt 'Consolas'; background: transparent; border: none;")
         bf_layout.addWidget(self._lbl_beam_status)
         tl.addWidget(beam_frame)
 
@@ -275,7 +301,7 @@ class SnakeScanWindow(QMainWindow):
 
         self._lbl_state = QLabel("IDLE")
         self._lbl_state.setStyleSheet(
-            f"color: {C.DIM}; font: bold 11pt 'Consolas'; background: transparent;")
+            f"color: {C.DIM}; font: bold 15pt 'Consolas'; background: transparent;")
         tl.addWidget(self._lbl_state)
 
         root.addWidget(top)
@@ -291,7 +317,7 @@ class SnakeScanWindow(QMainWindow):
         left_lo.setSpacing(2)
 
         self._canvas_label = QLabel()
-        self._canvas_label.setStyleSheet(f"color: {C.ACCENT}; font: bold 9pt 'Consolas';")
+        self._canvas_label.setStyleSheet(f"color: {C.ACCENT}; font: bold 13pt 'Consolas';")
         left_lo.addWidget(self._canvas_label)
 
         self._map = HyCalScanMapWidget(self.all_modules)
@@ -304,7 +330,7 @@ class SnakeScanWindow(QMainWindow):
         self._btn_reset_view.setStyleSheet(
             f"QPushButton{{background:rgba(22,27,34,220);color:{C.DIM};"
             f"border:1px solid #30363d;border-radius:2px;padding:0;"
-            f"font:8pt Consolas;}}"
+            f"font:12pt Consolas;}}"
             f"QPushButton:hover{{color:{C.TEXT};border-color:{C.ACCENT};}}")
         self._btn_reset_view.clicked.connect(self._map.resetView)
         self._map.installEventFilter(self)
@@ -319,7 +345,7 @@ class SnakeScanWindow(QMainWindow):
             sw = QLabel(); sw.setFixedSize(10, 10)
             sw.setStyleSheet(f"background: {colour}; border: none;")
             leg.addWidget(sw)
-            ll = QLabel(label); ll.setStyleSheet(f"color: {C.DIM}; font: 8pt 'Consolas';")
+            ll = QLabel(label); ll.setStyleSheet(f"color: {C.DIM}; font: 12pt 'Consolas';")
             leg.addWidget(ll)
         leg.addStretch()
         left_lo.addLayout(leg)
@@ -444,14 +470,14 @@ class SnakeScanWindow(QMainWindow):
         fg = C.GREEN if on else C.RED
         return (f"QPushButton{{background:#21262d;color:{fg};"
                 f"border:1px solid #30363d;padding:1px 8px;"
-                f"font:bold 8pt Consolas;border-radius:2px;}}"
+                f"font:bold 12pt Consolas;border-radius:2px;}}"
                 f"QPushButton:hover{{background:#30363d;}}")
 
     @staticmethod
     def _small_btn_ss(fg):
         return (f"QPushButton{{background:#21262d;color:{fg};"
                 f"border:1px solid #30363d;padding:1px 8px;"
-                f"font:bold 8pt Consolas;border-radius:2px;}}"
+                f"font:bold 12pt Consolas;border-radius:2px;}}"
                 f"QPushButton:hover{{background:#30363d;}}")
 
     def _toggleScaler(self):
@@ -474,7 +500,7 @@ class SnakeScanWindow(QMainWindow):
             self._btn_scaler_auto.setStyleSheet(
                 "QPushButton{background:#d29922;color:#0d1117;"
                 "border:1px solid #d29922;padding:1px 8px;"
-                "font:bold 8pt Consolas;border-radius:2px;}"
+                "font:bold 12pt Consolas;border-radius:2px;}"
                 "QPushButton:hover{background:#e0a82b;}")
         else:
             self._btn_scaler_auto.setStyleSheet(self._small_btn_ss(C.YELLOW))
@@ -511,7 +537,7 @@ class SnakeScanWindow(QMainWindow):
         self._btn_palette.setStyleSheet(
             f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,{self._palette_grad_stops(stops)});"
             f"border:1px solid #30363d;border-radius:2px;color:#c9d1d9;"
-            f"font:bold 7pt Consolas;padding:0 4px;}}"
+            f"font:bold 11pt Consolas;padding:0 4px;}}"
             f"QPushButton:hover{{border-color:#58a6ff;}}")
         self._btn_palette.setText(PALETTE_NAMES[idx])
 
@@ -632,10 +658,10 @@ class SnakeScanWindow(QMainWindow):
             # title row with inline state badge
             tr = QHBoxLayout()
             tl = QLabel(title)
-            tl.setStyleSheet(f"color: {C.ACCENT}; font: bold 9pt 'Consolas';")
+            tl.setStyleSheet(f"color: {C.ACCENT}; font: bold 13pt 'Consolas';")
             tr.addWidget(tl)
             sl = QLabel("Idle")
-            sl.setStyleSheet(f"color: {C.DIM}; font: bold 8pt 'Consolas'; "
+            sl.setStyleSheet(f"color: {C.DIM}; font: bold 12pt 'Consolas'; "
                              f"background: #21262d; border: 1px solid #30363d; "
                              f"border-radius: 3px; padding: 1px 6px;")
             tr.addWidget(sl)
@@ -647,7 +673,7 @@ class SnakeScanWindow(QMainWindow):
             for i, (label, key) in enumerate(fields):
                 c = 0 if i < half else 2; r = i % half
                 ln = QLabel(f"{label}:")
-                ln.setStyleSheet(f"color: {C.DIM}; font: 8pt 'Consolas';")
+                ln.setStyleSheet(f"color: {C.DIM}; font: 12pt 'Consolas';")
                 ln.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 g.addWidget(ln, r, c)
                 lv = QLabel("--"); lv.setMinimumWidth(90)
@@ -658,12 +684,20 @@ class SnakeScanWindow(QMainWindow):
 
     def _buildPositionCheck(self, parent):
         pe = QGroupBox("Position Check"); lo = QVBoxLayout(pe)
-        self._lbl_expected = QLabel("Expected: --"); lo.addWidget(self._lbl_expected)
+        self._lbl_expected = QLabel("Target:   --"); lo.addWidget(self._lbl_expected)
         self._lbl_actual = QLabel("Actual:   --"); lo.addWidget(self._lbl_actual)
         self._lbl_error = QLabel("Diff:     --")
-        self._lbl_error.setStyleSheet("font: bold 9pt 'Consolas';"); lo.addWidget(self._lbl_error)
-        self._lbl_enc_drift = QLabel("Encoder:  awaiting calibration")
-        self._lbl_enc_drift.setStyleSheet(f"color: {C.DIM};"); lo.addWidget(self._lbl_enc_drift)
+        self._lbl_error.setStyleSheet("font: bold 13pt 'Consolas';"); lo.addWidget(self._lbl_error)
+        dr = QHBoxLayout()
+        dr.addWidget(QLabel("Drift:"))
+        self._lbl_drift_x = QLabel("X --")
+        self._lbl_drift_x.setStyleSheet(f"color: {C.DIM};")
+        dr.addWidget(self._lbl_drift_x)
+        self._lbl_drift_y = QLabel("Y --")
+        self._lbl_drift_y.setStyleSheet(f"color: {C.DIM};")
+        dr.addWidget(self._lbl_drift_y)
+        dr.addStretch()
+        lo.addLayout(dr)
         parent.addWidget(pe)
 
     def _buildScalerControl(self, parent):
@@ -793,8 +827,11 @@ class SnakeScanWindow(QMainWindow):
         if idle and not self.observer:
             mod = self._mod_by_name.get(name)
             if mod:
-                dlg = ModuleInfoDialog(mod, self.ep, self._log, parent=self)
-                dlg.exec()
+                if self._mod_dlg is None:
+                    self._mod_dlg = ModuleInfoDialog(self.ep, self._log, parent=self)
+                self._mod_dlg.setModule(mod)
+                self._mod_dlg.show()
+                self._mod_dlg.raise_()
 
     # -- commands ------------------------------------------------------------
 
@@ -884,18 +921,26 @@ class SnakeScanWindow(QMainWindow):
     def _cmdSkip(self):      self.engine.skip_module()
     def _cmdAckError(self):  self.engine.acknowledge_error()
 
+    def _setTarget(self, px, py, name=""):
+        self._target_px = px
+        self._target_py = py
+        self._target_name = name
+
     def _cmdMoveToModule(self):
         self._onStartSelected(0)
         if not self.engine.path: return
         mod = self.engine.path[self._selected_start_idx]
         px, py = module_to_ptrans(mod.x, mod.y)
         self._log(f"Direct move to {mod.name}  ptrans({px:.3f}, {py:.3f})")
-        if not epics_move_to(self.ep, px, py):
+        if epics_move_to(self.ep, px, py):
+            self._setTarget(px, py, mod.name)
+        else:
             self._log(f"BLOCKED: outside limits", level="error")
 
     def _cmdResetCenter(self):
         self._log(f"Resetting to beam centre ptrans({BEAM_CENTER_X}, {BEAM_CENTER_Y})")
-        epics_move_to(self.ep, BEAM_CENTER_X, BEAM_CENTER_Y)
+        if epics_move_to(self.ep, BEAM_CENTER_X, BEAM_CENTER_Y):
+            self._setTarget(BEAM_CENTER_X, BEAM_CENTER_Y, "Beam Center")
 
     # -- event filter (reposition overlay button on map resize) ---------------
 
@@ -920,12 +965,22 @@ class SnakeScanWindow(QMainWindow):
         colors = {"info": C.TEXT, "warn": C.YELLOW, "error": C.RED}
         c = colors.get(level, C.DIM)
         self._log_text.append(
-            f'<span style="color:{c}; font-family:Consolas; font-size:9pt;">'
+            f'<span style="color:{c}; font-family:Consolas; font-size:13pt;">'
             f'{html_mod.escape(line)}</span>')
 
     # -- polling (5 Hz) ------------------------------------------------------
 
     def _poll(self):
+        # detect scan engine moving to a new module
+        eng = self.engine
+        if eng.state in (ScanState.MOVING, ScanState.DWELLING) and eng.current_idx != self._last_scan_idx:
+            self._last_scan_idx = eng.current_idx
+            mod = eng.current_module
+            if mod:
+                px, py = module_to_ptrans(mod.x, mod.y)
+                self._setTarget(px, py, mod.name)
+        elif eng.state == ScanState.IDLE:
+            self._last_scan_idx = -1
         self._updateStatus()
         self._updateCanvas()
         self._updateScanInfo()
@@ -937,27 +992,28 @@ class SnakeScanWindow(QMainWindow):
         bc = self.ep.get("beam_cur", None)
         if bc is None:
             self._lbl_beam_val.setText("-- nA")
-            self._lbl_beam_val.setStyleSheet(f"color: {C.DIM}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
+            self._lbl_beam_val.setStyleSheet(f"color: {C.DIM}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
             self._lbl_beam_status.setText("")
             return
         thresh = self._beam_thresh_spin.value()
         tripped = self.engine.beam_tripped
         if tripped:
             self._lbl_beam_val.setText(f"{bc:.2f} nA")
-            self._lbl_beam_val.setStyleSheet(f"color: {C.RED}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
+            self._lbl_beam_val.setStyleSheet(f"color: {C.RED}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
             self._lbl_beam_status.setText("TRIP")
-            self._lbl_beam_status.setStyleSheet(f"color: {C.RED}; font: bold 10pt 'Consolas'; background: transparent; border: none;")
+            self._lbl_beam_status.setStyleSheet(f"color: {C.RED}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
         elif thresh > 0 and bc < thresh:
             self._lbl_beam_val.setText(f"{bc:.2f} nA")
-            self._lbl_beam_val.setStyleSheet(f"color: {C.YELLOW}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
+            self._lbl_beam_val.setStyleSheet(f"color: {C.YELLOW}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
             self._lbl_beam_status.setText("LOW")
-            self._lbl_beam_status.setStyleSheet(f"color: {C.YELLOW}; font: bold 10pt 'Consolas'; background: transparent; border: none;")
+            self._lbl_beam_status.setStyleSheet(f"color: {C.YELLOW}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
         else:
             self._lbl_beam_val.setText(f"{bc:.2f} nA")
-            self._lbl_beam_val.setStyleSheet(f"color: {C.GREEN}; font: bold 14pt 'Consolas'; background: transparent; border: none;")
+            self._lbl_beam_val.setStyleSheet(f"color: {C.GREEN}; font: bold 18pt 'Consolas'; background: transparent; border: none;")
             self._lbl_beam_status.setText("")
 
-    ENCODER_DRIFT_WARN = 0.5
+    ENCODER_DRIFT_WARN = 0.5   # mm — yellow threshold
+    ENCODER_DRIFT_ERR  = 1.5   # mm — red threshold
 
     def _checkEncoder(self):
         enc_x = self.ep.get("x_encoder", None)
@@ -971,17 +1027,14 @@ class SnakeScanWindow(QMainWindow):
             self._enc_offset_y = enc_y - rbv_y
             self._log(f"Encoder calibrated: offset X={self._enc_offset_x:.4f} Y={self._enc_offset_y:.4f}")
             return
-        drift = math.sqrt(
-            ((enc_x - self._enc_offset_x) - rbv_x)**2 +
-            ((enc_y - self._enc_offset_y) - rbv_y)**2)
-        if drift > self.ENCODER_DRIFT_WARN:
-            self._lbl_enc_drift.setText(
-                f"Encoder:  DRIFT {drift:.4f} mm")
-            self._lbl_enc_drift.setStyleSheet(f"color: {C.RED};")
-        else:
-            self._lbl_enc_drift.setText(
-                f"Encoder:  OK  drift {drift:.4f} mm")
-            self._lbl_enc_drift.setStyleSheet(f"color: {C.GREEN};")
+        dx = abs((enc_x - self._enc_offset_x) - rbv_x)
+        dy = abs((enc_y - self._enc_offset_y) - rbv_y)
+        fx = C.RED if dx > self.ENCODER_DRIFT_ERR else (C.YELLOW if dx > self.ENCODER_DRIFT_WARN else C.GREEN)
+        fy = C.RED if dy > self.ENCODER_DRIFT_ERR else (C.YELLOW if dy > self.ENCODER_DRIFT_WARN else C.GREEN)
+        self._lbl_drift_x.setText(f"X {dx:.4f}")
+        self._lbl_drift_x.setStyleSheet(f"color: {fx};")
+        self._lbl_drift_y.setText(f"Y {dy:.4f}")
+        self._lbl_drift_y.setStyleSheet(f"color: {fy};")
 
     def _updateStatus(self):
         for key, lbl in self._status_labels.items():
@@ -1012,39 +1065,36 @@ class SnakeScanWindow(QMainWindow):
                 sl.setText("Moving"); fg, bg = C.YELLOW, "#3d3010"
             else:
                 sl.setText("Idle"); fg, bg = C.DIM, "#21262d"
-            sl.setStyleSheet(f"color: {fg}; font: bold 8pt 'Consolas'; "
+            sl.setStyleSheet(f"color: {fg}; font: bold 12pt 'Consolas'; "
                              f"background: {bg}; border: 1px solid #30363d; "
                              f"border-radius: 3px; padding: 1px 6px;")
-        # position check
-        eng = self.engine
+        # position check — target is set when a move is commanded
         rx, ry = self.ep.get("x_rbv", 0.0), self.ep.get("y_rbv", 0.0)
         self._lbl_actual.setText(f"Actual:   ({rx:.3f}, {ry:.3f})")
-        mod = eng.current_module if eng.state != ScanState.IDLE else None
-        if mod is None and eng.path and 0 <= self._selected_start_idx < len(eng.path):
-            mod = eng.path[self._selected_start_idx]
-        scanning = eng.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED, ScanState.ERROR)
-        if mod:
-            px, py = module_to_ptrans(mod.x, mod.y)
+        px, py = self._target_px, self._target_py
+        if px is not None and py is not None:
             err = math.sqrt((rx - px)**2 + (ry - py)**2)
-            self._lbl_expected.setText(f"Expected: ({px:.3f}, {py:.3f}) {mod.name}")
+            name_html = f' <b style="color:{C.ACCENT}">{self._target_name}</b>' if self._target_name else ""
+            self._lbl_expected.setText(f"Target:   ({px:.3f}, {py:.3f}){name_html}")
+            scanning = self.engine.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED, ScanState.ERROR)
             if scanning:
-                ef = C.RED if err > eng.pos_threshold else C.GREEN
+                ef = C.RED if err > self.engine.pos_threshold else C.GREEN
                 self._lbl_error.setText(f"Diff:     {err:.3f} mm")
-                self._lbl_error.setStyleSheet(f"color: {ef}; font: bold 9pt 'Consolas';")
+                self._lbl_error.setStyleSheet(f"color: {ef}; font: bold 13pt 'Consolas';")
             else:
-                self._lbl_error.setText(f"Diff:     {err:.3f} mm (idle)")
-                self._lbl_error.setStyleSheet(f"color: {C.DIM}; font: bold 9pt 'Consolas';")
+                self._lbl_error.setText(f"Diff:     {err:.3f} mm")
+                self._lbl_error.setStyleSheet(f"color: {C.DIM}; font: bold 13pt 'Consolas';")
         else:
-            self._lbl_expected.setText("Expected: --")
+            self._lbl_expected.setText("Target:   --")
             self._lbl_error.setText("Diff:     --")
-            self._lbl_error.setStyleSheet(f"color: {C.DIM}; font: bold 9pt 'Consolas';")
+            self._lbl_error.setStyleSheet(f"color: {C.DIM}; font: bold 13pt 'Consolas';")
 
     def _updateScanInfo(self):
         eng = self.engine
         sc = {ScanState.IDLE: C.DIM, ScanState.MOVING: C.YELLOW, ScanState.DWELLING: C.GREEN,
               ScanState.PAUSED: C.ORANGE, ScanState.ERROR: C.RED, ScanState.COMPLETED: C.ACCENT}
         self._lbl_state.setText(eng.state)
-        self._lbl_state.setStyleSheet(f"color: {sc.get(eng.state, C.DIM)}; font: bold 11pt 'Consolas'; background: transparent;")
+        self._lbl_state.setStyleSheet(f"color: {sc.get(eng.state, C.DIM)}; font: bold 15pt 'Consolas'; background: transparent;")
         done = len(eng.completed)
         s = getattr(eng, '_start_idx', 0); e = getattr(eng, '_end_idx', len(eng.path))
         total = e - s
@@ -1067,7 +1117,7 @@ class SnakeScanWindow(QMainWindow):
         else: self._lbl_eta.setText("ETA:      --")
         if eng.beam_tripped:
             self._lbl_dwell_cd.setText("Dwell:    BEAM TRIP -- waiting")
-            self._lbl_dwell_cd.setStyleSheet(f"color: {C.RED}; font: bold 9pt 'Consolas';")
+            self._lbl_dwell_cd.setStyleSheet(f"color: {C.RED}; font: bold 13pt 'Consolas';")
         elif eng.state == ScanState.DWELLING:
             self._lbl_dwell_cd.setText(f"Dwell:    {eng.dwell_remaining:.1f}s remaining")
             self._lbl_dwell_cd.setStyleSheet(f"color: {C.GREEN};")
