@@ -37,7 +37,7 @@ class SpectrumAnalyzer:
     def __init__(self, target_adc: float = 3200.0,
                  bin_step: float = 10.0, bin_min: float = 0.0,
                  smooth_window: int = 5,
-                 edge_fraction: float = 0.02,
+                 edge_fraction: float = 0.05,
                  use_log_cumul: bool = True,
                  pedestal_adc: float = 200.0):
         self.target_adc = target_adc
@@ -794,8 +794,8 @@ class GainScanEngine:
                         pass
                     prev_counts = 0; prev_time = time.time(); low_rate_streak = 0
             try:
-                occ = self.server.get_occupancy()
-                counts = occ.get("occ", {}).get(key, 0)
+                hist = self.server.get_height_histogram(key, quiet=True)
+                counts = sum(hist.get("bins", []))
                 self.module_counts = counts
                 # compute rate
                 now = time.time()

@@ -530,7 +530,7 @@ class GainEqualizerWindow(QMainWindow):
         r = QHBoxLayout()
         r.addWidget(QLabel("Edge frac %:"))
         self._ge_edge_frac = QDoubleSpinBox(); self._ge_edge_frac.setRange(0.1, 20.0)
-        self._ge_edge_frac.setValue(2.0); self._ge_edge_frac.setSingleStep(0.5)
+        self._ge_edge_frac.setValue(5.0); self._ge_edge_frac.setSingleStep(0.5)
         self._ge_edge_frac.setDecimals(1); r.addWidget(self._ge_edge_frac)
         self._ge_log_cumul = QPushButton("Log: ON")
         self._ge_log_cumul.setCheckable(True); self._ge_log_cumul.setChecked(True)
