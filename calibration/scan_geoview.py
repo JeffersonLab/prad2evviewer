@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from typing import Dict, List, Optional
 
-from PyQt6.QtWidgets import QWidget, QSizePolicy
+from PyQt6.QtWidgets import QWidget, QSizePolicy, QToolTip
 from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal
 from PyQt6.QtGui import QPainter, QColor, QPen, QFont
 
@@ -122,13 +122,13 @@ class HyCalScanMapWidget(QWidget):
 
     # -- scan state helpers (unchanged) ----------------------------------
 
-    def setModuleColors(self, c):  self._colors = c; self.update()
-    def setPathPreview(self, p):   self._path_line = p; self.update()
-    def setDashPreview(self, p):   self._dash_line = p; self.update()
-    def setHighlight(self, n):     self._highlight = n; self.update()
+    def setModuleColors(self, c):  self._colors = c
+    def setPathPreview(self, p):   self._path_line = p
+    def setDashPreview(self, p):   self._dash_line = p
+    def setHighlight(self, n):     self._highlight = n
 
     def setMarkerPosition(self, hx, hy):
-        self._marker_hx = hx; self._marker_hy = hy; self.update()
+        self._marker_hx = hx; self._marker_hy = hy
 
     def modCenter(self, m):
         cx = self._ox + (m.x - self._x_min) * self._scale
@@ -144,10 +144,12 @@ class HyCalScanMapWidget(QWidget):
         self.update()
 
     def setScalerEnabled(self, on: bool):
-        self._scaler_enabled = on; self.update()
+        self._scaler_enabled = on
+        self.update()
 
     def setScalerRange(self, vmin: float, vmax: float):
-        self._scaler_vmin = vmin; self._scaler_vmax = vmax; self.update()
+        self._scaler_vmin = vmin; self._scaler_vmax = vmax
+        self.update()
 
     def setScalerAutoRange(self, on: bool):
         self._scaler_auto = on
@@ -301,8 +303,8 @@ class HyCalScanMapWidget(QWidget):
         if self._marker_hx is not None:
             cx = self._ox + (self._marker_hx - self._x_min) * self._scale
             cy = self._oy + (self._y_max - self._marker_hy) * self._scale
-            R, ARM = 3, 8
-            p.setPen(QPen(QColor("#ffffff"), 2.0))
+            R, ARM = 5, 10
+            p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(C.RED))
             p.drawEllipse(QPointF(cx, cy), R, R)
             p.setPen(QPen(QColor(C.RED), 1.5))
@@ -362,16 +364,11 @@ class HyCalScanMapWidget(QWidget):
         if found != self._hover_name:
             self._hover_name = found
             if found:
-                m = self._mod_by_name.get(found)
-                if m:
-                    px, py = module_to_ptrans(m.x, m.y)
-                    tip = f"{m.name} ({m.mod_type})\nHyCal({m.x:.1f}, {m.y:.1f})\nptrans({px:.1f}, {py:.1f})"
-                    sv = self._scaler_values.get(m.name)
-                    if sv is not None:
-                        tip += f"\nScaler: {sv:.1f}"
-                    self.setToolTip(tip)
+                sv = self._scaler_values.get(found)
+                tip = f"{found}: {sv:.1f}" if sv is not None else found
+                QToolTip.showText(e.globalPosition().toPoint(), tip, self)
             else:
-                self.setToolTip("")
+                QToolTip.hideText()
 
     def wheelEvent(self, e):
         factor = 1.15 if e.angleDelta().y() > 0 else 1.0 / 1.15

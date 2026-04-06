@@ -767,7 +767,8 @@ class SnakeScanWindow(QMainWindow):
                 colors[m.name] = C.MOD_TODO
             self._map.setModuleColors(colors)
             rx, ry = self.ep.get("x_rbv", BEAM_CENTER_X), self.ep.get("y_rbv", BEAM_CENTER_Y)
-            self._map.setMarkerPosition(*ptrans_to_module(rx, ry)); return
+            self._map.setMarkerPosition(*ptrans_to_module(rx, ry))
+            self._map.update(); return
 
         eng = self.engine
         running = eng.state in (ScanState.MOVING, ScanState.DWELLING, ScanState.PAUSED, ScanState.ERROR)
@@ -805,6 +806,7 @@ class SnakeScanWindow(QMainWindow):
             self._map.setDashPreview([self._map.modCenter(eng.path[i]) for i in range(eng.current_idx + 1, ei)])
         rx, ry = self.ep.get("x_rbv", BEAM_CENTER_X), self.ep.get("y_rbv", BEAM_CENTER_Y)
         self._map.setMarkerPosition(*ptrans_to_module(rx, ry))
+        self._map.update()
 
     def _drawPathPreview(self):
         path = self.engine.path
