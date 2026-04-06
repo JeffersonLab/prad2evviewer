@@ -435,6 +435,7 @@ class GainEqualizerWindow(QMainWindow):
 
     def _buildPathControl(self, parent):
         pc = QGroupBox("Scan Path"); lo = QVBoxLayout(pc)
+        self._path_group = pc
 
         r = QHBoxLayout(); r.addWidget(QLabel("Path:"))
         self._profile_combo = QComboBox()
@@ -506,7 +507,7 @@ class GainEqualizerWindow(QMainWindow):
         self._ge_maxiter.setValue(8); r.addWidget(self._ge_maxiter)
         r.addWidget(QLabel("Tolerance:"))
         self._ge_tol = QSpinBox(); self._ge_tol.setRange(10, 500)
-        self._ge_tol.setValue(100); r.addWidget(self._ge_tol); lo.addLayout(r)
+        self._ge_tol.setValue(50); r.addWidget(self._ge_tol); lo.addLayout(r)
 
         bf = QHBoxLayout()
         self._btn_start = QPushButton("Start")
@@ -831,7 +832,7 @@ class GainEqualizerWindow(QMainWindow):
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {level.upper().ljust(5)} {msg}"
         self._log_lines.append(line)
-        if self._log_file:
+        if self._log_file and not self._log_file.closed:
             self._log_file.write(line + "\n"); self._log_file.flush()
         self._logSignal.emit(line, level)
 
@@ -854,6 +855,8 @@ class GainEqualizerWindow(QMainWindow):
     def _updateGainStatus(self):
         eng = self._gain_engine
         if eng is None: return
+        running = eng.state not in (GainScanState.IDLE, GainScanState.COMPLETED)
+        self._path_group.setVisible(not running)
         sc = {GainScanState.IDLE: C.DIM, GainScanState.MOVING: C.YELLOW,
               GainScanState.COLLECTING: C.ACCENT, GainScanState.ANALYZING: C.ACCENT,
               GainScanState.ADJUSTING: C.ORANGE, GainScanState.CONVERGED: C.GREEN,
@@ -900,8 +903,26 @@ class GainEqualizerWindow(QMainWindow):
             info_parts.append(f"edge={eng.last_edge_adc:.0f}")
         if eng.last_dv is not None:
             info_parts.append(f"ΔV={eng.last_dv:+.0f}")
+        if eng.state == GainScanState.COLLECTING and eng.collect_rate > 0:
+            info_parts.append(f"{eng.collect_rate:.0f} Hz")
         self._histogram.setInfo("  ".join(info_parts))
-        if eng.last_bins:
+
+        # fetch live histogram during collection for preview (~every 2s)
+        if eng.state == GainScanState.COLLECTING and mod:
+            import time as _time
+            now = _time.time()
+            if now - getattr(self, '_last_hist_fetch', 0) > 2.0:
+                self._last_hist_fetch = now
+                key = eng.key_map.get(mod.name)
+                if key and eng.module_counts > 0:
+                    try:
+                        hist = eng.server.get_height_histogram(key)
+                        live_bins = hist.get("bins", [])
+                        if live_bins:
+                            self._histogram.setData(live_bins, target_bin, None)
+                    except Exception:
+                        pass
+        elif eng.last_bins:
             self._histogram.setData(eng.last_bins, target_bin, eng.last_edge_bin)
 
     def _updatePositionCheck(self):
@@ -966,8 +987,17 @@ class GainEqualizerWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def closeEvent(self, e):
-        if self._log_file: self._log_file.close()
-        if self._gain_engine: self._gain_engine.stop()
+        self._timer.stop()
+        self._scaler_timer.stop()
+        if self._gain_engine:
+            self._gain_engine.stop()
+            # wait briefly for engine thread to finish
+            t = getattr(self._gain_engine, '_thread', None)
+            if t and t.is_alive():
+                t.join(timeout=2.0)
+        if self._log_file and not self._log_file.closed:
+            self._log_file.close()
+        self._log_file = None
         super().closeEvent(e)
 
 

@@ -67,24 +67,28 @@ class SpectrumAnalyzer:
         return self.bin_min + (bin_index + 0.5) * self.bin_step
 
     def compute_voltage_step(self, edge_adc: float,
-                             current_vset: float,
-                             gain_factor: float = 0.5) -> float:
-        """Compute HV adjustment to move the spectrum edge toward target.
+                             current_vset: float = 0.0) -> float:
+        """Compute HV adjustment based on the ADC difference from target.
 
-        Uses proportional scaling, then snaps to the nearest allowed step
-        from [5, 10, 20, 30] V.  Positive = increase voltage.
+        | ADC difference | Step  |
+        |----------------|-------|
+        | > 1000         | 30 V  |
+        | 500 – 1000     | 20 V  |
+        | 200 – 500      | 10 V  |
+        | 100 – 200      |  5 V  |
+        | < 100           | diff/20 V |
+
+        Sign: positive = edge too low → increase voltage.
         """
-        if self.target_adc <= 0 or current_vset <= 0:
-            return 0.0
-        ratio = (self.target_adc - edge_adc) / self.target_adc
-        raw_dv = ratio * current_vset * gain_factor
-
-        sign = 1 if raw_dv > 0 else -1
-        abs_dv = abs(raw_dv)
-        for step in [30, 20, 10, 5]:
-            if abs_dv >= step * 0.7:
-                return sign * step
-        return sign * 5  # minimum step
+        diff = self.target_adc - edge_adc  # positive = need more gain
+        sign = 1 if diff > 0 else -1
+        ad = abs(diff)
+        if ad > 1000:    dv = 30.0
+        elif ad > 500:   dv = 20.0
+        elif ad > 200:   dv = 10.0
+        elif ad > 100:   dv = 5.0
+        else:            dv = ad / 20.0
+        return round(sign * dv, 1)
 
 
 # ============================================================================
@@ -270,7 +274,7 @@ class GainScanEngine:
     target_adc: float = 3200.0
     min_counts: int = 10000
     max_iterations: int = 8
-    convergence_tol: float = 100.0   # ADC units
+    convergence_tol: float = 50.0    # ADC units
     hv_settle_time: float = 10.0     # seconds
     pos_threshold: float = 0.5       # mm
     beam_threshold: float = 0.3      # nA
@@ -424,7 +428,7 @@ class GainScanEngine:
                         if hv_info:
                             self.last_vset = hv_info.get("vset")
                     except Exception:
-                        pass
+                        pass  # vset stays as previous value or None
 
                     # analyze
                     self.state = GainScanState.ANALYZING
@@ -477,9 +481,15 @@ class GainScanEngine:
                     self.state = GainScanState.ADJUSTING
                     info = self.hv.get_voltage(mod.name)
                     if info is None:
-                        self.log(f"{mod.name}: HV read failed", level="error")
-                        self._mark_failed(i, mod)
-                        break
+                        if self.hv._read_only:
+                            # no HV connection in read-only mode — use dummy values
+                            info = {"vset": 1000.0, "limit": 2000.0}
+                            self.log(f"{mod.name}: HV not connected, using dummy V={info['vset']:.0f}",
+                                     level="warn")
+                        else:
+                            self.log(f"{mod.name}: HV read failed", level="error")
+                            self._mark_failed(i, mod)
+                            break
                     current_v = info.get("vset", 0)
                     self.last_vset = current_v
                     limit_v = info.get("limit", 99999)

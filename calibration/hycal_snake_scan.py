@@ -952,7 +952,7 @@ class SnakeScanWindow(QMainWindow):
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {level.upper().ljust(5)} {msg}"
         self._log_lines.append(line)
-        if self._log_file:
+        if self._log_file and not self._log_file.closed:
             self._log_file.write(line + "\n"); self._log_file.flush()
         self._logSignal.emit(line, level)
 
@@ -1147,7 +1147,11 @@ class SnakeScanWindow(QMainWindow):
         self._btn_reset.setEnabled(not running)
 
     def closeEvent(self, e):
-        if self._log_file: self._log_file.close()
+        self._timer.stop()
+        self._scaler_timer.stop()
+        if self._log_file and not self._log_file.closed:
+            self._log_file.close()
+        self._log_file = None
         super().closeEvent(e)
 
 
