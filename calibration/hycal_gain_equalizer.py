@@ -927,7 +927,7 @@ class GainEqualizerWindow(QMainWindow):
     def _updateGainStatus(self):
         eng = self._gain_engine
         if eng is None: return
-        running = eng.state not in (GainScanState.IDLE, GainScanState.COMPLETED)
+        running = eng.state not in (GainScanState.IDLE, GainScanState.COMPLETED, GainScanState.FAILED)
         self._path_group.setVisible(not running)
         self._btn_start.setEnabled(not running)
         for w in (self._ge_server_edit, self._ge_hv_edit, self._ge_hv_pw,
@@ -1079,8 +1079,8 @@ class GainEqualizerWindow(QMainWindow):
             t = getattr(self._gain_engine, '_thread', None)
             if t and t.is_alive():
                 t.join(timeout=2.0)
-            # close HV WebSocket to unblock reader thread
-            if hasattr(self._gain_engine, 'hv'):
+            # close HV WebSocket if still open
+            if getattr(self._gain_engine, 'hv', None) is not None:
                 self._gain_engine.hv.close()
         if self._log_file and not self._log_file.closed:
             self._log_file.close()

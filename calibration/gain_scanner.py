@@ -221,10 +221,12 @@ class ServerClient:
 class HVClient:
     """WebSocket client for prad2hvd voltage control.
 
-    Simple synchronous design: sends a command, then reads messages
-    until the expected response arrives (discarding broadcasts).
-    Each module step gets a fresh HVClient, so no long-lived
-    connection management is needed.
+    A background reader thread continuously drains broadcast messages
+    (hv_snapshot, board_snapshot, etc.) to keep the connection alive
+    during long data-collection pauses.  Command responses are routed
+    to a queue for synchronous retrieval.
+
+    Intended to persist for the entire scan (one connect/close cycle).
     """
 
     def __init__(self, url: str = "ws://clonpc19:8765", log_fn=None,
@@ -233,6 +235,11 @@ class HVClient:
         self._ws: Any = None
         self._log = log_fn or (lambda msg, **kw: None)
         self._read_only = read_only
+        self._queue: List[dict] = []      # response messages
+        self._queue_lock = threading.Lock()
+        self._queue_event = threading.Event()
+        self._reader: Optional[threading.Thread] = None
+        self._closing = False
 
     def connect(self, password: str = ""):
         try:
@@ -246,56 +253,71 @@ class HVClient:
         self._ws = websocket.create_connection(self.url, timeout=10)
         init_msg = json.loads(self._ws.recv())
 
+        # start background reader to drain broadcasts
+        self._closing = False
+        self._reader = threading.Thread(target=self._reader_loop, daemon=True)
+        self._reader.start()
+
         auth_required = init_msg.get("auth_required", False)
         if auth_required and password:
             self._log("HV: authenticating (Expert)")
             self._ws.send(json.dumps({"type": "auth", "password": password, "level": 2}))
-            resp = self._recv_response("auth_result", timeout=10)
+            resp = self._wait_response("auth_result", timeout=10)
             if not resp or resp.get("granted", 0) < 2:
                 reason = resp.get("reason", "unknown") if resp else "no response"
                 raise RuntimeError(f"HV authentication failed: {reason}")
             self._log(f"HV: authenticated OK (level {resp.get('granted')})")
         self._log("HV: connected")
 
-    def _recv_response(self, msg_type: str, timeout: float = 10) -> Optional[dict]:
-        """Read messages, discarding broadcasts, until we get msg_type."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                break
-            self._ws.settimeout(min(remaining, 2.0))
+    def _reader_loop(self):
+        """Background: read all messages, queue command responses."""
+        RESPONSE_TYPES = ("auth_result", "get_voltage_response")
+        while not self._closing:
             try:
+                self._ws.settimeout(1.0)
                 raw = self._ws.recv()
                 msg = json.loads(raw)
-                if msg.get("type") == msg_type:
-                    return msg
-                # else: broadcast — discard and keep reading
+                if msg.get("type") in RESPONSE_TYPES:
+                    with self._queue_lock:
+                        self._queue.append(msg)
+                    self._queue_event.set()
             except Exception:
-                break
+                if self._closing:
+                    break
+                # timeout — normal, keep looping
+
+    def _wait_response(self, msg_type: str, timeout: float = 10) -> Optional[dict]:
+        """Wait for a queued response of the given type."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._queue_lock:
+                for idx, msg in enumerate(self._queue):
+                    if msg.get("type") == msg_type:
+                        return self._queue.pop(idx)
+            self._queue_event.clear()
+            self._queue_event.wait(timeout=min(0.5, deadline - time.time()))
         return None
 
-    def get_voltage(self, name: str, retries: int = 2) -> Optional[dict]:
+    def get_voltage(self, name: str) -> Optional[dict]:
         """Query current voltage info for a module by name."""
         if self._ws is None:
             self._log(f"HV: GET {name} → not connected", level="warn")
             return None
-        for attempt in range(retries):
-            try:
-                self._ws.send(json.dumps({"type": "get_voltage", "name": name}))
-            except Exception as e:
-                self._log(f"HV: GET {name} → send failed: {e}", level="error")
-                return None
-            resp = self._recv_response("get_voltage_response", timeout=10)
-            if resp:
-                self._log(f"HV: GET {name} → vset={resp.get('vset'):.1f} "
-                          f"vmon={resp.get('vmon'):.1f} limit={resp.get('limit'):.0f}")
-                return resp
-            if attempt < retries - 1:
-                self._log(f"HV: GET {name} → no response, retrying ({attempt+2}/{retries})",
-                          level="warn")
-        self._log(f"HV: GET {name} → no response after {retries} attempts", level="error")
-        return None
+        # clear stale responses
+        with self._queue_lock:
+            self._queue = [m for m in self._queue if m.get("type") != "get_voltage_response"]
+        try:
+            self._ws.send(json.dumps({"type": "get_voltage", "name": name}))
+        except Exception as e:
+            self._log(f"HV: GET {name} → send failed: {e}", level="error")
+            return None
+        resp = self._wait_response("get_voltage_response", timeout=10)
+        if resp:
+            self._log(f"HV: GET {name} → vset={resp.get('vset'):.1f} "
+                      f"vmon={resp.get('vmon'):.1f} limit={resp.get('limit'):.0f}")
+        else:
+            self._log(f"HV: GET {name} → no response", level="warn")
+        return resp
 
     def set_voltage(self, name: str, value: float,
                     old_value: float = 0.0) -> bool:
@@ -316,12 +338,15 @@ class HVClient:
             return False
 
     def close(self):
+        self._closing = True
         if self._ws:
             try:
                 self._ws.close()
             except Exception:
                 pass
             self._ws = None
+        if self._reader and self._reader.is_alive():
+            self._reader.join(timeout=2.0)
 
 
 # ============================================================================
@@ -455,30 +480,38 @@ class GainScanEngine:
 
     # -- main loop ----------------------------------------------------------
 
-    def _connect_step(self) -> bool:
-        """Create fresh server + HV connections for one module step."""
+    def _connect_hv(self) -> bool:
+        """Create persistent HV connection for the whole scan."""
         try:
-            self.server = ServerClient(self._server_url,
-                                       log_fn=self.log, read_only=self._read_only)
             self.hv = HVClient(self._hv_url,
-                                log_fn=self.log, read_only=self._read_only)
+                               log_fn=self.log, read_only=self._read_only)
             self.hv.connect(password=self._hv_password)
             return True
         except Exception as e:
-            self.log(f"Connection failed: {e}", level="error")
+            self.log(f"HV connection failed: {e}", level="error")
             return False
 
-    def _disconnect_step(self):
-        """Close connections after one module step."""
+    def _close_hv(self):
         if self.hv:
             try: self.hv.close()
             except Exception: pass
             self.hv = None
-        self.server = None
+
+    def _new_server(self) -> ServerClient:
+        """Create a fresh server client (stateless HTTP, per-module)."""
+        return ServerClient(self._server_url,
+                            log_fn=self.log, read_only=self._read_only)
 
     def _run(self):
         n = self._end_idx - self._start_idx
         self.log(f"Gain scan started: {n} modules, target ADC {self.target_adc:.0f}")
+
+        # one HV connection for the entire scan
+        if not self._connect_hv():
+            self.state = GainScanState.FAILED
+            self.log("Cannot start — HV connection failed", level="error")
+            return
+
         try:
             for i in range(self._start_idx, self._end_idx):
                 if self._stop.is_set():
@@ -496,22 +529,15 @@ class GainScanEngine:
                 self.module_counts = 0
                 self.collect_rate = 0.0
                 self.iteration_history = []
+                # fresh server client per module (stateless HTTP)
+                self.server = self._new_server()
                 mod = self.path[i]
 
                 self.log(f"── [{i+1}/{len(self.path)}] {mod.name} ──")
 
-                # -- fresh connections --
-                if not self._connect_step():
-                    self._mark_failed(i, mod)
-                    self.log(f"{mod.name}: STOPPED — click Start to retry from here",
-                             level="error")
-                    return  # stop scan, user must restart
+                self._process_module(i, mod)
 
-                try:
-                    self._process_module(i, mod)
-                finally:
-                    self._disconnect_step()
-
+                self.server = None
                 self._skip.clear()
 
                 # if this module failed, pause the scan for user intervention
@@ -521,7 +547,7 @@ class GainScanEngine:
                     return
 
         finally:
-            self._disconnect_step()
+            self._close_hv()
             if self._stop.is_set():
                 self.state = GainScanState.IDLE
                 self.log("Gain scan stopped by user")
