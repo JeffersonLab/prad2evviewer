@@ -36,31 +36,73 @@ class SpectrumAnalyzer:
 
     def __init__(self, target_adc: float = 3200.0,
                  bin_step: float = 10.0, bin_min: float = 0.0,
-                 min_bin_count: int = 10):
+                 smooth_window: int = 5,
+                 edge_fraction: float = 0.02):
         self.target_adc = target_adc
         self.bin_step = bin_step
         self.bin_min = bin_min
-        self.min_bin_count = min_bin_count
+        self.smooth_window = smooth_window  # moving-average window
+        self.edge_fraction = edge_fraction  # cumulative fraction threshold
 
     def find_right_edge(self, bins: List[int]) -> Optional[int]:
-        """Find the right-edge bin index of the continuum spectrum.
+        """Find the right-edge bin of the Bremsstrahlung continuum spectrum.
 
-        Walks from the rightmost bin leftward, skipping sparse pile-up.
-        The edge is the first bin (from the right) where:
-          1. bin count >= min_bin_count (default 10)
-          2. average of the 3 bins to its left > this bin's count
-             (confirms a falling edge, not the spectrum body)
+        Two-pass algorithm that adapts to any statistics level:
+
+        1. **Smooth** the histogram with a moving average (window=5) to
+           reduce statistical fluctuations.
+        2. **Cumulative fraction from right**: walk from the rightmost bin
+           leftward, accumulating counts.  The pile-up tail is sparse and
+           contributes very little.  When the cumulative reaches
+           ``edge_fraction`` (default 2%) of the total counts, we've
+           entered the continuum body.
+        3. **Confirm falling edge**: the smoothed value at this bin should
+           be less than the smoothed value a few bins to the left (i.e.
+           we're on the descending slope, not the peak body).
 
         Returns the bin index, or None if no edge found.
         """
         n = len(bins)
-        for i in range(n - 1, 3, -1):
-            if bins[i] < self.min_bin_count:
-                continue
-            left_avg = sum(bins[i - 3:i]) / 3.0
-            if left_avg > bins[i]:
+        if n < self.smooth_window + 3:
+            return None
+        total = sum(bins)
+        if total <= 0:
+            return None
+
+        # step 1: smooth with moving average
+        hw = self.smooth_window // 2
+        smooth = [0.0] * n
+        for i in range(n):
+            lo = max(0, i - hw)
+            hi = min(n, i + hw + 1)
+            smooth[i] = sum(bins[lo:hi]) / (hi - lo)
+
+        # step 2: cumulative from right, find where we reach edge_fraction
+        threshold = total * self.edge_fraction
+        cumul = 0.0
+        candidate = None
+        for i in range(n - 1, -1, -1):
+            cumul += bins[i]
+            if cumul >= threshold:
+                candidate = i
+                break
+        if candidate is None:
+            return None
+
+        # step 3: confirm falling edge — walk right from candidate to find
+        # where the smoothed value starts dropping consistently
+        # (candidate might be slightly inside the body; refine outward)
+        peak_smooth = max(smooth)
+        if peak_smooth <= 0:
+            return candidate
+        drop_threshold = peak_smooth * 0.05  # 5% of peak = noise floor
+        for i in range(candidate, min(n - 1, candidate + 20)):
+            if smooth[i] < drop_threshold:
+                return max(candidate, i - 1)
+            # check if we're on falling slope: this bin < left neighbor
+            if i > 0 and smooth[i] < smooth[i - 1] * 0.7:
                 return i
-        return None
+        return candidate
 
     def edge_to_adc(self, bin_index: int) -> float:
         """Convert bin index to ADC value (centre of bin)."""
