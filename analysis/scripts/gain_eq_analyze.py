@@ -2,28 +2,34 @@
 """
 gain_eq_analyze — pass 1 of the offline gain-equalization workflow.
 
-Reads a ROOT file produced by ``replay_rawdata -p`` (which contains
+Reads one or more ROOT files produced by ``replay_rawdata -p`` (which contain
 peak_height[nch][MAX_PEAKS] and peak_integral[nch][MAX_PEAKS] plus the FP
-trigger word per event). For each HyCal channel:
+trigger word per event). All input files are chained together and treated as
+one logical event stream. For each HyCal channel:
 
   1. Filter events: only those with the sum trigger bit set (bit 8).
   2. Build a peak-height histogram and a peak-integral histogram.
   3. Run TSpectrum + Gaussian fit on both → mean / sigma.
   4. Optionally query prad2hvd for the current VSet / VMon for that module.
-  5. Append a new entry to the channel's iteration list in the unified
-     history JSON file.
+  5. Append ONE new entry per channel to the unified history JSON file.
 
-Each call appends one new iteration. The same JSON file is fed to
-gain_eq_distribution.py and gain_eq_propose.py.
+Each call appends exactly one iteration regardless of how many input files
+are provided.
 
-Typical use:
-    # iter 1
+Typical use (one EVIO file → one ROOT file):
     replay_rawdata prad_023527.evio -o prad_023527.root -p
     python3 gain_eq_analyze.py prad_023527.root --history gain_history.json
 
-    # iter 2 (after applying new VSet and taking new data)
-    replay_rawdata prad_023600.evio -o prad_023600.root -p
-    python3 gain_eq_analyze.py prad_023600.root --history gain_history.json
+Multiple EVIO splits (one ROOT file per split, all chained for one iteration):
+    for f in /data/stage6/prad_023600/prad_023600.evio.000??; do
+        replay_rawdata $f -o /tmp/$(basename $f).root -p
+    done
+    python3 gain_eq_analyze.py /tmp/prad_023600.evio.*.root \\
+            --history gain_history.json
+
+Glob form (shell expansion or --glob):
+    python3 gain_eq_analyze.py --glob '/tmp/prad_023600.evio.*.root' \\
+            --history gain_history.json
 """
 
 from __future__ import annotations
@@ -54,8 +60,11 @@ SUM_TRIGGER_MASK = 1 << SUM_TRIGGER_BIT
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
         description="HyCal per-channel peak-height/integral fits → gain history JSON")
-    p.add_argument("input_root",
-                   help="ROOT file from replay_rawdata -p")
+    p.add_argument("input_root", nargs="*",
+                   help="One or more ROOT files from replay_rawdata -p (chained)")
+    p.add_argument("--glob", default=None,
+                   help="Shell-style glob pattern for input ROOT files (alternative to "
+                        "positional args)")
     p.add_argument("--history", required=True,
                    help="Path to gain history JSON (created/appended)")
     p.add_argument("--pdf", default=None,
@@ -100,22 +109,23 @@ def parse_args() -> argparse.Namespace:
 #  Histogram building
 # ============================================================================
 
-def build_histograms(input_root: str,
+def build_histograms(input_files: List[str],
                      daq_map: Dict[Tuple[int, int, int], str],
                      module_set: set,
                      args: argparse.Namespace
                     ) -> Tuple[Dict[str, "ROOT.TH1F"], Dict[str, "ROOT.TH1F"]]:
-    """Loop over events; fill peak-height + peak-integral hists per channel."""
-    f = ROOT.TFile.Open(input_root)
-    if not f or f.IsZombie():
-        sys.exit(f"ERROR: cannot open {input_root}")
-    tree = f.Get("events")
-    if not tree:
-        sys.exit(f"ERROR: 'events' tree not found in {input_root}")
-
-    n_total = tree.GetEntries()
+    """Loop over events from a TChain of input files; fill per-channel hists."""
+    chain = ROOT.TChain("events")
+    for path in input_files:
+        rc = chain.Add(path)
+        if rc <= 0:
+            print(f"WARNING: TChain.Add returned {rc} for {path}")
+    n_total = chain.GetEntries()
+    if n_total <= 0:
+        sys.exit(f"ERROR: chain is empty (no 'events' trees found in {input_files})")
     n_to_process = n_total if args.max_events < 0 else min(n_total, args.max_events)
-    print(f"Reading {n_to_process}/{n_total} events from {input_root}")
+    print(f"Chained {len(input_files)} file(s); reading {n_to_process}/{n_total} events")
+    tree = chain
 
     hists_ph: Dict[str, ROOT.TH1F] = {}
     hists_pi: Dict[str, ROOT.TH1F] = {}
@@ -177,7 +187,6 @@ def build_histograms(input_root: str,
 
     print(f"Done. {n_passed} events passed sum-trigger filter, "
           f"{n_skipped_trig} rejected. Filled {len(hists_ph)} channels.")
-    f.Close()
     return hists_ph, hists_pi
 
 
@@ -307,8 +316,43 @@ def write_pdf(out_pdf: str,
 #  Main
 # ============================================================================
 
+def resolve_inputs(args: argparse.Namespace) -> List[str]:
+    """Combine positional file list with --glob; expand any shell-style globs."""
+    import glob as _glob
+    files: List[str] = []
+    for entry in args.input_root:
+        # auto-expand any positional that contains glob chars
+        if any(c in entry for c in "*?["):
+            matches = sorted(_glob.glob(entry))
+            if not matches:
+                print(f"WARNING: positional glob '{entry}' matched nothing")
+            files.extend(matches)
+        else:
+            files.append(entry)
+    if args.glob:
+        matches = sorted(_glob.glob(args.glob))
+        if not matches:
+            print(f"WARNING: --glob '{args.glob}' matched nothing")
+        files.extend(matches)
+    if not files:
+        sys.exit("ERROR: no input ROOT files (give one or more positional args, "
+                 "or use --glob '...')")
+    # de-duplicate while preserving order
+    seen = set()
+    unique = []
+    for f in files:
+        if f not in seen:
+            seen.add(f)
+            unique.append(f)
+    return unique
+
+
 def main() -> int:
     args = parse_args()
+    input_files = resolve_inputs(args)
+    print(f"Input files ({len(input_files)}):")
+    for f in input_files:
+        print(f"  {f}")
 
     daq_map = load_daq_map(args.daq_map) if args.daq_map else load_daq_map()
     modules = (load_hycal_modules(args.modules_db)
@@ -324,7 +368,7 @@ def main() -> int:
     module_set = set(wanted_names)
 
     # Build histograms
-    hists_ph, hists_pi = build_histograms(args.input_root, daq_map, module_set, args)
+    hists_ph, hists_pi = build_histograms(input_files, daq_map, module_set, args)
 
     # Fit
     ordered = sorted(set(hists_ph.keys()) | set(hists_pi.keys()),
@@ -365,7 +409,10 @@ def main() -> int:
     channels = load_history(args.history)
     iter_idx = n_iterations(channels) + 1
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    input_basename = os.path.basename(args.input_root)
+    input_basenames = [os.path.basename(p) for p in input_files]
+    # store one string when only a single file, else the list
+    input_field: Any = (input_basenames[0] if len(input_basenames) == 1
+                        else input_basenames)
 
     for name in ordered:
         r_ph = fits_ph.get(name)
@@ -391,7 +438,7 @@ def main() -> int:
         entry = {
             "iter":               iter_idx,
             "timestamp":          timestamp,
-            "input":              input_basename,
+            "input":              input_field,
             "count":              count,
             "peak_height_mean":   round(r_ph.mean,  3) if r_ph else None,
             "peak_height_sigma":  round(r_ph.sigma, 3) if r_ph else None,
