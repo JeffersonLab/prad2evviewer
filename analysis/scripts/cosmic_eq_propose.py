@@ -79,6 +79,12 @@ def parse_args() -> argparse.Namespace:
                    help="Module types to include (default: PbGlass,PWO)")
     p.add_argument("--initial-step", type=float, default=100.0,
                    help="Constant ΔV applied on the first iteration (default: +100)")
+    p.add_argument("--initial-threshold", type=float, default=0.0,
+                   help="First-iteration only: apply the initial step ONLY when "
+                        "(target_mean - current_mean) > threshold. Channels at or "
+                        "above target - threshold are left untouched. Asymmetric: "
+                        "channels above target are also skipped. "
+                        "Default 0 = step in either direction (current behavior).")
     p.add_argument("--max-dv", type=float, default=80.0,
                    help="Cap on per-channel ΔV in subsequent iterations (default: 80)")
     p.add_argument("--tolerance", type=float, default=50.0,
@@ -203,7 +209,14 @@ def propose_for_channel(name: str,
 
     # Decide ΔV
     if len(entries) < 2:
-        # First-iteration constant step (signed by direction toward target)
+        # First-iteration constant step (signed by direction toward target).
+        # If --initial-threshold is set, only step channels that are well
+        # below target (diff > threshold). Channels above target or only
+        # marginally below are left at their current voltage.
+        if args.initial_threshold > 0 and diff <= args.initial_threshold:
+            p.reason = (f"diff={diff:+.1f} not above initial threshold "
+                        f"{args.initial_threshold:.1f}")
+            return p
         step = abs(args.initial_step)
         p.dv = step if diff > 0 else -step
         p.reason = "initial constant step"
