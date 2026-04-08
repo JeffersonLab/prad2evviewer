@@ -44,40 +44,6 @@ void SetReadBranches(TTree *tree, EventVars &ev, bool write_peaks)
     }
 }
 
-// ── Save first N waveforms with signal for a given module ─────────────
-static void saveModuleWaveforms(TTree *tree, fdec::HyCalSystem &hycal,
-                                EventVars &ev, int target_id,
-                                int max_wf, TFile &outfile)
-{
-    int found = 0;
-    TString dirName = Form("waveforms_module_%d", target_id);
-    outfile.mkdir(dirName);
-    outfile.cd(dirName);
-
-    Long64_t nentries = tree->GetEntries();
-    for (Long64_t i = 0; i < nentries && found < max_wf; i++) {
-        tree->GetEntry(i);
-        for (int j = 0; j < ev.nch; j++) {
-            const auto *mod = hycal.module_by_daq(ev.crate[j], ev.slot[j], ev.channel[j]);
-            if (!mod || mod->id != target_id) continue;
-            if (ev.npeaks[j] <= 0) continue;
-
-            int ns = ev.nsamples[j];
-            TString hname  = Form("wf_mod%d_ev%d", target_id, ev.event_num);
-            TString htitle = Form("Module %d  Event %d;Sample;ADC", target_id, ev.event_num);
-            TH1F *hwf = new TH1F(hname, htitle, ns, 0, ns);
-            for (int s = 0; s < ns; s++)
-                hwf->SetBinContent(s + 1, ev.samples[j][s]);
-            hwf->Write();
-            delete hwf;
-            found++;
-            break;
-        }
-    }
-    outfile.cd();
-    std::cerr << "Saved " << found << " waveforms for module " << target_id << "\n";
-}
-
 int main(int argc, char *argv[])
 {
     std::string input;
@@ -98,7 +64,7 @@ int main(int argc, char *argv[])
 
     TChain *cosmic_chain = new TChain("events");
     for(int i = 0; i<=file_number-1; i++){
-        std::string filename = Form("/data/stage6/prad_023%d/prad_023%d.000%02d_raw.root",run_number, run_number, i);
+        std::string filename = Form("prad_023%d.000%02d_raw.root", run_number, i);
         cosmic_chain->Add(filename.c_str());
     }
 
@@ -165,7 +131,7 @@ int main(int argc, char *argv[])
         }
     }
 
-    TFile outfile("cosmic_23419_test_waveforms.root", "RECREATE");
+    TFile outfile(Form("cosmic_run_%d.root", run_number), "RECREATE");
     outfile.cd();
     outfile.mkdir("peak_histograms")->cd();
     for (int i = 0; i < 1156; i++) {
@@ -246,7 +212,7 @@ int main(int argc, char *argv[])
     peak_module->Write();
     rms_module->Write();
 
-    std::ofstream csv_out("cosmic_peak_23419.dat");
+    std::ofstream csv_out(Form("cosmic_peak_%d.dat", run_number));
     csv_out << "ModuleID  PeakIntegral  RMS\n";
     for (int i = 0; i < 1156; i++) {
         csv_out << "W" << (i+1) << "  " << peak[i] << "  " << rms[i] << "\n";
@@ -256,7 +222,7 @@ int main(int argc, char *argv[])
     }
     csv_out.close();
 
-    std::ofstream rate_out("cosmic_eventNum_23419.dat");
+    std::ofstream rate_out(Form("cosmic_eventNum_%d.dat", run_number));
     rate_out << "ModuleID  EventCount\n";
     for (int i = 0; i < 1156; i++) {
         rate_out << "W" << (i+1) << "  " << event_num_module[i+1000+1] << "\n";
