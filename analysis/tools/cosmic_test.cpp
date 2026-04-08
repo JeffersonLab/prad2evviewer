@@ -119,7 +119,7 @@ int main(int argc, char *argv[])
     for(int i = 0; i < nentries; i++){
         tree->GetEntry(i);
         std::cout << "Event " << ev.event_num << ": nch = " << ev.nch << "\r" << std::flush;
-        if (ev.nch > 50 || ev.nch < 4) continue; // skip noisy events
+        if (ev.nch > 70 || ev.nch < 4) continue; // skip noisy events
         for (int j = 0; j < ev.nch; j++) {
             const auto *mod = hycal.module_by_daq(ev.crate[j], ev.slot[j], ev.channel[j]);
             if (!mod || !mod->is_hycal()) continue;
@@ -247,11 +247,6 @@ int main(int argc, char *argv[])
     for (int i = 0; i < LG_num; i++) {
         if (peakHeight_hist_LG_module[i]->GetEntries() > 0) {
             float max = peakHeight_hist_LG_module[i]->GetBinCenter(peakHeight_hist_LG_module[i]->GetMaximumBin());
-            if(max < 20){
-                peakHeight_LG[i] = max;
-                rms_height_LG[i] = 1.;
-                continue;
-            }
             peakHeight_hist_LG_module[i]->Fit("gaus", "Q", "r", max*0.7, max*1.5);
             TF1 *fit = peakHeight_hist_LG_module[i]->GetFunction("gaus");
             if (fit) {
