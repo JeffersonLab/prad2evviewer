@@ -543,7 +543,7 @@ class ScalerMapWindow(QMainWindow):
                 f"Data: {lo:.0f}kHz .. {hi:.0f}kHz  "
                 f"Channels: {len(self._values)}  "
                 f"PbWO4 Total: {W_totalSum:.2f}kHz  "
-                f"Ave: {W_totalSum/1152:2f}kHz  "
+                f"Ave: {W_totalSum/1152:3f}kHz  "
                 f"Asym (kHz): [{x_asym:.3f}, {y_asym:.3f}]  "
                 f"CoR (mm): [{x_COM:.3f},{y_COM:.3f}]")
 
