@@ -94,7 +94,7 @@ void Replay::clearReconEvent(EventVars_Recon &ev)
 
 void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
 {
-    tree->Branch("event_num",    &ev.event_num,    "event_num/i");
+    tree->Branch("event_num",    &ev.event_num,    "event_num/I");
     tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
     tree->Branch("trigger",      &ev.trigger,      "trigger/i");
     tree->Branch("timestamp",    &ev.timestamp,    "timestamp/L");
@@ -129,7 +129,7 @@ void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
 
 void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev)
 {
-    tree->Branch("event_num",    &ev.event_num,    "event_num/i");
+    tree->Branch("event_num",    &ev.event_num,    "event_num/I");
     tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
     tree->Branch("trigger_bits", &ev.trigger_bits, "trigger_bits/i");
     tree->Branch("timestamp",    &ev.timestamp,    "timestamp/L");
