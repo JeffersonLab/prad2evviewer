@@ -311,6 +311,7 @@ class HyCalGainMapWidget(QWidget):
         self._values: Dict[str, float] = {}
         self._vmin = 0.0
         self._vmax = 1.0
+        self._log_scale = False
         self._palette_idx = 0
         self._hovered: Optional[str] = None
         self._rects: Dict[str, QRectF] = {}
@@ -325,6 +326,15 @@ class HyCalGainMapWidget(QWidget):
         self._drag_origin: Optional[QPointF] = None
         self._dragging = False
 
+        # overlay reset button (top-right corner)
+        self._reset_btn = QPushButton("Reset", self)
+        self._reset_btn.setFixedSize(52, 24)
+        self._reset_btn.setStyleSheet(
+            "QPushButton{background:rgba(22,27,34,200);color:#8b949e;"
+            "border:1px solid #30363d;font:bold 9px Consolas;border-radius:3px;}"
+            "QPushButton:hover{background:rgba(33,38,45,220);color:#c9d1d9;}")
+        self._reset_btn.clicked.connect(self.reset_view)
+
     # -- public API --
 
     def set_modules(self, modules: List[Module]):
@@ -337,6 +347,10 @@ class HyCalGainMapWidget(QWidget):
         self._values = values
         self._vmin = vmin
         self._vmax = vmax
+        self.update()
+
+    def set_log_scale(self, on: bool):
+        self._log_scale = on
         self.update()
 
     def set_palette(self, idx: int):
@@ -387,6 +401,8 @@ class HyCalGainMapWidget(QWidget):
 
     def resizeEvent(self, event):
         self._layout_dirty = True
+        # keep reset button in top-right corner
+        self._reset_btn.move(self.width() - self._reset_btn.width() - 6, 6)
         super().resizeEvent(event)
 
     # -- painting --
@@ -410,12 +426,22 @@ class HyCalGainMapWidget(QWidget):
 
         stops = list(PALETTES.values())[self._palette_idx]
         vmin, vmax = self._vmin, self._vmax
+        log_scale = self._log_scale
         no_data = QColor("#1a1a2e")
+
+        # precompute log bounds
+        if log_scale:
+            log_lo = math.log10(max(vmin, 1e-9))
+            log_hi = math.log10(max(vmax, vmin * 10, 1e-8))
 
         for name, rect in self._rects.items():
             v = self._values.get(name)
             if v is not None:
-                t = ((v - vmin) / (vmax - vmin)) if vmax > vmin else 0.5
+                if log_scale:
+                    lv = math.log10(max(v, 1e-9))
+                    t = (lv - log_lo) / (log_hi - log_lo) if log_hi > log_lo else 0.5
+                else:
+                    t = ((v - vmin) / (vmax - vmin)) if vmax > vmin else 0.5
                 p.fillRect(rect, _cmap_qcolor(t, stops))
             else:
                 p.fillRect(rect, no_data)
@@ -710,6 +736,8 @@ class LMSLineChartWidget(QWidget):
 class IrregularTableWidget(QWidget):
     """Table of (module, run) outlier entries with search and type filter."""
 
+    runClicked = pyqtSignal(int)  # emits run number when a row is clicked
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._entries: List[IrregularEntry] = []
@@ -792,6 +820,7 @@ class IrregularTableWidget(QWidget):
         self._table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSortingEnabled(True)
+        self._table.cellClicked.connect(self._on_cell_clicked)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
         self._table.verticalHeader().setDefaultSectionSize(24)
@@ -821,19 +850,16 @@ class IrregularTableWidget(QWidget):
                 continue
             filtered.append(e)
 
-        self._count_lbl.setText(f"{len(filtered)} entries")
+        self._count_lbl.setText(f"irregular gains: {len(filtered)} entries")
         self._populate_table(filtered)
 
     def _populate_table(self, entries: List[IrregularEntry]):
         self._table.setSortingEnabled(False)
         self._table.setRowCount(len(entries))
         for row, e in enumerate(entries):
-            # Module name — colour by type
+            # Module name — amber to indicate issue
             item = QTableWidgetItem(e.name)
-            if e.mod_type == "PbWO4":
-                item.setForeground(QColor("#3fb950"))
-            elif e.mod_type == "PbGlass":
-                item.setForeground(QColor("#58a6ff"))
+            item.setForeground(QColor("#d29922"))
             self._table.setItem(row, 0, item)
 
             self._table.setItem(row, 1, QTableWidgetItem(e.mod_type))
@@ -851,6 +877,13 @@ class IrregularTableWidget(QWidget):
 
         self._table.setSortingEnabled(True)
 
+    def _on_cell_clicked(self, row: int, _col: int):
+        item = self._table.item(row, 2)  # Run column
+        if item is not None:
+            run_num = item.data(Qt.ItemDataRole.DisplayRole)
+            if isinstance(run_num, int):
+                self.runClicked.emit(run_num)
+
 
 # ===========================================================================
 #  Main window
@@ -866,6 +899,10 @@ class GainMonitorWindow(QMainWindow):
         self._current_run_idx: int = 0
         self._current_ref_idx: int = LMS_REF_DEFAULT
         self._palette_idx = 0
+        self._auto_range = True
+        self._manual_vmin = 0.9
+        self._manual_vmax = 1.1
+        self._log_scale = False
 
         self._load_geometry()
         self._build_ui()
@@ -962,20 +999,68 @@ class GainMonitorWindow(QMainWindow):
         self._next_btn.setFixedWidth(30)
         ctrl.addWidget(self._next_btn)
 
-        ctrl.addSpacing(10)
-
-        self._palette_btn = self._make_btn(
-            "Palette", "#d29922", self._on_cycle_palette)
-        self._palette_btn.setFixedWidth(80)
-        ctrl.addWidget(self._palette_btn)
-
-        self._reset_btn = self._make_btn(
-            "Reset", "#c9d1d9", self._on_reset_view)
-        self._reset_btn.setFixedWidth(60)
-        ctrl.addWidget(self._reset_btn)
-
         ctrl.addStretch()
         left_layout.addLayout(ctrl)
+
+        # range controls
+        rng = QHBoxLayout()
+        rng.setSpacing(6)
+
+        _EDIT_SS = ("QLineEdit{background:#161b22;color:#c9d1d9;"
+                    "border:1px solid #30363d;border-radius:3px;padding:2px 4px;}")
+
+        rng.addWidget(self._slabel("Min:"))
+        self._range_min = QLineEdit("0.9")
+        self._range_min.setFixedWidth(70)
+        self._range_min.setFont(QFont("Consolas", 10))
+        self._range_min.setStyleSheet(_EDIT_SS)
+        self._range_min.returnPressed.connect(self._on_apply_range)
+        rng.addWidget(self._range_min)
+
+        rng.addWidget(self._slabel("Max:"))
+        self._range_max = QLineEdit("1.1")
+        self._range_max.setFixedWidth(70)
+        self._range_max.setFont(QFont("Consolas", 10))
+        self._range_max.setStyleSheet(_EDIT_SS)
+        self._range_max.returnPressed.connect(self._on_apply_range)
+        rng.addWidget(self._range_max)
+
+        self._apply_btn = QPushButton("Apply")
+        self._apply_btn.setFixedWidth(55)
+        self._apply_btn.clicked.connect(self._on_apply_range)
+        rng.addWidget(self._apply_btn)
+
+        self._log_btn = QPushButton("Log")
+        self._log_btn.setFixedWidth(45)
+        self._log_btn.setCheckable(True)
+        self._log_btn.clicked.connect(self._on_log_toggled)
+        rng.addWidget(self._log_btn)
+
+        self._auto_btn = QPushButton("Auto")
+        self._auto_btn.setFixedWidth(55)
+        self._auto_btn.setCheckable(True)
+        self._auto_btn.setChecked(True)
+        self._auto_btn.clicked.connect(self._on_auto_range)
+        rng.addWidget(self._auto_btn)
+
+        # common toggle-button style
+        _TOGGLE_SS = (
+            "QPushButton{background:#21262d;color:#c9d1d9;"
+            "border:1px solid #30363d;padding:4px 8px;"
+            "font:bold 11px Consolas;border-radius:3px;}"
+            "QPushButton:hover{background:#30363d;}"
+            "QPushButton:checked{background:#1f6feb;color:white;"
+            "border-color:#388bfd;}")
+        self._apply_btn.setStyleSheet(
+            "QPushButton{background:#21262d;color:#c9d1d9;"
+            "border:1px solid #30363d;padding:4px 8px;"
+            "font:bold 11px Consolas;border-radius:3px;}"
+            "QPushButton:hover{background:#30363d;}")
+        self._log_btn.setStyleSheet(_TOGGLE_SS)
+        self._auto_btn.setStyleSheet(_TOGGLE_SS)
+
+        rng.addStretch()
+        left_layout.addLayout(rng)
 
         # geo map
         self._map = HyCalGainMapWidget()
@@ -1013,6 +1098,7 @@ class GainMonitorWindow(QMainWindow):
         right.addWidget(charts)
 
         self._irregular_table = IrregularTableWidget()
+        self._irregular_table.runClicked.connect(self._on_jump_to_run)
         right.addWidget(self._irregular_table)
 
         right.setStretchFactor(0, 3)
@@ -1056,6 +1142,16 @@ class GainMonitorWindow(QMainWindow):
         ]:
             pal.setColor(role, QColor(colour))
         self.setPalette(pal)
+
+    # ---- keyboard navigation ----
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Left:
+            self._on_prev_run()
+        elif event.key() == Qt.Key.Key_Right:
+            self._on_next_run()
+        else:
+            super().keyPressEvent(event)
 
     # ---- slots ----
 
@@ -1108,12 +1204,37 @@ class GainMonitorWindow(QMainWindow):
         if self._current_run_idx < len(self._runs) - 1:
             self._run_combo.setCurrentIndex(self._current_run_idx + 1)
 
+    def _on_apply_range(self):
+        try:
+            vmin = float(self._range_min.text())
+            vmax = float(self._range_max.text())
+        except ValueError:
+            return
+        if vmin >= vmax:
+            return
+        self._auto_range = False
+        self._auto_btn.setChecked(False)
+        self._manual_vmin = vmin
+        self._manual_vmax = vmax
+        self._update_geo_view()
+
+    def _on_log_toggled(self):
+        self._log_scale = self._log_btn.isChecked()
+        self._map.set_log_scale(self._log_scale)
+
+    def _on_auto_range(self):
+        self._auto_range = self._auto_btn.isChecked()
+        self._update_geo_view()
+
+    def _on_jump_to_run(self, run_number: int):
+        for i, rd in enumerate(self._runs):
+            if rd.run_number == run_number:
+                self._run_combo.setCurrentIndex(i)
+                return
+
     def _on_cycle_palette(self):
         self._palette_idx = (self._palette_idx + 1) % len(PALETTES)
         self._map.set_palette(self._palette_idx)
-
-    def _on_reset_view(self):
-        self._map.reset_view()
 
     def _on_module_hovered(self, name: str):
         mod = self._mod_by_name.get(name)
@@ -1151,19 +1272,26 @@ class GainMonitorWindow(QMainWindow):
         for mname, mrec in rd.modules.items():
             values[mname] = mrec.gain_factors[ref_idx]
 
-        # auto-range using 2nd/98th percentile
-        if values:
-            sorted_v = sorted(values.values())
-            n = len(sorted_v)
-            lo_idx = max(0, int(n * 0.02))
-            hi_idx = min(n - 1, int(n * 0.98))
-            vmin = sorted_v[lo_idx]
-            vmax = sorted_v[hi_idx]
-            if vmin == vmax:
-                vmin -= 0.01
-                vmax += 0.01
+        if self._auto_range:
+            # auto-range using 2nd/98th percentile
+            if values:
+                sorted_v = sorted(values.values())
+                n = len(sorted_v)
+                lo_idx = max(0, int(n * 0.02))
+                hi_idx = min(n - 1, int(n * 0.98))
+                vmin = sorted_v[lo_idx]
+                vmax = sorted_v[hi_idx]
+                if vmin == vmax:
+                    vmin -= 0.01
+                    vmax += 0.01
+            else:
+                vmin, vmax = 0.9, 1.1
+            # sync the edit boxes to show current auto values
+            self._range_min.setText(f"{vmin:.4f}")
+            self._range_max.setText(f"{vmax:.4f}")
         else:
-            vmin, vmax = 0.9, 1.1
+            vmin = self._manual_vmin
+            vmax = self._manual_vmax
 
         self._map.set_gain_data(values, vmin, vmax)
 
