@@ -675,6 +675,7 @@ class GainScanEngine:
                 self.converged.add(i)
                 self.state = GainScanState.CONVERGED
                 self.log(f"{mod.name}: CONVERGED at {edge_adc:.0f} (iter {iteration+1})")
+                self._append_scan_result(mod, iteration, edge_adc)
                 self._save_module_report(mod, "success")
                 return
 
@@ -714,6 +715,65 @@ class GainScanEngine:
         self.failed.add(idx)
         self.state = GainScanState.FAILED
         self._save_module_report(mod, "failure")
+
+    RESULTS_FILE = "gain_equalization_results.json"
+
+    def _append_scan_result(self, mod: Module, iteration: int, edge_adc: float):
+        """Append one successful-convergence record to the per-module JSON log.
+
+        File layout: ``{"<module_name>": [entry, entry, ...], ...}`` — each
+        successful scan appends a new entry to that module's list.  Simulation
+        runs use ``report_prefix`` so they don't pollute real results.
+        Atomic write (temp file + os.replace) guards against crash-mid-write.
+        """
+        os.makedirs(self.report_dir, exist_ok=True)
+        path = os.path.join(self.report_dir,
+                            f"{self.report_prefix}{self.RESULTS_FILE}")
+
+        data: Dict[str, List[Dict]] = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r") as f:
+                    loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    data = loaded
+                else:
+                    self.log(f"Results file {os.path.basename(path)} not an "
+                             f"object — starting fresh", level="warn")
+            except Exception as e:
+                self.log(f"Results file unreadable ({e}) — starting fresh",
+                         level="warn")
+
+        fit = self._pmt_fit.linear_fit()
+        entry = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "iter": iteration,
+            "targetADC": int(self.target_adc),
+            "finalADC": round(edge_adc),
+            "edge": {
+                "log": "on" if self.analyzer.use_log_cumul else "off",
+                "percentage": f"{self.analyzer.edge_fraction * 100:g}",
+            },
+            "fit": {
+                "npoints": fit.n_points,
+                "intercept": fit.log_a,
+                "slope": fit.k,
+            } if fit is not None else None,
+        }
+        data.setdefault(mod.name, []).append(entry)
+
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp, path)
+            self.log(f"Result saved: {mod.name} → {os.path.basename(path)}")
+        except Exception as e:
+            self.log(f"Failed to save result: {e}", level="error")
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     def _save_module_report(self, mod: Module, status: str):
         """Save a vertically concatenated histogram screenshot for a module.
