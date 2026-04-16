@@ -2,6 +2,7 @@
 
 let geoCanvas, geoCtx, geoWrap, scale=1, offsetX=0, offsetY=0, canvasW, canvasH;
 let geoOutlineCanvas, geoOutlineCtx;  // static outline layer
+let geoFocusPbWO4=false;  // dim LG modules to highlight PbWO4
 
 // color range: per-tab user overrides, keyed by "tab:metric"
 // Each entry is [min, max] where null = auto
@@ -167,6 +168,11 @@ function initGeo(){
         if(modules.length) fitView();
         redrawGeo();
     };
+
+    // Focus PbWO4 checkbox
+    document.getElementById('focus-pbwo4').onchange=function(){
+        geoFocusPbWO4=this.checked; redrawGeo();
+    };
 }
 
 function resizeGeo(){
@@ -281,39 +287,51 @@ function renderGeoFills(colorFn){
     const ctx=geoCtx;
     if(geoLightTheme){ctx.fillStyle='#fff';ctx.fillRect(0,0,canvasW,canvasH);}
     else ctx.clearRect(0,0,canvasW,canvasH);
+    const focus=geoFocusPbWO4;
     for(let i=0;i<modules.length;i++){
         const m=modules[i],[cx,cy]=d2c(m.x,m.y),w=m.sx*scale,h=m.sy*scale;
+        if(focus) ctx.globalAlpha=(m.t==='G')?0.15:1;
         ctx.fillStyle=colorFn(i);
         ctx.fillRect(cx-w/2,cy-h/2,w,h);
     }
+    if(focus) ctx.globalAlpha=1;
 }
 
 function renderGeoOutlines(outlineFn, decorateFn){
     if(!geoOutlineCtx)return;
     const ctx=geoOutlineCtx;
     ctx.clearRect(0,0,canvasW,canvasH);
+    const focus=geoFocusPbWO4;
 
-    // 1. batch default outlines in one path
-    ctx.beginPath(); ctx.strokeStyle=geoStrokeColor(); ctx.lineWidth=0.5;
-    for(let i=0;i<modules.length;i++){
-        const style=outlineFn?outlineFn(i):null;
-        const hov=hoveredModule&&hoveredModule.n===modules[i].n;
-        if(!style&&!hov){
-            const m=modules[i],[cx,cy]=d2c(m.x,m.y),w=m.sx*scale,h=m.sy*scale;
-            ctx.rect(cx-w/2,cy-h/2,w,h);
+    // 1. batch default outlines (split into two passes when focus mode dims LG)
+    ctx.strokeStyle=geoStrokeColor(); ctx.lineWidth=0.5;
+    for(const pass of focus?[['W',1],['G',0.15]]:[['*',1]]){
+        ctx.globalAlpha=pass[1];
+        ctx.beginPath();
+        for(let i=0;i<modules.length;i++){
+            if(pass[0]!=='*'&&modules[i].t!==pass[0]) continue;
+            const style=outlineFn?outlineFn(i):null;
+            const hov=hoveredModule&&hoveredModule.n===modules[i].n;
+            if(!style&&!hov){
+                const m=modules[i],[cx,cy]=d2c(m.x,m.y),w=m.sx*scale,h=m.sy*scale;
+                ctx.rect(cx-w/2,cy-h/2,w,h);
+            }
         }
+        ctx.stroke();
     }
-    ctx.stroke();
+    ctx.globalAlpha=1;
 
     // 2. special outlines (cluster members, warn, selection)
     for(let i=0;i<modules.length;i++){
         const style=outlineFn?outlineFn(i):null;
         if(style){
+            if(focus) ctx.globalAlpha=(modules[i].t==='G')?0.15:1;
             const m=modules[i],[cx,cy]=d2c(m.x,m.y),w=m.sx*scale,h=m.sy*scale;
             ctx.strokeStyle=style.color; ctx.lineWidth=style.width;
             ctx.strokeRect(cx-w/2,cy-h/2,w,h);
         }
     }
+    if(focus) ctx.globalAlpha=1;
 
     // 3. hover highlight (same for all tabs)
     if(hoveredModule){
