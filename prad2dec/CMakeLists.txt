@@ -121,6 +121,13 @@ endif()
 
 add_library(prad2dec STATIC ${PRAD2DEC_SOURCES})
 
+# Required so this archive can be linked into shared objects (pybind11
+# module, ACLiC-compiled ROOT macros).  Static libs don't need PIC for
+# plain executable linking, but it's free on x86-64 and avoids a class of
+# "relocation R_X86_64_32S can not be used when making a shared object"
+# errors downstream.
+set_target_properties(prad2dec PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
 target_include_directories(prad2dec
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
