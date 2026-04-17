@@ -115,14 +115,23 @@ target_compile_definitions(livetime PRIVATE DATABASE_DIR="${DATABASE_DIR}")
 set_target_properties(livetime PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ---------------------------------------------------------------------------
-# ROOT viewer support (optional, for viewing ROOT replay files)
+# Analysis tools + ROOT viewer (share a single ROOT dependency).
+# Analysis is the *producer* of ROOT replay files; the viewer is the
+# *consumer*.  They are always built together — a separate WITH_ROOT
+# switch would let you compile the consumer without a producer, which is
+# not useful.  Set -DBUILD_ANALYSIS=ON to enable both.
 # ---------------------------------------------------------------------------
-option(WITH_ROOT "Enable ROOT file viewing support" OFF)
-if(WITH_ROOT)
+option(BUILD_ANALYSIS "Build analysis tools and ROOT data-source (requires ROOT)" OFF)
+
+if(BUILD_ANALYSIS)
     find_package(ROOT 6.0 REQUIRED CONFIG COMPONENTS Core Tree RIO)
     include(${ROOT_USE_FILE})
-    message(STATUS "ROOT viewer: ${ROOT_VERSION}")
+    message(STATUS "ROOT: using ${ROOT_VERSION}")
 endif()
+
+# Sources use ``#ifdef WITH_ROOT`` to guard ROOT-dependent blocks; expose
+# that compile-definition wherever BUILD_ANALYSIS is on.
+set(WITH_ROOT ${BUILD_ANALYSIS})
 
 # ---------------------------------------------------------------------------
 # Server library (shared between prad2_server and prad2evviewer)
@@ -165,11 +174,18 @@ target_link_libraries(prad2_server PRIVATE prad2srv)
 set_target_properties(prad2_server PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # ---------------------------------------------------------------------------
-# Analysis tools (optional, requires ROOT)
+# Analysis subdirectory (pulls in ROOT via the same find_package above).
 # ---------------------------------------------------------------------------
-option(BUILD_ANALYSIS "Build analysis tools (requires ROOT)" OFF)
 if(BUILD_ANALYSIS)
     add_subdirectory(analysis)
+endif()
+
+# ---------------------------------------------------------------------------
+# Python bindings (optional, uses pybind11 fetched via FetchContent)
+# ---------------------------------------------------------------------------
+option(BUILD_PYTHON "Build Python bindings (prad2py)" OFF)
+if(BUILD_PYTHON)
+    add_subdirectory(python)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -241,7 +257,7 @@ message(STATUS "  Build type   : ${CMAKE_BUILD_TYPE}")
 message(STATUS "  Database     : ${DATABASE_DIR}")
 message(STATUS "  Resources    : ${RESOURCE_DIR}")
 message(STATUS "  ET support   : ${WITH_ET}")
-message(STATUS "  ROOT viewer  : ${WITH_ROOT}")
-message(STATUS "  Analysis     : ${BUILD_ANALYSIS}")
+message(STATUS "  Analysis+ROOT: ${BUILD_ANALYSIS}")
+message(STATUS "  Python bind. : ${BUILD_PYTHON}")
 message(STATUS "  Qt GUI       : ${BUILD_GUI}")
 message(STATUS "----------------------------------------------------")

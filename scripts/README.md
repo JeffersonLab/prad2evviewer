@@ -68,14 +68,29 @@ python scripts/gem_cluster_view.py <event.json> [gem_map.json] [--det N] [-o fil
 PyQt6 viewer for V1190 TDC hits from the tagger crate (ROC `0x008E`, bank
 `0xE107`). Shows a per-slot bar chart of hits/channel plus the TDC-value
 histogram for any selected channel. No matplotlib; plots are drawn with
-QPainter (numpy is the only scientific dep).
+QPainter (numpy is the only scientific dep). The bar chart auto-sizes its
+x-axis to 16 / 32 / 64 / 128 channels based on the highest channel hit.
+
+Two ways to feed it data:
+
+**Direct (preferred)** — point the viewer at an `.evio` file; the built-in
+`prad2py` pybind11 extension decodes hits in-process:
 
 ```bash
-# Extract hits from an evio file (produces a 16-byte/hit binary)
-./build/bin/tdc_dump /data/stage6/prad_023667/prad_023667.evio.00000 \
-    -b /tmp/tagger_hits.bin           # add "-n 100000" to cap events
+cmake -DBUILD_PYTHON=ON -S . -B build && cmake --build build
+export PYTHONPATH="$PWD/build/python:$PYTHONPATH"   # optional; the viewer
+                                                    # also auto-adds build/python
+python scripts/tdc_viewer.py /data/stage6/prad_023667/prad_023667.evio.00000 \
+       -n 200000          # limit number of physics events (optional)
+       --roc 0x8E         # restrict to the tagger ROC (optional)
+```
 
-# Visualise
+**Indirect (fallback)** — if you cannot build `prad2py`, use `tdc_dump -b`
+to write a flat binary and open that instead:
+
+```bash
+./build/bin/tdc_dump /data/stage6/prad_023667/prad_023667.evio.00000 \
+    -b /tmp/tagger_hits.bin -n 200000
 python scripts/tdc_viewer.py /tmp/tagger_hits.bin
 ```
 

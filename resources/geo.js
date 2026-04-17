@@ -248,16 +248,20 @@ function modVal(m){
     const d=eventChannels[key];
     if(!d)return null;
     if(mt==='pedestal')return d.pm||0;
-    // 'integral' mirrors the backend's bestPeakInWindow (clustering input):
-    // always restrict to histConfig.time_min/time_max, drop peaks below
-    // histConfig.threshold, pick the peak with the largest integral.
+    // 'integral' picks the peak with the largest integral.  Time window and
+    // threshold are honoured only when the time-cut checkbox is on, so the
+    // color map matches what the user explicitly asked for (unchecked ⇒ show
+    // the full event).  When the cut IS on, this mirrors the backend's
+    // bestPeakInWindow (clustering input).
     if(mt==='integral'){
         if(!d.pk||!d.pk.length) return null;
-        const tmin=histConfig.time_min, tmax=histConfig.time_max;
-        const thr=(histConfig.threshold!==undefined)?histConfig.threshold:0;
+        const useTcut=isTimeCut();
+        const tmin=useTcut?histConfig.time_min:undefined;
+        const tmax=useTcut?histConfig.time_max:undefined;
+        const thr=useTcut&&histConfig.threshold!==undefined?histConfig.threshold:0;
         let best=-1;
         for(const p of d.pk){
-            if(p.h<thr) continue;
+            if(thr>0 && p.h<thr) continue;
             if(tmin!==undefined && p.t<tmin) continue;
             if(tmax!==undefined && p.t>tmax) continue;
             if(p.i>best) best=p.i;
