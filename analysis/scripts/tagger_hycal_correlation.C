@@ -152,8 +152,9 @@ static bool w1156_peak(const fdec::EventData &evt,
 struct Row {
     int   t10r;                 // TDC value of T10R, always set
     int   e[N_E];               // TDC values of E49..E53, -1 if missing
-    float height;               // W1156 peak height
-    float integral;             // W1156 peak integral
+    bool  has_w1156;            // true when the W1156 FADC channel has samples
+    float height;               // W1156 peak height   (undefined if !has_w1156)
+    float integral;             // W1156 peak integral (undefined if !has_w1156)
 };
 
 } // anonymous namespace
@@ -200,12 +201,16 @@ int tagger_hycal_correlation(const char *evio_path,
     rows.reserve(1u << 20);
 
     Long64_t n_accepted = 0;
+    Long64_t n_w1156    = 0;
     while (ch.Read() == status::success) {
         if (!ch.Scan() || ch.GetEventType() != EventType::Physics) continue;
 
         int nsub = ch.GetNEvents();
         for (int i = 0; i < nsub; ++i) {
-            if (!ch.DecodeEvent(i, event, nullptr, nullptr, &tdc_evt)) continue;
+            // DecodeEvent may return false when no FADC/SSP data was decoded;
+            // the TDC container is still populated, so we ignore the return
+            // value here and rely on the TDC-hit checks below.
+            ch.DecodeEvent(i, event, nullptr, nullptr, &tdc_evt);
 
             int t0 = first_tdc(tdc_evt, TAGGER_SLOT, T10R_CH);
             if (t0 < 0) continue;
@@ -218,18 +223,27 @@ int tagger_hycal_correlation(const char *evio_path,
                 if (r.e[k] >= 0) any_e = true;
             }
             if (!any_e) continue;
-            if (!w1156_peak(event, r.height, r.integral)) continue;
+
+            // W1156 is optional — most HyCal channels sit below zero-suppression
+            // threshold on any given event, so requiring it here would throw
+            // away ~95% of otherwise-good tagger coincidences.  We keep the
+            // row either way and flag whether the HyCal sample was present;
+            // the W1156 histograms downstream only use has_w1156 rows.
+            r.has_w1156 = w1156_peak(event, r.height, r.integral);
+            if (r.has_w1156) ++n_w1156;
 
             rows.push_back(r);
             ++n_accepted;
             if (n_accepted % 100000 == 0)
-                std::cout << "  pass 1: " << n_accepted << " events collected\n";
+                std::cout << "  pass 1: " << n_accepted << " events collected"
+                          << " (W1156 so far: " << n_w1156 << ")\n";
             if (max_events > 0 && n_accepted >= max_events) goto done;
         }
     }
 done:
     ch.Close();
-    std::cout << "pass 1 done: " << n_accepted << " events accepted\n";
+    std::cout << "pass 1 done: " << n_accepted << " events accepted"
+              << " (" << n_w1156 << " with W1156 samples)\n";
     if (rows.empty()) {
         std::cerr << "no events survived initial filter — nothing to plot\n";
         return 1;
@@ -293,6 +307,7 @@ done:
         const double half = nsigma * sigma;
         for (const auto &r : rows) {
             if (r.e[k] < 0) continue;
+            if (!r.has_w1156) continue;                  // only events with HyCal data
             double dt = (double)r.t10r - (double)r.e[k];
             if (std::fabs(dt - mu) >= half) continue;
             h_height->Fill(r.height);
@@ -318,7 +333,11 @@ done:
 
     //---- terminal summary --------------------------------------------------
     std::cout << "\n=== Summary ===\n"
-              << "   pair     mu[LSB]  sigma[LSB]    n_total   n_selected   keep\n";
+              << "  n_total       = coincidences used to fill the #DeltaT plot\n"
+              << "  n_w1156_sel   = subset that also has W1156 samples AND "
+              << "passes the timing cut\n\n"
+              << "   pair     mu[LSB]  sigma[LSB]   n_total   n_w1156_sel   "
+              << "keep-of-total\n";
     for (int k = 0; k < N_E; ++k) {
         const auto &r = results[k];
         double frac = r.n_total ? 100.0 * (double)r.n_sel / r.n_total : 0.0;
