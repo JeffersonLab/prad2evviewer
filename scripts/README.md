@@ -167,20 +167,17 @@ The helper `prad2py.load_tdc_hits(path, ...)` is still available for the
 common "one-shot flat table of hits" workflow and lives on top of the
 `dec` submodule. Phase 2 will add `prad2py.det` (HyCal / GEM).
 
-## tagger_hycal_correlation.py
+### Tagger ↔ HyCal coincidence
 
-Example analysis built on top of `prad2py` + PyROOT. For each pair
-(T10R, Eₓ) with x ∈ {49…53} it fills the event-wise ΔT histogram,
-Gaussian-fits the coincidence peak, applies a ±Nσ timing cut, and
-plots the W1156 (ROC 0x8C slot 7 ch 3) peak height/integral for the
-selected events. Single-pass reader, no intermediate ROOT file.
+See `analysis/scripts/tagger_hycal_correlation.C` — a self-contained
+ROOT/ACLiC macro that builds ΔT histograms for (T10R, E49…E53) pairs,
+Gaussian-fits each coincidence peak, applies a ±Nσ timing cut, and
+plots the W1156 peak height/integral for the selected events.
 
 ```bash
-python scripts/tagger_hycal_correlation.py \
-    /data/stage6/prad_023671/prad_023671.evio.00000 \
-    -o tagger_w1156_corr.root -n 500000
+cd build
+root -l ../analysis/scripts/rootlogon.C
+.x ../analysis/scripts/tagger_hycal_correlation.C+( \
+     "/data/stage6/prad_023671/prad_023671.evio.00000", \
+     "tagger_w1156_corr.root", 500000)
 ```
-
-Outputs `tagger_w1156_corr.root` with 3×5 histograms (ΔT, height, integral
-for each Eₓ) plus a summary canvas. Channel mapping is hard-coded at the
-top of the script — edit it there if the DAQ layout changes.
