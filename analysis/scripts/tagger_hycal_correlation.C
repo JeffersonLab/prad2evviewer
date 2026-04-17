@@ -81,9 +81,19 @@ constexpr int      W1156_CH      = 3;
 constexpr int PED_WINDOW    = 10;
 constexpr int INT_HALFWIDTH = 8;
 
-// ΔT histogram defaults (in TDC LSB units, ≈ 25 ps after rol2 shift).
-constexpr int    DT_BINS  = 400;
-constexpr double DT_RANGE = 200.0;
+// Two-stage ΔT histograms, in TDC LSB units (≈ 25 ps after rol2 shift).
+//
+// Stage A ("coarse"): wide range to LOCATE the coincidence peak.  Channel-
+// to-channel offsets from cable delays can easily reach hundreds of LSB
+// (tens of ns), so a narrow initial window misses the peak entirely and
+// leaves GetMaximumBin() picking a noise bin.
+constexpr int    DT_COARSE_BINS  = 800;
+constexpr double DT_COARSE_RANGE = 4000.0;   // ±100 ns — very forgiving
+//
+// Stage B ("fine"): narrow, centred on the coarse peak, for Gaussian fit.
+constexpr int    DT_FINE_BINS    = 400;
+constexpr double DT_FINE_HALF    = 200.0;    // ±5 ns around the peak
+constexpr double DT_FIT_HALF     = 40.0;     // initial fit half-window
 
 // W1156 output histograms.
 constexpr int    H_BINS  = 200;
@@ -257,35 +267,78 @@ done:
     TCanvas *canvas = new TCanvas("summary", "tagger-W1156 correlations", 1500, 900);
     canvas->Divide(N_E, 3);
 
-    struct Result { double mu, sigma; Long64_t n_total, n_sel; };
+    struct Result { double mu, sigma; Long64_t n_total, n_sel;
+                    double dt_min, dt_max, coarse_peak; };
     std::vector<Result> results(N_E);
 
     // Reusable histograms created per pair.
     for (int k = 0; k < N_E; ++k) {
         const char *ename = E_CHANNELS[k].name;
 
-        TH1D *hdt = new TH1D(
-            TString::Format("dt_T10R_%s", ename),
-            TString::Format("#DeltaT = T10R - %s;"
-                            "tdc(T10R) - tdc(%s) [LSB];events", ename, ename),
-            DT_BINS, -DT_RANGE, DT_RANGE);
-
-        Long64_t n_total = 0;
+        // ---- Stage A: collect ΔT values + coarse histogram -----------------
+        // A std::vector lets us fill both the coarse and fine histograms
+        // without doing a second pass over `rows`, and gives us min/max for
+        // sanity-check printouts.
+        std::vector<int> dts;
+        dts.reserve(rows.size());
         for (const auto &r : rows) {
             if (r.e[k] < 0) continue;
-            hdt->Fill((double)r.t10r - (double)r.e[k]);
-            ++n_total;
+            dts.push_back(r.t10r - r.e[k]);
         }
+        const Long64_t n_total = (Long64_t)dts.size();
+        if (n_total == 0) {
+            std::cerr << "  T10R-" << ename << ": no coincidences — skipping\n";
+            results[k] = {0, 0, 0, 0, 0, 0, 0};
+            continue;
+        }
+        int dt_min = *std::min_element(dts.begin(), dts.end());
+        int dt_max = *std::max_element(dts.begin(), dts.end());
 
-        // fit Gaussian around largest bin
-        int peak_bin = hdt->GetMaximumBin();
-        double peak_x = hdt->GetXaxis()->GetBinCenter(peak_bin);
+        TH1D *h_coarse = new TH1D(
+            TString::Format("dt_T10R_%s_coarse", ename),
+            TString::Format("#DeltaT (coarse) T10R - %s;"
+                            "tdc(T10R) - tdc(%s) [LSB];events", ename, ename),
+            DT_COARSE_BINS, -DT_COARSE_RANGE, DT_COARSE_RANGE);
+        for (int dt : dts) h_coarse->Fill((double)dt);
+
+        double coarse_peak = h_coarse->GetXaxis()->GetBinCenter(
+                                 h_coarse->GetMaximumBin());
+        h_coarse->Write();
+
+        // ---- Stage B: fine histogram centred on the coarse peak -----------
+        TH1D *hdt = new TH1D(
+            TString::Format("dt_T10R_%s", ename),
+            TString::Format("#DeltaT = T10R - %s (fine);"
+                            "tdc(T10R) - tdc(%s) [LSB];events", ename, ename),
+            DT_FINE_BINS,
+            coarse_peak - DT_FINE_HALF, coarse_peak + DT_FINE_HALF);
+        for (int dt : dts) hdt->Fill((double)dt);
+
+        // Peak bin of the fine histogram (within ±DT_FINE_HALF of coarse_peak)
+        double peak_x = hdt->GetXaxis()->GetBinCenter(hdt->GetMaximumBin());
         double bw     = hdt->GetXaxis()->GetBinWidth(1);
+
         TF1 *gfit = new TF1(TString::Format("gfit_%s", ename), "gaus",
-                            peak_x - 20.0 * bw, peak_x + 20.0 * bw);
-        hdt->Fit(gfit, "RQ", "", peak_x - 20.0 * bw, peak_x + 20.0 * bw);
-        double mu    = gfit->GetParameter(1);
-        double sigma = std::max(std::fabs(gfit->GetParameter(2)), bw);
+                            peak_x - DT_FIT_HALF, peak_x + DT_FIT_HALF);
+        gfit->SetParameter(1, peak_x);
+        gfit->SetParameter(2, 5.0);          // initial σ guess: ~5 LSB
+        int fit_status = (int)hdt->Fit(gfit, "RQ", "",
+                                       peak_x - DT_FIT_HALF,
+                                       peak_x + DT_FIT_HALF);
+
+        double mu, sigma;
+        if (fit_status == 0) {
+            mu    = gfit->GetParameter(1);
+            sigma = std::fabs(gfit->GetParameter(2));
+            if (sigma < bw) sigma = bw;       // floor at one bin
+        } else {
+            // Fit failed — fall back to the histogram bin position and a
+            // broad σ so the downstream cut still captures most of the peak.
+            mu    = peak_x;
+            sigma = 10.0 * bw;
+            std::cerr << "  T10R-" << ename << ": gaussian fit did not converge,"
+                      << " using bin peak " << mu << " LSB  / σ=" << sigma << "\n";
+        }
 
         hdt->Write();
 
@@ -307,7 +360,7 @@ done:
         const double half = nsigma * sigma;
         for (const auto &r : rows) {
             if (r.e[k] < 0) continue;
-            if (!r.has_w1156) continue;                  // only events with HyCal data
+            if (!r.has_w1156) continue;
             double dt = (double)r.t10r - (double)r.e[k];
             if (std::fabs(dt - mu) >= half) continue;
             h_height->Fill(r.height);
@@ -317,7 +370,8 @@ done:
         h_height->Write();
         h_integ->Write();
 
-        results[k] = {mu, sigma, n_total, n_sel};
+        results[k] = {mu, sigma, n_total, n_sel,
+                      (double)dt_min, (double)dt_max, coarse_peak};
 
         // summary canvas
         canvas->cd(k + 1);
@@ -333,21 +387,30 @@ done:
 
     //---- terminal summary --------------------------------------------------
     std::cout << "\n=== Summary ===\n"
-              << "  n_total       = coincidences used to fill the #DeltaT plot\n"
-              << "  n_w1156_sel   = subset that also has W1156 samples AND "
-              << "passes the timing cut\n\n"
-              << "   pair     mu[LSB]  sigma[LSB]   n_total   n_w1156_sel   "
-              << "keep-of-total\n";
+              << "  n_total       coincidences used to fill the #DeltaT plot\n"
+              << "  n_w1156_sel   subset that also has W1156 samples AND\n"
+              << "                passes the timing cut\n"
+              << "  coarse_peak   bin-centre of the wide-range peak (LSB)\n"
+              << "  [dt_min,dt_max]  full range of observed #DeltaT values\n\n"
+              << "   pair    coarse_peak     mu[LSB]  sigma[LSB]      "
+              << "[dt_min, dt_max]    n_total    n_w1156_sel  keep\n";
     for (int k = 0; k < N_E; ++k) {
         const auto &r = results[k];
         double frac = r.n_total ? 100.0 * (double)r.n_sel / r.n_total : 0.0;
         std::cout << "  T10R-" << E_CHANNELS[k].name
-                  << "  " << std::setw(8) << r.mu
-                  << "   " << std::setw(8) << r.sigma
+                  << "  " << std::setw(10) << r.coarse_peak
+                  << "   " << std::setw(9) << r.mu
+                  << "   " << std::setw(9) << r.sigma
+                  << "   [" << std::setw(7) << r.dt_min
+                  << ", " << std::setw(7) << r.dt_max << "]"
                   << "   " << std::setw(9) << r.n_total
-                  << "    " << std::setw(9) << r.n_sel
+                  << "   " << std::setw(9) << r.n_sel
                   << "   " << std::setw(5) << frac << "%\n";
     }
     std::cout << "\nhistograms written to " << out_path << "\n";
+    std::cout << "each pair also gets a 'dt_T10R_<name>_coarse' histogram "
+                 "showing the ±" << (int)DT_COARSE_RANGE << " LSB range,\n"
+                 "useful for sanity-checking that the fine peak sits on the "
+                 "real coincidence.\n";
     return 0;
 }
