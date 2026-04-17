@@ -52,18 +52,21 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QFont, QPainter, QPen
+from PyQt6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPen
 from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSpinBox,
     QSplitter,
     QStatusBar,
+    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -429,6 +432,166 @@ class Histogram(QWidget):
             )
 
 
+class Heatmap2D(QWidget):
+    """2-D histogram rendered via a scaled QImage (numpy-built RGB buffer)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._counts: np.ndarray = np.zeros((0, 0), dtype=np.int64)
+        self._xedges: np.ndarray = np.zeros(0)
+        self._yedges: np.ndarray = np.zeros(0)
+        self._title = ""
+        self._xlabel = "X"
+        self._ylabel = "Y"
+        self._image: Optional[QImage] = None
+        self._rgb_buffer: Optional[np.ndarray] = None  # keep alive for QImage
+        self.setMinimumHeight(300)
+
+    def setData(self, counts: np.ndarray, xedges: np.ndarray, yedges: np.ndarray):
+        self._counts = np.asarray(counts, dtype=np.int64)
+        self._xedges = np.asarray(xedges, dtype=np.float64)
+        self._yedges = np.asarray(yedges, dtype=np.float64)
+        self._rebuild_image()
+        self.update()
+
+    def setTitle(self, title: str):
+        self._title = title
+        self.update()
+
+    def setLabels(self, xlabel: str, ylabel: str):
+        self._xlabel = xlabel
+        self._ylabel = ylabel
+        self.update()
+
+    def _rebuild_image(self):
+        n = self._counts
+        if n.size == 0 or n.sum() == 0:
+            self._image = None
+            self._rgb_buffer = None
+            return
+        cmax = max(1.0, float(n.max()))
+        # np.histogram2d returns shape (nxbins, nybins) with H[i,j] = count in
+        # (x bin i, y bin j).  We need an RGB buffer of shape (height, width, 3)
+        # where height → y-axis bins (flipped because screen y is downward) and
+        # width → x-axis bins.
+        nxbins, nybins = n.shape
+        t = n.astype(np.float64) / cmax
+        # Viridis approximation (same polynomial as geo.js PALETTES.viridis).
+        r = np.clip(-0.87 + 4.26*t - 4.85*t*t + 2.5*t*t*t, 0.0, 1.0)
+        g = np.clip(-0.03 + 0.77*t + 1.32*t*t - 1.87*t*t*t, 0.0, 1.0)
+        b = np.clip( 0.33 + 1.74*t - 4.26*t*t + 3.17*t*t*t, 0.0, 1.0)
+        # Zero bins → background grey so they don't pick up the low-t colour.
+        zero = n == 0
+        r[zero] = 0.96; g[zero] = 0.96; b[zero] = 0.96
+
+        # Transpose to (nybins, nxbins) then flip vertically.
+        r8 = (r.T[::-1] * 255).astype(np.uint8)
+        g8 = (g.T[::-1] * 255).astype(np.uint8)
+        b8 = (b.T[::-1] * 255).astype(np.uint8)
+        rgb = np.empty((nybins, nxbins, 3), dtype=np.uint8)
+        rgb[..., 0] = r8
+        rgb[..., 1] = g8
+        rgb[..., 2] = b8
+        rgb = np.ascontiguousarray(rgb)
+        self._rgb_buffer = rgb
+        self._image = QImage(
+            rgb.data, nxbins, nybins, 3 * nxbins, QImage.Format.Format_RGB888
+        )
+
+    def _plotRect(self) -> QRectF:
+        m = 50.0
+        return QRectF(m + 25, 25, self.width() - m - 40, self.height() - m - 25)
+
+    def paintEvent(self, _ev):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        p.fillRect(self.rect(), QColor(250, 250, 250))
+
+        r = self._plotRect()
+        p.setPen(QPen(QColor(60, 60, 60)))
+
+        if self._title:
+            f = QFont()
+            f.setPointSize(10); f.setBold(True)
+            p.setFont(f)
+            p.drawText(int(r.left()), int(r.top() - 6), self._title)
+
+        if self._image is None:
+            p.drawRect(r)
+            p.setPen(QColor(120, 120, 120))
+            p.drawText(r, Qt.AlignmentFlag.AlignCenter,
+                       "(no matched events — set both channels A and B)")
+            return
+
+        p.drawImage(r, self._image)
+        p.setPen(QPen(QColor(60, 60, 60)))
+        p.drawRect(r)
+
+        # tick labels
+        f = QFont(); f.setPointSize(8)
+        p.setFont(f)
+        p.setPen(QColor(80, 80, 80))
+        xe, ye = self._xedges, self._yedges
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            x = r.left() + frac * r.width()
+            xv = xe[int(round(frac * (xe.size - 1)))] if xe.size > 0 else 0
+            p.drawLine(int(x), int(r.bottom()), int(x), int(r.bottom() + 3))
+            p.drawText(int(x - 26), int(r.bottom() + 14), f"{xv:.0f}")
+        for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
+            y = r.bottom() - frac * r.height()
+            yv = ye[int(round(frac * (ye.size - 1)))] if ye.size > 0 else 0
+            p.drawLine(int(r.left() - 3), int(y), int(r.left()), int(y))
+            p.drawText(int(r.left() - 48), int(y + 4), f"{yv:.0f}")
+
+        # axis labels
+        if self._xlabel:
+            p.drawText(int(r.center().x() - 40), int(r.bottom() + 30), self._xlabel)
+        if self._ylabel:
+            p.drawText(int(r.left() - 50), int(r.top() - 8), self._ylabel)
+
+
+# ---------------------------------------------------------------------------
+# Event-wise correlation helpers
+# ---------------------------------------------------------------------------
+
+
+def _first_hits_for(hits: np.ndarray, slot: int, channel: int,
+                    edge_sel: Optional[int]) -> np.ndarray:
+    """Return a structured array with one row per event for (slot, channel).
+
+    When a channel fires multiple times within one event (multi-hit TDC),
+    we keep the earliest hit (smallest TDC value) — the usual convention for
+    timing correlations.
+    """
+    mask = (hits["slot"] == slot) & (hits["channel"] == channel)
+    if edge_sel is not None:
+        mask = mask & (hits["edge"] == edge_sel)
+    sub = hits[mask]
+    if sub.size == 0:
+        return sub
+
+    # Sort by (event_num, tdc) → the first occurrence of each event_num is the
+    # earliest hit.  np.unique keeps the first index.
+    order = np.lexsort((sub["tdc"], sub["event_num"]))
+    sub = sub[order]
+    _, first_idx = np.unique(sub["event_num"], return_index=True)
+    return sub[first_idx]
+
+
+def _match_pair(hits: np.ndarray,
+                a: Tuple[int, int], b: Tuple[int, int],
+                edge_sel: Optional[int]) -> Tuple[np.ndarray, np.ndarray]:
+    """Inner-join on event_num. Returns (tdc_a, tdc_b) aligned by event."""
+    ha = _first_hits_for(hits, a[0], a[1], edge_sel)
+    hb = _first_hits_for(hits, b[0], b[1], edge_sel)
+    if ha.size == 0 or hb.size == 0:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+    common, ia, ib = np.intersect1d(
+        ha["event_num"], hb["event_num"], return_indices=True, assume_unique=True
+    )
+    return ha["tdc"][ia].astype(np.int64), hb["tdc"][ib].astype(np.int64)
+
+
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
@@ -456,6 +619,9 @@ class TdcViewer(QMainWindow):
         self._path = path
         self._slot_ch_counts: Dict[Tuple[int, int], int] = {}
         self._current: Optional[Tuple[int, int]] = None
+        # Channel A / B for event-wise correlations (Δt, A vs B).
+        self._channel_a: Optional[Tuple[int, int]] = None
+        self._channel_b: Optional[Tuple[int, int]] = None
         self._load_max_events = max_events
         self._load_daq_config = daq_config
         self._load_roc_filter = roc_filter
@@ -489,7 +655,7 @@ class TdcViewer(QMainWindow):
         self.bins_spin.setRange(10, 2000)
         self.bins_spin.setValue(self.DEFAULT_BINS)
         self.bins_spin.setSingleStep(10)
-        self.bins_spin.valueChanged.connect(self._refresh_histogram)
+        self.bins_spin.valueChanged.connect(self._refresh)
         top.addWidget(self.bins_spin)
 
         main_layout.addLayout(top)
@@ -507,15 +673,65 @@ class TdcViewer(QMainWindow):
         rlay = QVBoxLayout(right)
         rlay.setContentsMargins(4, 4, 4, 4)
 
+        # Pair selector row (applies to Δt and A-vs-B tabs).
+        pair_row = QHBoxLayout()
+        pair_row.setSpacing(6)
+        pair_row.addWidget(QLabel("A:"))
+        self.lbl_a = QLabel("—")
+        self.lbl_a.setFrameShape(QFrame.Shape.StyledPanel)
+        self.lbl_a.setMinimumWidth(110)
+        pair_row.addWidget(self.lbl_a)
+        btn_a = QPushButton("Set A ←")
+        btn_a.setToolTip("Use the currently-selected tree channel as channel A")
+        btn_a.clicked.connect(self._set_a_from_tree)
+        pair_row.addWidget(btn_a)
+
+        pair_row.addSpacing(12)
+        pair_row.addWidget(QLabel("B:"))
+        self.lbl_b = QLabel("—")
+        self.lbl_b.setFrameShape(QFrame.Shape.StyledPanel)
+        self.lbl_b.setMinimumWidth(110)
+        pair_row.addWidget(self.lbl_b)
+        btn_b = QPushButton("Set B ←")
+        btn_b.setToolTip("Use the currently-selected tree channel as channel B")
+        btn_b.clicked.connect(self._set_b_from_tree)
+        pair_row.addWidget(btn_b)
+
+        pair_row.addSpacing(6)
+        btn_swap = QPushButton("Swap")
+        btn_swap.clicked.connect(self._swap_ab)
+        pair_row.addWidget(btn_swap)
+        btn_clear = QPushButton("Clear")
+        btn_clear.clicked.connect(self._clear_ab)
+        pair_row.addWidget(btn_clear)
+        pair_row.addStretch(1)
+        rlay.addLayout(pair_row)
+
         self.channel_bar = BarChart()
         self.channel_bar.setTitle("Hits per channel (selected slot) — click a bar")
         self.channel_bar.barClicked.connect(self._on_bar_clicked)
         rlay.addWidget(self.channel_bar)
 
+        # Tabbed plot area: single channel / Δt / A vs B.
+        self.plot_tabs = QTabWidget()
+
         self.tdc_hist = Histogram()
         self.tdc_hist.setTitle("TDC value histogram — select a channel")
         self.tdc_hist.setXLabel("TDC value (LSB = 25 ps after rol2 shift)")
-        rlay.addWidget(self.tdc_hist, 1)
+        self.plot_tabs.addTab(self.tdc_hist, "Single channel")
+
+        self.diff_hist = Histogram()
+        self.diff_hist.setTitle("Δt = A − B — set channel A and B")
+        self.diff_hist.setXLabel("tdc(A) − tdc(B)")
+        self.plot_tabs.addTab(self.diff_hist, "Δt = A − B")
+
+        self.scatter_map = Heatmap2D()
+        self.scatter_map.setTitle("tdc(A) vs tdc(B) — set channel A and B")
+        self.scatter_map.setLabels("tdc(A)", "tdc(B)")
+        self.plot_tabs.addTab(self.scatter_map, "A vs B (2D)")
+
+        self.plot_tabs.currentChanged.connect(lambda _i: self._refresh())
+        rlay.addWidget(self.plot_tabs, 1)
 
         splitter.addWidget(right)
         splitter.setStretchFactor(0, 0)
@@ -580,6 +796,10 @@ class TdcViewer(QMainWindow):
         self.tree.clear()
         self._slot_ch_counts.clear()
         self._current = None
+        # Drop stale A/B picks — the new file may not contain those channels.
+        self._channel_a = None
+        self._channel_b = None
+        self._update_ab_labels()
 
         if hits.size == 0:
             self._refresh()
@@ -656,9 +876,75 @@ class TdcViewer(QMainWindow):
                 break
         self._refresh()
 
+    # --- A / B channel pairing ------------------------------------------
+
+    def _fmt_pair(self, p: Optional[Tuple[int, int]]) -> str:
+        return "—" if p is None else f"slot {p[0]}, ch {p[1]}"
+
+    def _update_ab_labels(self):
+        self.lbl_a.setText(self._fmt_pair(self._channel_a))
+        self.lbl_b.setText(self._fmt_pair(self._channel_b))
+
+    def _tree_channel_selection(self) -> Optional[Tuple[int, int]]:
+        items = self.tree.selectedItems()
+        if not items:
+            return None
+        data = items[0].data(0, Qt.ItemDataRole.UserRole)
+        if not data or data[0] != "channel":
+            return None
+        return (data[1], data[2])
+
+    def _set_a_from_tree(self):
+        sel = self._tree_channel_selection()
+        if sel is None:
+            QMessageBox.information(
+                self, "Pick a channel",
+                "Select a CHANNEL node in the tree (expand a slot first), "
+                "then click Set A."
+            )
+            return
+        self._channel_a = sel
+        self._update_ab_labels()
+        self._refresh()
+
+    def _set_b_from_tree(self):
+        sel = self._tree_channel_selection()
+        if sel is None:
+            QMessageBox.information(
+                self, "Pick a channel",
+                "Select a CHANNEL node in the tree (expand a slot first), "
+                "then click Set B."
+            )
+            return
+        self._channel_b = sel
+        self._update_ab_labels()
+        self._refresh()
+
+    def _swap_ab(self):
+        self._channel_a, self._channel_b = self._channel_b, self._channel_a
+        self._update_ab_labels()
+        self._refresh()
+
+    def _clear_ab(self):
+        self._channel_a = None
+        self._channel_b = None
+        self._update_ab_labels()
+        self._refresh()
+
+    # --- top-level refresh ----------------------------------------------
+
     def _refresh(self):
         self._refresh_bar()
-        self._refresh_histogram()
+        # Only repaint the currently visible plot tab — the others will
+        # refresh when the user clicks into them (QTabWidget currentChanged
+        # is wired to _refresh, so they're up-to-date on demand).
+        tab = self.plot_tabs.currentIndex() if hasattr(self, "plot_tabs") else 0
+        if tab == 0:
+            self._refresh_histogram()
+        elif tab == 1:
+            self._refresh_diff()
+        elif tab == 2:
+            self._refresh_scatter()
 
     def _refresh_bar(self):
         hits = self._hits
@@ -741,6 +1027,96 @@ class TdcViewer(QMainWindow):
         self.statusBar().showMessage(
             f"slot={slot} ch={ch}  n={sub.size:,}  "
             f"min={tmin}  max={tmax}  mean={tdc_vals.mean():.2f}"
+        )
+
+    def _refresh_diff(self):
+        """Event-wise Δt = tdc(A) − tdc(B) histogram."""
+        a, b = self._channel_a, self._channel_b
+        if self._hits.size == 0 or a is None or b is None:
+            self.diff_hist.setData(np.zeros(0), np.zeros(0))
+            self.diff_hist.setTitle(
+                "Δt = A − B — set both channel A and channel B"
+            )
+            return
+        if a == b:
+            self.diff_hist.setData(np.zeros(0), np.zeros(0))
+            self.diff_hist.setTitle("Δt = A − B — A and B must differ")
+            return
+
+        edge_sel = self._current_edge_mask()
+        t_a, t_b = _match_pair(self._hits, a, b, edge_sel)
+        n = t_a.size
+        if n == 0:
+            self.diff_hist.setData(np.zeros(0), np.zeros(0))
+            self.diff_hist.setTitle(
+                f"Δt = A − B — 0 matched events "
+                f"(A={self._fmt_pair(a)}, B={self._fmt_pair(b)})"
+            )
+            return
+
+        dt = t_a - t_b
+        dmin = int(dt.min())
+        dmax = int(dt.max())
+        if dmax <= dmin:
+            dmax = dmin + 1
+        nbins = self.bins_spin.value()
+        counts, edges = np.histogram(dt, bins=nbins, range=(dmin, dmax + 1))
+        self.diff_hist.setData(counts, edges)
+        self.diff_hist.setXLabel("tdc(A) − tdc(B)")
+        self.diff_hist.setTitle(
+            f"Δt = A − B  (A={self._fmt_pair(a)},  B={self._fmt_pair(b)}) "
+            f"— {n:,} events, mean={dt.mean():.1f}, rms={dt.std():.1f}"
+        )
+        self.statusBar().showMessage(
+            f"Δt: {n:,} matched events  "
+            f"min={dmin}  max={dmax}  mean={dt.mean():.2f}  rms={dt.std():.2f}"
+        )
+
+    def _refresh_scatter(self):
+        """Event-wise 2-D histogram of tdc(A) vs tdc(B)."""
+        a, b = self._channel_a, self._channel_b
+        if self._hits.size == 0 or a is None or b is None:
+            self.scatter_map.setData(np.zeros((0, 0)), np.zeros(0), np.zeros(0))
+            self.scatter_map.setTitle(
+                "tdc(A) vs tdc(B) — set both channel A and channel B"
+            )
+            return
+        if a == b:
+            self.scatter_map.setData(np.zeros((0, 0)), np.zeros(0), np.zeros(0))
+            self.scatter_map.setTitle("tdc(A) vs tdc(B) — A and B must differ")
+            return
+
+        edge_sel = self._current_edge_mask()
+        t_a, t_b = _match_pair(self._hits, a, b, edge_sel)
+        n = t_a.size
+        if n == 0:
+            self.scatter_map.setData(np.zeros((0, 0)), np.zeros(0), np.zeros(0))
+            self.scatter_map.setTitle(
+                f"tdc(A) vs tdc(B) — 0 matched events "
+                f"(A={self._fmt_pair(a)}, B={self._fmt_pair(b)})"
+            )
+            return
+
+        nbins = self.bins_spin.value()
+        amin, amax = int(t_a.min()), int(t_a.max())
+        bmin, bmax = int(t_b.min()), int(t_b.max())
+        if amax <= amin: amax = amin + 1
+        if bmax <= bmin: bmax = bmin + 1
+        counts, xedges, yedges = np.histogram2d(
+            t_a, t_b, bins=nbins, range=[[amin, amax + 1], [bmin, bmax + 1]]
+        )
+        self.scatter_map.setData(counts, xedges, yedges)
+        self.scatter_map.setLabels(
+            f"tdc(A) — {self._fmt_pair(a)}",
+            f"tdc(B) — {self._fmt_pair(b)}",
+        )
+        rho = float(np.corrcoef(t_a, t_b)[0, 1]) if n > 1 else 0.0
+        self.scatter_map.setTitle(
+            f"tdc(A) vs tdc(B)  — {n:,} events, corr ρ={rho:+.3f}"
+        )
+        self.statusBar().showMessage(
+            f"2D: {n:,} events  "
+            f"A:[{amin},{amax}]  B:[{bmin},{bmax}]  ρ={rho:+.3f}"
         )
 
 
