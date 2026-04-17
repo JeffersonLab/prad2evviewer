@@ -603,6 +603,29 @@ bool EvChannel::DecodeEventInfo(int i, fdec::EventInfo &info) const
     return true;
 }
 
+// === TDC-only fast path =====================================================
+// Decodes only the 0xE107 banks, leaving FADC/SSP/VTP untouched.  Used by
+// tagger timing analyses (scripts/tdc_viewer.py, ROOT macros) where the
+// full DecodeEvent() is ~5–10× more expensive than we need.
+bool EvChannel::DecodeEventTdc(int i,
+                               fdec::EventInfo &info,
+                               tdc::TdcEventData &tdc_evt) const
+{
+    tdc_evt.clear();
+    if (!DecodeEventInfo(i, info)) return false;
+
+    if (config.tdc_bank_tag == 0) return true;  // no TDC configured — info only
+
+    for (const auto &n : nodes) {
+        if (n.tag != config.tdc_bank_tag) continue;
+        if (n.type != DATA_UINT32)        continue;
+        if (n.data_words == 0)            continue;
+        uint32_t roc_tag = (n.parent >= 0) ? nodes[n.parent].tag : 0;
+        tdc::TdcDecoder::DecodeRoc(GetData(n), n.data_words, roc_tag, tdc_evt);
+    }
+    return true;
+}
+
 // === Control event time extraction ==========================================
 
 uint32_t EvChannel::GetControlTime() const

@@ -205,8 +205,20 @@ def load_hits_from_evio(
     max_events: int = 0,
     daq_config: str = "",
     roc_filter: int = -1,
+    progress=None,           # callable(events_seen, hits_seen) -> bool
+    progress_every: int = 10000,
 ) -> np.ndarray:
-    """Decode TDC hits directly from an evio file via prad2py."""
+    """Event-wise loop that extracts only the TDC bank from an evio file.
+
+    Drives the per-event decode from Python, calling
+    ``EvChannel.decode_event_tdc`` once per physics sub-event.  No FADC /
+    SSP / VTP decoding is performed — typically 5-10× faster than the
+    full-event path.
+
+    ``progress(events_seen, hits_seen)`` is invoked every
+    ``progress_every`` physics events.  If it returns False, the loop
+    stops early and the collected hits are returned.
+    """
     if not HAVE_PRAD2PY:
         raise RuntimeError(
             "prad2py module not available "
@@ -215,12 +227,86 @@ def load_hits_from_evio(
             "    cmake -DBUILD_PYTHON=ON -S . -B build && cmake --build build\n"
             "and add build/python/ to PYTHONPATH."
         )
-    return prad2py.load_tdc_hits(
-        path,
-        daq_config=daq_config,
-        max_events=int(max_events),
-        roc_filter=int(roc_filter),
-    )
+    dec = prad2py.dec
+
+    cfg = dec.load_daq_config(daq_config)
+    ch  = dec.EvChannel()
+    ch.set_config(cfg)
+    st = ch.open(path)
+    if st != dec.Status.success:
+        raise RuntimeError(f"cannot open {path}: {st}")
+
+    # Accumulate per-event batches as (event_num, trigger_bits, hits_array).
+    # We convert the collected lists into one structured numpy array at the
+    # end — cheap relative to the decoding itself.
+    ev_nums_chunks = []
+    trig_chunks    = []
+    hits_chunks    = []
+
+    n_physics = 0
+    stop_requested = False
+
+    while ch.read() == dec.Status.success:
+        if not ch.scan():
+            continue
+        if ch.get_event_type() != dec.EventType.Physics:
+            continue
+
+        for i in range(ch.get_n_events()):
+            ok, info, tdc_evt = ch.decode_event_tdc(i)
+            if not ok:
+                continue
+            n = tdc_evt.n_hits
+            if n > 0:
+                hits = tdc_evt.hits_numpy   # structured array, length n
+                if roc_filter >= 0:
+                    hits = hits[hits["roc_tag"] == roc_filter]
+                    n = hits.size
+                if n > 0:
+                    hits_chunks.append(hits)
+                    ev_nums_chunks.append(
+                        np.full(n, info.event_number, dtype=np.uint32))
+                    trig_chunks.append(
+                        np.full(n, info.trigger_bits, dtype=np.uint32))
+
+            n_physics += 1
+            if max_events and n_physics >= max_events:
+                stop_requested = True
+                break
+            if progress is not None and (n_physics % progress_every) == 0:
+                total_hits = sum(h.size for h in hits_chunks)
+                keep = progress(n_physics, total_hits)
+                if keep is False:
+                    stop_requested = True
+                    break
+
+        if stop_requested:
+            break
+
+    ch.close()
+
+    # Final "we're done" progress tick.
+    if progress is not None:
+        total_hits = sum(h.size for h in hits_chunks)
+        progress(n_physics, total_hits)
+
+    if not hits_chunks:
+        return np.zeros(0, dtype=RECORD_DTYPE)
+
+    # Concatenate into parallel flat arrays, then assemble the structured
+    # record dtype expected by the rest of the viewer.
+    ev_nums = np.concatenate(ev_nums_chunks)
+    trigs   = np.concatenate(trig_chunks)
+    hits    = np.concatenate(hits_chunks)
+    out = np.empty(hits.size, dtype=RECORD_DTYPE)
+    out["event_num"]    = ev_nums
+    out["trigger_bits"] = trigs
+    out["roc_tag"]      = hits["roc_tag"]
+    out["slot"]         = hits["slot"]
+    out["channel"]      = hits["channel"]
+    out["edge"]         = hits["edge"]
+    out["tdc"]          = hits["value"]
+    return out
 
 
 def round_up_channels(max_ch: int) -> int:
@@ -614,16 +700,18 @@ class Heatmap2D(QWidget):
 
 
 class LoadWorker(QObject):
-    """Calls ``load_hits_from_evio`` on a worker thread and signals back.
+    """Drives ``load_hits_from_evio`` on a worker thread.
 
-    We can't drive real progress percentage through this path — ``prad2py``'s
-    ``load_tdc_hits`` is a single blocking C++ call — so the accompanying UI
-    shows an indeterminate busy indicator.  The worker simply emits once
-    when the load succeeds or fails.
+    The loop inside ``load_hits_from_evio`` is Python, which calls the
+    ``prad2py`` per-event fast path.  That gives us two nice properties
+    versus the previous monolithic C++ helper: (a) real progress updates
+    every N events, and (b) the user can cancel the load by pressing
+    the progress dialog's Cancel button.
     """
 
-    finished = pyqtSignal(object)   # numpy ndarray
-    failed   = pyqtSignal(str)
+    finished   = pyqtSignal(object)         # numpy ndarray
+    failed     = pyqtSignal(str)
+    progressed = pyqtSignal(int, int)       # (events_seen, hits_seen)
 
     def __init__(self, path: str, max_events: int,
                  daq_config: str, roc_filter: int):
@@ -632,6 +720,17 @@ class LoadWorker(QObject):
         self._max = max_events
         self._daq = daq_config
         self._roc = roc_filter
+        self._cancel = False
+
+    def request_cancel(self):
+        """Flag the loop to stop at its next progress-check point."""
+        self._cancel = True
+
+    # --- called from the worker thread ---------------------------------
+
+    def _progress_cb(self, events: int, hits: int) -> bool:
+        self.progressed.emit(int(events), int(hits))
+        return not self._cancel
 
     def run(self):
         try:
@@ -640,6 +739,8 @@ class LoadWorker(QObject):
                 max_events=self._max,
                 daq_config=self._daq,
                 roc_filter=self._roc,
+                progress=self._progress_cb,
+                progress_every=5000,
             )
         except Exception as exc:                  # noqa: BLE001
             self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -1078,15 +1179,23 @@ class TdcViewer(QMainWindow):
 
         self.statusBar().showMessage(f"Loading {path}…")
 
-        # Indeterminate busy dialog (min=max=0 renders a "working" bar).
-        # Shown after 400 ms so instant-loaded files don't flash it.
+        # Grey out the main GUI so the user can't interact with stale data
+        # (tree clicks, A/B selection, etc.) while the loader runs.
+        # Top-level dialogs stay responsive because they're separate windows.
+        self.centralWidget().setEnabled(False)
+        self.menuBar().setEnabled(False)
+
+        # Determinate progress dialog — live updates from the worker.
+        # ``max`` starts at the user's --max-events cap (or a round 1M
+        # fallback); the worker raises it on the fly if we run past it.
+        pmax = int(self._load_max_events) if self._load_max_events > 0 else 1_000_000
         dlg = QProgressDialog(
-            f"Decoding {os.path.basename(path)} …", None, 0, 0, self,
+            f"Decoding {os.path.basename(path)} …", "Cancel",
+            0, pmax, self,
         )
         dlg.setWindowTitle("Loading")
         dlg.setWindowModality(Qt.WindowModality.WindowModal)
-        dlg.setMinimumDuration(400)
-        dlg.setCancelButton(None)          # load_tdc_hits can't be interrupted
+        dlg.setMinimumDuration(300)
         dlg.setAutoClose(True)
         dlg.setValue(0)
 
@@ -1096,11 +1205,25 @@ class TdcViewer(QMainWindow):
         )
         thread = QThread(self)
         worker.moveToThread(thread)
+
+        # Live progress → dialog value + label text.
+        def _on_progress(events: int, hits: int):
+            if dlg.maximum() > 0 and events > dlg.maximum():
+                dlg.setMaximum(events * 2)
+            dlg.setValue(events)
+            dlg.setLabelText(
+                f"Decoding {os.path.basename(path)}\n"
+                f"Events: {events:,}   Hits: {hits:,}"
+            )
+
         thread.started.connect(worker.run)
+        worker.progressed.connect(_on_progress)
         worker.finished.connect(
             lambda hits: self._on_load_finished(path, hits))
         worker.failed.connect(
             lambda msg: self._on_load_failed(path, msg))
+        # Cancel button → ask the worker to stop at the next progress tick.
+        dlg.canceled.connect(worker.request_cancel)
         # Tear down the thread whichever way the worker exits.
         worker.finished.connect(thread.quit)
         worker.failed.connect(thread.quit)
@@ -1118,25 +1241,40 @@ class TdcViewer(QMainWindow):
     # --- load callbacks / cancellation -----------------------------------
 
     def _cancel_load(self):
-        """Invalidate any load in flight. We can't stop the C++ call, but we
-        won't apply its result when it eventually returns."""
+        """Invalidate any load in flight. The worker may still be mid-loop;
+        its eventual completion signal will see a stale token and no-op."""
         self._load_token = None
+        if getattr(self, "_load_worker", None) is not None:
+            try: self._load_worker.request_cancel()
+            except Exception: pass
         if getattr(self, "_load_dialog", None) is not None:
             try: self._load_dialog.close()
             except Exception: pass
             self._load_dialog = None
+        self._restore_ui()
+
+    def _restore_ui(self):
+        """Re-enable the main window after a load finishes / fails / cancels."""
+        try:
+            self.centralWidget().setEnabled(True)
+            self.menuBar().setEnabled(True)
+        except Exception:
+            pass
 
     def _on_load_finished(self, path: str, hits: np.ndarray):
         if self._load_token != path:
+            self._restore_ui()
             return                          # superseded by a later load()
         self._hits = hits
         self._path = path
         self._load_token = None
         self._rebuild_index()
         self.statusBar().showMessage(f"Loaded {hits.size:,} hits from {path}")
+        self._restore_ui()
 
     def _on_load_failed(self, path: str, msg: str):
         if self._load_token != path:
+            self._restore_ui()
             return
         self._load_token = None
         show_error_dialog(
@@ -1146,6 +1284,7 @@ class TdcViewer(QMainWindow):
             details=msg,
         )
         self.statusBar().showMessage("")
+        self._restore_ui()
 
     # --- indexing --------------------------------------------------------
 

@@ -334,6 +334,33 @@ void bind_tdc(py::module_ &m)
                 return e.hits[i];
             },
             py::return_value_policy::reference_internal)
+        .def_property_readonly("hits_numpy",
+            [](const tdc::TdcEventData &e) {
+                // Bulk accessor used by tight Python loops: returns the
+                // first n_hits entries of the hits[] buffer as a numpy
+                // structured array (copy).  Layout matches the in-memory
+                // tdc::TdcHit struct exactly — 12 bytes per row, with one
+                // byte of padding between ``edge`` and ``value`` so the
+                // uint32 stays 4-byte aligned.
+                py::list fields;
+                fields.append(py::make_tuple("roc_tag", "<u4"));
+                fields.append(py::make_tuple("slot",    "u1"));
+                fields.append(py::make_tuple("channel", "u1"));
+                fields.append(py::make_tuple("edge",    "u1"));
+                fields.append(py::make_tuple("_pad",    "u1"));
+                fields.append(py::make_tuple("value",   "<u4"));
+                py::dtype dt = py::dtype::from_args(fields);
+                // Pass the buffer address; py::array copies when no base
+                // handle is given, so the returned array is independent of
+                // the TdcEventData (safe across the next decode call).
+                const void *src = (e.n_hits > 0) ? (const void*)e.hits
+                                                  : nullptr;
+                return py::array(dt, (py::ssize_t)e.n_hits, src);
+            },
+            "Hits as a numpy structured array (fresh copy, length n_hits).\n"
+            "Fields: roc_tag <u4, slot u1, channel u1, edge u1, _pad u1, "
+            "value <u4.  Use this for bulk per-event loops to avoid "
+            "per-attribute Python-to-C++ call overhead.")
         .def("clear", &tdc::TdcEventData::clear);
 }
 
@@ -455,6 +482,23 @@ void bind_channel(py::module_ &m)
             },
             py::arg("i") = 0,
             "Fast-path: return EventInfo without decoding detector data, or None.")
+        .def("decode_event_tdc",
+            [](const evc::EvChannel &self, int i) {
+                fdec::EventInfo info;
+                auto tdc_evt = std::make_shared<tdc::TdcEventData>();
+                bool ok;
+                {
+                    py::gil_scoped_release rel;
+                    ok = self.DecodeEventTdc(i, info, *tdc_evt);
+                }
+                return py::make_tuple(ok, info, tdc_evt);
+            },
+            py::arg("i") = 0,
+            "Fast-path: decode ONLY the 0xE107 TDC bank plus event metadata.\n"
+            "Returns (ok: bool, info: EventInfo, tdc: TdcEventData).  "
+            "5–10× faster than decode_event() when only tagger timing is "
+            "needed.  Use this inside a per-event Python loop for TDC-only "
+            "analyses.")
         .def("decode_event",
             [](const evc::EvChannel &self, int i,
                bool with_ssp, bool with_vtp, bool with_tdc) -> py::dict {

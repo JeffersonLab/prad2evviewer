@@ -110,6 +110,20 @@ public:
     // Returns true on success.  Requires Scan() to have been called.
     bool DecodeEventInfo(int i, fdec::EventInfo &info) const;
 
+    // Fast path: decode ONLY the 0xE107 V1190 TDC banks plus the event
+    // metadata that DecodeEventInfo() returns.  Skips FADC250, SSP, and VTP
+    // dispatch entirely — the typical 5-10× speedup over DecodeEvent() when
+    // only tagger timing is needed.
+    //
+    // On return, ``tdc_evt`` holds the flattened hit list for this event;
+    // callers iterate `tdc_evt.hits[0 .. tdc_evt.n_hits)`.
+    //
+    // Returns true on success.  Requires Scan() to have been called and
+    // DaqConfig::tdc_bank_tag to be non-zero.
+    bool DecodeEventTdc(int i,
+                        fdec::EventInfo &info,
+                        tdc::TdcEventData &tdc_evt) const;
+
     // --- Control event extraction (Prestart/Go/End) -------------------------
 
     // Extract unix timestamp from PRESTART or GO event.
