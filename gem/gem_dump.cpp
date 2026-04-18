@@ -733,7 +733,9 @@ static void usage(const char *prog)
         << "  -G, --gem-map <file>       GEM map file (default: gem_map.json)\n"
         << "  -P, --gem-ped <file>       GEM pedestal file (required for full-readout data)\n"
         << "  -o, --output <file>        Output file (ped mode, default: gem_ped.json)\n"
-        << "  -n, --num-events <N>       Max physics events (default: 10, 0=all for ped)\n"
+        << "  -n, --num-events <N>       Max physics events (0 = no cap).  Default:\n"
+        << "                             10 for summary/hits/raw/clusters,\n"
+        << "                             0 (all) for ped,  1 for evdump.\n"
         << "  -t, --trigger-bit <bit>    Trigger bit filter (-1=all, default)\n"
         << "  -e, --event <N>            Dump only physics event N (1-based)\n"
         << "  -z, --zero-sup <sigma>     Override zero-suppression threshold (default: from gem_map)\n"
@@ -758,7 +760,10 @@ int main(int argc, char *argv[])
     std::string output_file = "gem_ped.json";
     std::string mode = "summary";
     std::string filter_expr;
-    int max_events  = 10;
+    // max_events: -1 sentinel = "user didn't pass -n".  Each mode applies
+    // its own default below (summary/raw/hits/clusters → 10, ped → 0 =
+    // all, evdump → 1).  0 from the user means "no cap".
+    int max_events  = -1;
     int trigger_bit = -1;   // -1 = accept all
     int target_event = 0;   // 0 = disabled
     float zerosup_override = -1.f;  // <0 = use gem_map default
@@ -805,22 +810,29 @@ int main(int argc, char *argv[])
     if (optind >= argc) { usage(argv[0]); return 1; }
     std::string evio_file = argv[optind];
 
-    // ped mode defaults to all events
-    if (mode == "ped" && max_events == 10)
-        max_events = 0;
+    // Per-mode default for max_events when the user didn't pass -n.
+    //   ped        → 0 = all events (pedestals accumulate across run)
+    //   evdump     → 1 = dump one matching event (overridden below)
+    //   everything → 10 (keep terminal tables short)
+    if (max_events < 0) {
+        if (mode == "ped")     max_events = 0;
+        else if (mode == "evdump") max_events = 1;
+        else                   max_events = 10;
+    }
 
-    // evdump mode: dump first N events passing filter
-    //   default: 1 event;  -n K: K events;  -n 0: all matching events
-    //   -e N overrides: dump that specific event regardless of filter
-    //   -f <filter>: custom APV-based filter (default: require 2D hits)
+    // evdump mode: dump first N events passing filter.
+    //   -n K (K>0): dump up to K matching events
+    //   -n 0      : dump every matching event
+    //   -e N      : dump only physics event N, ignoring filter
+    //   -f <expr> : custom APV/cluster filter (default: require 2D hits)
     int evdump_limit = 1;
     int evdump_count = 0;
     EvdumpFilter evdump_filter;
     bool has_evdump_filter = false;
     if (mode == "evdump") {
         if (target_event == 0) {
-            evdump_limit = (max_events == 10) ? 1 : max_events;
-            max_events = 0;   // let evdump_limit control the loop
+            evdump_limit = max_events;    // 0 means "all matching"
+            max_events = 0;               // let evdump_limit control the loop
         }
         if (output_file == "gem_ped.json")
             output_file = "gem_event.json";
