@@ -1,0 +1,70 @@
+# Source this file to set up the PRad2 environment (csh/tcsh).
+#   source <prefix>/bin/setup.csh
+#
+# PRAD2_DIR is resolved in this order:
+#   1. $PRAD2_DIR already set by the caller (explicit override — e.g. a
+#      site wrapper that sources this file from inside another script).
+#   2. tcsh $_ self-detection — works when this file is sourced directly
+#      from the shell prompt, but not under nested `source`, because csh
+#      has no equivalent of bash's BASH_SOURCE[0].  We verify the last
+#      word of $_ actually refers to a file called "setup.csh" before
+#      trusting it, so a wrapper that sources us doesn't accidentally
+#      give us its own path.
+#   3. Install-time prefix baked in by CMake — picked up from
+#      @CMAKE_INSTALL_PREFIX@, substituted at install time.
+#
+# Users normally don't have to think about this: direct sources hit (2),
+# wrapper-script sources fall through to (3), and anyone who moved the
+# install tree can override with (1) by setting PRAD2_DIR first.
+
+if ( ! $?PRAD2_DIR ) then
+    set _src = ( $_ )
+    set _setup_path = ""
+    # Try $_ only if the tail of its last word is literally "setup.csh".
+    # This filters out the nested-source case where $_ holds the command
+    # that started the outer wrapper (e.g. "source prad2_setup.csh").
+    if ( $#_src > 1 ) then
+        set _cand = "$_src[$#_src]"
+        if ( "$_cand:t" == "setup.csh" ) then
+            set _setup_path = "$_cand"
+        endif
+        unset _cand
+    endif
+    unset _src
+
+    if ( "$_setup_path" != "" ) then
+        set _setup_dir = `dirname "$_setup_path"`
+        setenv PRAD2_DIR `cd "$_setup_dir/.." && pwd`
+        unset _setup_dir
+    else
+        # Fall back to the install-time prefix.  If the install tree has
+        # been moved since `make install`, the caller must `setenv
+        # PRAD2_DIR <new_prefix>` before sourcing this file.
+        setenv PRAD2_DIR "@CMAKE_INSTALL_PREFIX@"
+    endif
+    unset _setup_path
+endif
+
+if ( $?PRAD2_DIR ) then
+    if ( $?PATH ) then
+        setenv PATH "${PRAD2_DIR}/bin:${PATH}"
+    else
+        setenv PATH "${PRAD2_DIR}/bin"
+    endif
+    # Prepend both lib64 and lib — evio + prad2py land in lib64 on RHEL-
+    # family systems (GNUInstallDirs default), our static libs land in
+    # lib.  Listing both keeps the install layout tolerant of either
+    # convention.
+    if ( $?LD_LIBRARY_PATH ) then
+        setenv LD_LIBRARY_PATH "${PRAD2_DIR}/lib64:${PRAD2_DIR}/lib:${LD_LIBRARY_PATH}"
+    else
+        setenv LD_LIBRARY_PATH "${PRAD2_DIR}/lib64:${PRAD2_DIR}/lib"
+    endif
+    if ( $?PYTHONPATH ) then
+        setenv PYTHONPATH "${PRAD2_DIR}/lib64/prad2py:${PRAD2_DIR}/lib/prad2py:${PYTHONPATH}"
+    else
+        setenv PYTHONPATH "${PRAD2_DIR}/lib64/prad2py:${PRAD2_DIR}/lib/prad2py"
+    endif
+    setenv PRAD2_DATABASE_DIR "${PRAD2_DIR}/share/prad2evviewer/database"
+    setenv PRAD2_RESOURCE_DIR "${PRAD2_DIR}/share/prad2evviewer/resources"
+endif

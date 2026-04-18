@@ -207,7 +207,15 @@ endif()
 
 install(DIRECTORY database/  DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/database)
 install(DIRECTORY resources/ DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/resources)
-install(FILES scripts/setup.sh scripts/setup.csh
+
+# setup.csh is generated from scripts/setup.csh.in so @CMAKE_INSTALL_PREFIX@
+# can be substituted — csh lacks a BASH_SOURCE equivalent, so the script
+# can't reliably find itself under nested `source`; the baked-in prefix
+# is the fallback when self-detection fails.  setup.sh uses BASH_SOURCE
+# and doesn't need this treatment.
+configure_file(${CMAKE_SOURCE_DIR}/scripts/setup.csh.in
+    ${CMAKE_BINARY_DIR}/bin/setup.csh @ONLY)
+install(FILES scripts/setup.sh ${CMAKE_BINARY_DIR}/bin/setup.csh
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ---------------------------------------------------------------------------
