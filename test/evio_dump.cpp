@@ -23,6 +23,7 @@
 #include <getopt.h>
 #include <bitset>
 #include <cstdlib>
+#include <ctime>
 
 using namespace evc;
 
@@ -298,12 +299,20 @@ static int doTags(EvChannel &ch)
 }
 
 // --- mode: epics ------------------------------------------------------------
-static int doEpics(EvChannel &ch)
+// In PRad-II these are SYNC events wrapping EPICS + an absolute-time / live-
+// time HEAD bank (0xE112 in this DAQ config).  Dumps:
+//   - bank tree of each record
+//   - raw words + CODA-style decode of every non-string leaf bank
+//   - first N bytes of each string bank (EPICS payload)
+//
+// `max_events=0` means unlimited; otherwise stop after that many records.
+static int doEpics(EvChannel &ch, int max_events)
 {
     int count = 0, record = 0;
 
     while (ch.Read() == status::success) {
         record++;
+        if (max_events > 0 && count >= max_events) break;
         if (!ch.Scan()) continue;
 
         auto hdr = ch.GetEvHeader();
@@ -326,13 +335,68 @@ static int doEpics(EvChannel &ch)
         if (!is_epics) continue;
 
         count++;
-        std::cout << "--- EPICS record " << count
+        std::cout << "--- SYNC/EPICS record " << count
                   << " (file record " << record
                   << ", tag=" << hex(hdr.tag)
                   << ", num=" << hdr.num << ") ---\n";
 
         // print tree structure
         ch.PrintTree(std::cout);
+
+        // Dump every non-string leaf bank inside this SYNC event.  The 0xE112
+        // HEAD bank is 5 words in this run — the CODA control-event header
+        // layout is [type|0x01|nwords, unix_time, A, B, ...], so d[1] is the
+        // absolute unix time and d[2..] usually hold run/type or live-time
+        // counters.  Print raw words + a best-effort decode so the exact
+        // format is easy to confirm from the data.
+        std::cout << "\n  Non-string data banks (raw + decoded):\n";
+        for (auto &n : ch.GetNodes()) {
+            if (n.type == DATA_CHARSTAR8 || n.type == DATA_CHAR8) continue;
+            if (IsContainer(n.type)) continue;
+            if (n.data_words == 0) continue;
+
+            const uint32_t *d = ch.GetData(n);
+            std::cout << "    tag=" << hex(n.tag)
+                      << " type=" << TypeName(n.type)
+                      << " words=" << n.data_words << "\n";
+
+            // raw hex dump (up to 12 words — enough for 5-word HEAD bank).
+            std::cout << "      raw:";
+            size_t nshow = std::min<size_t>(n.data_words, 12);
+            for (size_t i = 0; i < nshow; ++i)
+                std::cout << " " << std::hex << std::setw(8) << std::setfill('0')
+                          << d[i] << std::setfill(' ') << std::dec;
+            if (n.data_words > nshow) std::cout << " ...";
+            std::cout << "\n";
+
+            // CODA-style decode: word 0 is the [event_type|0x01|nwords] header,
+            // word 1 is a 32-bit unix time, words 2+ are the payload counters.
+            if (n.data_words >= 2) {
+                uint32_t hd = d[0];
+                uint32_t ev_type = (hd >> 24) & 0xFF;
+                uint32_t sub_id  = (hd >> 16) & 0xFF;
+                uint32_t nw      =  hd        & 0xFFFF;
+                std::cout << "      d[0]=0x" << std::hex << std::setw(8)
+                          << std::setfill('0') << hd << std::setfill(' ')
+                          << std::dec
+                          << "  (event_type=0x" << std::hex << ev_type
+                          << ", sub_id=0x" << sub_id << ", nwords=" << std::dec
+                          << nw << ")\n";
+
+                time_t t = static_cast<time_t>(d[1]);
+                char tbuf[64] = "";
+                std::tm *gm = std::gmtime(&t);
+                if (gm) std::strftime(tbuf, sizeof(tbuf), "%Y-%m-%d %H:%M:%S", gm);
+                std::cout << "      d[1]=" << d[1] << " (unix time, "
+                          << tbuf << " UTC)\n";
+
+                for (size_t i = 2; i < n.data_words; ++i)
+                    std::cout << "      d[" << i << "]=" << d[i]
+                              << " (0x" << std::hex << std::setw(8)
+                              << std::setfill('0') << d[i] << std::setfill(' ')
+                              << std::dec << ")\n";
+            }
+        }
 
         // extract and print all string data
         for (auto &n : ch.GetNodes()) {
@@ -345,8 +409,10 @@ static int doEpics(EvChannel &ch)
                 std::cout << "\n  [String data from tag=" << hex(n.tag)
                           << ", " << len << " bytes]:\n";
 
-                // print first 2000 chars
-                size_t show = std::min(len, size_t(2000));
+                // first ~800 chars — enough to see several channel lines
+                // without flooding the terminal.  Full payload is at offset 0
+                // in the bank if callers want to re-dump it.
+                size_t show = std::min(len, size_t(800));
                 std::string text(raw, show);
                 std::cout << text;
                 if (show < len) std::cout << "\n  ... (" << len - show << " more bytes)";
@@ -356,7 +422,11 @@ static int doEpics(EvChannel &ch)
         std::cout << "\n";
     }
 
-    std::cout << "Found " << count << " EPICS record(s) in " << record << " total records.\n";
+    std::cout << "Printed " << count << " SYNC/EPICS record(s)"
+              << " (scanned " << record << " total records)";
+    if (max_events > 0 && count >= max_events)
+        std::cout << "; stopped at -n limit";
+    std::cout << ".\n";
     return 0;
 }
 
@@ -1171,7 +1241,7 @@ int main(int argc, char *argv[])
     int rc;
     if      (mode == "tree")       rc = doTree(ch, num);
     else if (mode == "tags")       rc = doTags(ch);
-    else if (mode == "epics")      rc = doEpics(ch);
+    else if (mode == "epics")      rc = doEpics(ch, num);
     else if (mode == "triggers")   rc = doTriggers(ch, verbose);
     else if (mode == "trig-debug") rc = doTrigDebug(ch, verbose);
     else if (mode == "bank-debug") rc = doBankDebug(ch, verbose);
