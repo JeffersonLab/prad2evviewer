@@ -166,5 +166,4 @@ docs/               ROL references, API documentation
 
 ## Contributors
 Chao Peng -- Argonne National Laboratory\
-Yuan Li -- Shandong University\
-Mingyu Li -- Shandong University
+Weizhi Xiong, Yuan Li, Mingyu Li -- Shandong University
