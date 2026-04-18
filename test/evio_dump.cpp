@@ -759,18 +759,24 @@ static int doTrigDebug(EvChannel &ch, bool verbose)
 // Uses the lazy Info() accessor so we skip Fadc250/SSP/VTP/TDC decoding — we
 // only need the TI/trigger-bank metadata.  Typically 5-10× faster than a full
 // DecodeEvent() on a 1.9M-event run.
+//
+// Per-trigger-bits counts are tracked per event type so EPICS / Sync / other
+// non-physics events (which have no 0xE10A TI bank and therefore default to
+// trigger_bits=0) don't get lumped in with real physics triggers.
 static int doTriggers(EvChannel &ch, bool verbose)
 {
     int record = 0, decoded = 0;
-    std::map<uint32_t, int> trig_counts;
+    // key: (event_type, trigger_bits) → count
+    std::map<std::pair<EventType, uint32_t>, int> trig_counts;
 
     if (verbose) {
-        std::cout << std::setw(8) << "event#"
+        std::cout << std::setw(10) << "evtype"
+                  << std::setw(8) << "event#"
                   << std::setw(10) << "trigger#"
                   << std::setw(14) << "trigger_bits"
                   << std::setw(18) << "timestamp"
                   << "\n";
-        std::cout << std::string(50, '-') << "\n";
+        std::cout << std::string(60, '-') << "\n";
     }
 
     while (ch.Read() == status::success) {
@@ -778,14 +784,21 @@ static int doTriggers(EvChannel &ch, bool verbose)
         if (!ch.Scan()) continue;
         if (ch.GetNEvents() == 0) continue;
 
+        EventType et = ch.GetEventType();
         for (int i = 0; i < ch.GetNEvents(); ++i) {
             ch.SelectEvent(i);
             const auto &info = ch.Info();
             decoded++;
-            trig_counts[info.trigger_bits]++;
+            trig_counts[{et, info.trigger_bits}]++;
 
             if (verbose) {
-                std::cout << std::setw(8) << info.event_number
+                const char *et_name =
+                    et == EventType::Physics ? "Physics" :
+                    et == EventType::Epics   ? "Epics"   :
+                    et == EventType::Sync    ? "Sync"    :
+                    et == EventType::Unknown ? "Unknown" : "Other";
+                std::cout << std::setw(10) << et_name
+                          << std::setw(8) << info.event_number
                           << std::setw(10) << info.trigger_number
                           << "    0x" << std::hex << std::setw(8)
                           << std::setfill('0') << info.trigger_bits
@@ -797,11 +810,24 @@ static int doTriggers(EvChannel &ch, bool verbose)
     }
 
     std::cout << "=== Trigger Bits Summary (" << decoded << " events) ===\n";
-    for (auto &[bits, cnt] : trig_counts) {
-        std::cout << "  0x" << std::hex << std::setw(8) << std::setfill('0')
-                  << bits << std::dec << std::setfill(' ')
-                  << "  count=" << cnt << "\n";
+    std::cout << "  " << std::setw(10) << std::left << "evtype"
+              << std::setw(14) << "trigger_bits"
+              << std::setw(10) << "count" << std::right << "\n";
+    std::cout << "  " << std::string(34, '-') << "\n";
+    for (auto &[key, cnt] : trig_counts) {
+        const char *et_name =
+            key.first == EventType::Physics ? "Physics" :
+            key.first == EventType::Epics   ? "Epics"   :
+            key.first == EventType::Sync    ? "Sync"    :
+            key.first == EventType::Unknown ? "Unknown" : "Other";
+        std::cout << "  " << std::setw(10) << std::left << et_name << std::right
+                  << "  0x" << std::hex << std::setw(8) << std::setfill('0')
+                  << key.second << std::dec << std::setfill(' ') << "  "
+                  << std::setw(10) << cnt << "\n";
     }
+    std::cout << "\nNote: non-physics rows (Epics/Sync/Unknown) have no 0xE10A TI\n"
+                 "bank, so their trigger_bits default to 0.  Inspect their bank\n"
+                 "structure with `-m tree -n <N>` or `-m epics`.\n";
 
     return 0;
 }
