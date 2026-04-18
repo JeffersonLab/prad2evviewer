@@ -523,6 +523,8 @@ void GemSystem::collectHits(int apv_idx)
 
 // Public, stateless — declared in GemSystem.h.  buildStripMap() delegates
 // here so on-line reconstruction and off-line analyses share one impl.
+namespace gem {
+
 int MapStrip(int ch, int plane_index, int orient,
              int pin_rotate, int shared_pos, bool hybrid_board,
              int apv_channels, int readout_center)
@@ -574,6 +576,8 @@ std::vector<int> MapApvStrips(int plane_index, int orient,
     }
     return out;
 }
+
+} // namespace gem
 
 void GemSystem::buildStripMap(int apv_idx)
 {
