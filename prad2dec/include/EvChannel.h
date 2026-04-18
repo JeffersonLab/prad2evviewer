@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <memory>
 
 namespace evc {
 
@@ -153,18 +154,21 @@ protected:
     std::vector<uint32_t> vtp_tags;
 
     // --- product cache (populated by Info/Fadc/Gem/Tdc/Vtp) -----------------
-    // Cleared on Read/Scan/SelectEvent(i != current).  Marked mutable so the
+    // Cleared on Read/Scan/SelectEvent(i != current).  Heap-allocated on first
+    // use — each product struct is sized for the worst-case event (EventData
+    // alone is ~8 MB), so keeping them inline would blow the stack when
+    // callers declare `EvChannel ch;` as a local.  Marked mutable so the
     // accessors stay const-callable — the cache is an implementation detail.
-    mutable int               cached_event_idx = -1;
-    mutable bool              info_ready = false;
-    mutable bool              fadc_ready = false;
-    mutable bool              gem_ready  = false;
-    mutable bool              tdc_ready  = false;
-    mutable bool              vtp_ready  = false;
-    mutable fdec::EventData   cache_fadc;    // .info also serves Info()
-    mutable ssp::SspEventData cache_gem;
-    mutable tdc::TdcEventData cache_tdc;
-    mutable vtp::VtpEventData cache_vtp;
+    mutable int  cached_event_idx = -1;
+    mutable bool info_ready = false;
+    mutable bool fadc_ready = false;
+    mutable bool gem_ready  = false;
+    mutable bool tdc_ready  = false;
+    mutable bool vtp_ready  = false;
+    mutable std::unique_ptr<fdec::EventData>   cache_fadc;   // .info also serves Info()
+    mutable std::unique_ptr<ssp::SspEventData> cache_gem;
+    mutable std::unique_ptr<tdc::TdcEventData> cache_tdc;
+    mutable std::unique_ptr<vtp::VtpEventData> cache_vtp;
 
     // --- per-bank decoders (shared by legacy and lazy paths) ----------------
     void decodeTriggerInfo(const EvNode &node, fdec::EventInfo &info) const;

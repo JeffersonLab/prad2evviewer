@@ -243,48 +243,53 @@ const std::vector<int> &EvChannel::NodesForTag(uint32_t tag) const
 
 const fdec::EventInfo &EvChannel::Info() const
 {
+    if (!cache_fadc) cache_fadc = std::make_unique<fdec::EventData>();
     if (!info_ready) {
-        decodeInfoInto(cache_fadc.info);
+        decodeInfoInto(cache_fadc->info);
         info_ready = true;
     }
-    return cache_fadc.info;
+    return cache_fadc->info;
 }
 
 const fdec::EventData &EvChannel::Fadc() const
 {
+    if (!cache_fadc) cache_fadc = std::make_unique<fdec::EventData>();
     if (!fadc_ready) {
-        decodeFadcInto(cache_fadc);   // also refills cache_fadc.info
+        decodeFadcInto(*cache_fadc);   // also refills cache_fadc->info
         fadc_ready = true;
         info_ready = true;
     }
-    return cache_fadc;
+    return *cache_fadc;
 }
 
 const ssp::SspEventData &EvChannel::Gem() const
 {
+    if (!cache_gem) cache_gem = std::make_unique<ssp::SspEventData>();
     if (!gem_ready) {
-        decodeGemInto(cache_gem);
+        decodeGemInto(*cache_gem);
         gem_ready = true;
     }
-    return cache_gem;
+    return *cache_gem;
 }
 
 const tdc::TdcEventData &EvChannel::Tdc() const
 {
+    if (!cache_tdc) cache_tdc = std::make_unique<tdc::TdcEventData>();
     if (!tdc_ready) {
-        decodeTdcInto(cache_tdc);
+        decodeTdcInto(*cache_tdc);
         tdc_ready = true;
     }
-    return cache_tdc;
+    return *cache_tdc;
 }
 
 const vtp::VtpEventData &EvChannel::Vtp() const
 {
+    if (!cache_vtp) cache_vtp = std::make_unique<vtp::VtpEventData>();
     if (!vtp_ready) {
-        decodeVtpInto(cache_vtp);
+        decodeVtpInto(*cache_vtp);
         vtp_ready = true;
     }
-    return cache_vtp;
+    return *cache_vtp;
 }
 
 const uint8_t *EvChannel::GetCompositePayload(const EvNode &n, size_t &nbytes) const
