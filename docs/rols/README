@@ -1,0 +1,64 @@
+Data handeling process in readout lists use macros defined in $CODA/src/rol/inc/rol.h.
+
+
+ROL1 ==================================================================
+
+Trigger routine in rol1 always starts from
+
+  rol->dabufp = (int *) 0;
+  CEOPEN(EVTYPE, BT_BANKS);
+
+and ends with
+
+  CECLOSE;
+
+Those macros opens and closes 'bank-of-banks' used as container for following data banks.
+Typical data bank insertion looks as following:
+
+      BANKOPEN(0xe10A,1,rol->pid);
+      for(jj=0; jj<len; jj++) *rol->dabufp++ = tdcbuf[jj];
+      BANKCLOSE;
+
+where '0xe10A' is bank tag (unique and described in $CLON_PARMS/clonbanks.xml),
+'1' is bank type (in this example '1' means 'unsigned int') and 'rol->pid' is bank number
+(always the same as roc number). Pointer 'rol->dabufp' (unsigned int) must be bumped in
+according to the data size, it will be used by BANKCLOSE to close bank.
+
+
+ROL2 ==================================================================
+
+Macros 
+
+  BANKINIT;
+  CPINIT;
+
+must be called in variable definition section, and macro
+
+  BANKSCAN;
+
+before doint anything else. It will define necessary variables and set necessary pointers
+to all data banks obtained from ROL1. Following will be defined:
+
+  int nbanks - the number of banks found
+  unsigned int banktag[MAXBANKS] - bank tag
+  unsigned int banknr[MAXBANKS] - bank number
+  unsigned int banknw[MAXBANKS] - bank length (in integer words)
+  unsigned int banktyp[MAXBANKS] - bank type
+  unsigned int bankpad[MAXBANKS] - bank padding
+  unsigned int *bankdata[MAXBANKS] - pointer to the bank
+
+After that ROL2 will loop over found banks:
+
+  for(jj=0; jj<nbanks; jj++)
+  {
+    .....
+  }
+
+and fill following arrays (all integer):
+
+  nB[jj] - block counter inside bank 'jj'; it is actually board counter, because every board produce one block
+  iB[jj][ nB[jj] ] - block start index of the block 'nB[jj]'
+  sB[jj][ nB[jj] ] - slot number for the board block 'nB[jj]' came from
+  nE[jj][ nB[jj] ] - event counter in block 'nB[jj]'
+  iE[jj][ nB[jj] ][ nE[ nB[jj] ] ] - event number
+lenE[jj][ nB[jj] ][ nE[ nB[jj] ] ] - event length

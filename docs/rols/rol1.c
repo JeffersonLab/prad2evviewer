@@ -1,13 +1,3 @@
- 
-arch = Red
-
-Following environment variables are defined:
-OSTYPE          = Linux
-PLATFORM        = x86_64
-MACHINE         = x86_64_RHEL9
-OSTYPE_PLATFORM = Linux_x86_64
-OSTYPE_MACHINE  = Linux_x86_64_RHEL9
-
 
 /* rol1.c - 'standard' first readout list */
 
@@ -832,11 +822,11 @@ usrVmeDmaSetConfig(2,5,1); /*A32,2eSST,267MB/s*/ /*DOES NOT WORK FOR v1190 ON NE
 
 
 
-if(rol->pid==142)
-{
-  printf("Set DMA to MBLT for TAGE\n");
-  usrVmeDmaSetConfig(2,3,0);
-}
+//if(rol->pid==142)
+//{
+//  printf("Set DMA to MBLT for TAGE\n");
+//  usrVmeDmaSetConfig(2,3,0);
+//}
  
 if(rol->pid==64)
 {
@@ -3450,6 +3440,28 @@ vmeBusUnlock();
    
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 #ifdef USE_V1190
 
     tdcbuf = tdcbuf_save;
@@ -3487,6 +3499,11 @@ ii=5
       
 
 vmeBusLock();
+
+
+
+
+
 
 
 
@@ -3579,8 +3596,6 @@ jvmeVIVODmaSendPhys: INFO: data count: dma_vivo->tl=2024
 ii=3
 [ 0] ERROR: tdc1190ReadEvent[Dma] returns 0
 
-
-
 TTTTTTTTTTTTTTTTT
 TDC[ 0] = 0x12030040 (0x40000312)
 TDC[ 1] = 0xcc8a0108 (0x08018acc)
@@ -3590,10 +3605,11 @@ TDC[ 4] = 0x02800119 (0x19018002)
 TDC[ 5] = 0xd2000080 (0x800000d2)
 TTTTTTTTTTTTTTTTT
 
-
-
-
        */
+
+
+
+
 
 
 
@@ -5461,6 +5477,19 @@ vmeBusLock();
 vmeBusUnlock();
         /*printf("\nFADC len=%d\n",len);
         printf("%s\n",chptr);*/
+        chptr += len;
+        nbytes += len;
+	  }
+#endif
+      
+#ifdef USE_FAV3
+      if(nfaV3>0)
+      {
+vmeBusLock();
+        len = faV3UploadAll(chptr, 32000);
+vmeBusUnlock();
+        //printf("%s\n",chptr);
+        //printf("\nFAV3 len=%d\n",len);
         chptr += len;
         nbytes += len;
 	  }

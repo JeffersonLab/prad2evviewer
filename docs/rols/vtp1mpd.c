@@ -1,13 +1,3 @@
- 
-arch = Red
-
-Following environment variables are defined:
-OSTYPE          = Linux
-PLATFORM        = x86_64
-MACHINE         = x86_64_RHEL9
-OSTYPE_PLATFORM = Linux_x86_64
-OSTYPE_MACHINE  = Linux_x86_64_RHEL9
-
 
 /* vtp1mpd.c - first readout list for VTP boards used as MPD readout (polling mode) */
 

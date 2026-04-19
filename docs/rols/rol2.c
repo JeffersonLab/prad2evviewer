@@ -1,13 +1,3 @@
- 
-arch = Red
-
-Following environment variables are defined:
-OSTYPE          = Linux
-PLATFORM        = x86_64
-MACHINE         = x86_64_RHEL9
-OSTYPE_PLATFORM = Linux_x86_64
-OSTYPE_MACHINE  = Linux_x86_64_RHEL9
-
 
 /* rol2.c - second readout list for VXS crates with FADC250 boards */
 
@@ -483,7 +473,7 @@ rol2trig(int a, int b)
   int banknum = 0;
   int have_time_stamp, a_nevents2, a_event_type;
   int a_event_number, a_event_number_l, a_timestamp_l, a_event_number_h, a_timestamp_h, a_bitpattern;
-  int a_clusterN, a_clusterE, a_clusterY, a_clusterX, a_clusterT, a_type, a_data, a_time, a_top_nbot;
+  int a_clusterN, a_clusterE, a_clusterY, a_clusterX, a_clusterID, a_clusterT, a_type, a_data, a_time, a_top_nbot;
   int a_instance, a_view, a_coord, a_energy, a_coordU, a_coordV, a_coordW, a_lane;
   int a_hitmask0, a_hitmask1,a_hitmask2;
   int a_h1tag, a_h2tag, a_nhits, a_coordX, a_coordY;
@@ -2554,6 +2544,25 @@ Error flags:
           }
 
 
+          else if( ((datain[ii]>>23)&0xF) == 0xc) /* PRAD CLUSTER */
+          {
+            a_clusterE = ((datain[ii]>>0)&0x3FFF);
+            ii++;
+
+            a_clusterID = ((datain[ii]>>15)&0xFFF);
+            a_clusterN = ((datain[ii]>>11)&0xF);
+            a_clusterT = ((datain[ii]>>0)&0x7FF);
+            ii++;
+
+#ifdef DEBUG7
+        printf("[%3d] PRAD_CLUSTER_(T,N,ID,E) %d %d %d %d\n",ii,a_clusterT,a_clusterN,a_clusterID,a_clusterE);
+#endif
+            while( ((datain[ii]>>31)&0x1) == 0 && ii<lenin )
+            {
+              printf("ERROR2 in VTP:PRAD_CLUSTER pass1 = 0x%08X\n",datain[ii]); 
+              ii++;
+            }
+          }
 
 
 
@@ -6239,6 +6248,16 @@ if(a_pulsenumber == 0)
                 ii++;
               }
 
+              else if(((datain[ii]>>23)&0xF) == 0xc) /* PRAD CLUSTER */
+              {
+                *dataout ++ = datain[ii];
+                b08 += 4;
+                ii++;
+
+                *dataout ++ = datain[ii];
+                b08 += 4;
+                ii++;
+              }
 
 
 
@@ -6253,26 +6272,26 @@ if(a_pulsenumber == 0)
 
             else if( ((datain[ii]>>27)&0x1F) == 0x1D) /* GT trigger */
             {
-			  /*
-			  a_h2tag = ((datain[ii]>>15)&0x1);
+	      /*
+	      a_h2tag = ((datain[ii]>>15)&0x1);
               a_h1tag =     ((datain[ii]>>14)&0x1);
-		      a_nhits =   ((datain[ii]>>10)&0xF);
-		      a_coordY = ((datain[ii]>>5)&0x1F);
-		      a_coordX = ((datain[ii]>>0)&0x1F);
-			  */
+	      a_nhits =   ((datain[ii]>>10)&0xF);
+	      a_coordY = ((datain[ii]>>5)&0x1F);
+	      a_coordX = ((datain[ii]>>0)&0x1F);
+	      */
 
               *dataout ++ = datain[ii];
               b08 += 4;
-	          ii++;
+	      ii++;
 
-			  /*
-		      a_energy = ((datain[ii]>>16)&0x3FFF);
-		      a_time = ((datain[ii]>>0)&0x7FF);
-			  */
+	      /*
+	      a_energy = ((datain[ii]>>16)&0x3FFF);
+	      a_time = ((datain[ii]>>0)&0x7FF);
+	      */
 
               *dataout ++ = datain[ii];
               b08 += 4;
-	          ii++;
+	      ii++;
 			  /*
 #ifdef DEBUG7
               printf("   [%3d] FT CLUSTER_(COORDX,COORDY,NHITS,ENERGY,TIME): %d %d %d %d %d %d\n",ii,
