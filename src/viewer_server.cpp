@@ -356,8 +356,14 @@ void ViewerServer::handleWsMessage(websocketpp::connection_hdl hdl,
     // Ignore empty / binary frames.  We only speak a tiny control vocabulary.
     if (payload.empty() || payload[0] != '{') return;
 
+    // Guard against any json type_error / bad_alloc leaking into asio — an
+    // uncaught exception here would tear down the io_context and crash the
+    // server.
+    try {
+
     auto j = json::parse(payload, nullptr, false);
-    if (j.is_discarded() || !j.is_object() || !j.contains("type")) return;
+    if (j.is_discarded() || !j.is_object() ||
+        !j.contains("type") || !j["type"].is_string()) return;
     const std::string t = j["type"].get<std::string>();
 
     if (t == "tagger_subscribe") {
@@ -380,6 +386,12 @@ void ViewerServer::handleWsMessage(websocketpp::connection_hdl hdl,
         } catch (...) {}
     }
     // Unknown types are silently ignored — old clients stay happy.
+
+    } catch (const std::exception &e) {
+        std::cerr << "[ws] malformed message dropped: " << e.what() << "\n";
+    } catch (...) {
+        std::cerr << "[ws] malformed message dropped (unknown)\n";
+    }
 }
 
 // ── Tagger subscription registry ───────────────────────────────────────────

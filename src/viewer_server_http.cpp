@@ -219,6 +219,12 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         con->append_header("Content-Type", ct);
     };
 
+    // Any exception thrown below (e.g. std::stoi on a malformed %xx in the
+    // URL, json type_error, std::bad_alloc) would otherwise unwind into
+    // websocketpp / asio and terminate the server.  Convert to a 400/500
+    // response and keep the io_context alive.
+    try {
+
     // --- static resources ---
     if (serveResource(uri, con)) return;
 
@@ -569,4 +575,16 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     // --- 404 ---
     con->set_status(websocketpp::http::status_code::not_found);
     con->set_body("404 Not Found");
+
+    } catch (const std::exception &e) {
+        con->set_status(websocketpp::http::status_code::bad_request);
+        con->set_body(json({{"error", e.what()}, {"uri", uri}}).dump());
+        con->append_header("Content-Type", "application/json");
+        std::cerr << "[http] " << uri << " → " << e.what() << "\n";
+    } catch (...) {
+        con->set_status(websocketpp::http::status_code::internal_server_error);
+        con->set_body("{\"error\":\"unknown exception\"}");
+        con->append_header("Content-Type", "application/json");
+        std::cerr << "[http] " << uri << " → unknown exception\n";
+    }
 }
