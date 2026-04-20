@@ -1301,7 +1301,11 @@ def main():
     )
     win.show()
     if args.path is not None:
-        win.open_path(args.path)
+        # Defer until the event loop is running and the main window has had a
+        # chance to paint — otherwise the GIL-holding worker can block the
+        # first paint pass, leaving the UI blank until decoding is done.
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: win.open_path(args.path))
     sys.exit(app.exec())
 
 
