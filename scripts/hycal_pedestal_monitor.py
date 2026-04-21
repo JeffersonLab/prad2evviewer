@@ -24,18 +24,19 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QTextEdit, QMessageBox, QSplitter, QSizePolicy,
+    QPushButton, QLabel, QTextEdit, QMessageBox, QSplitter,
     QFileDialog, QLineEdit,
 )
-from PyQt6.QtCore import Qt, QRectF, pyqtSignal, QThread
-from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QPalette,
+from PyQt6.QtCore import Qt, QRectF, QThread, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QPalette
+
+from hycal_geoview import (
+    Module, load_modules, HyCalMapWidget, PALETTES, PALETTE_NAMES,
 )
 
 
@@ -80,62 +81,8 @@ _LMS_V_XPOS = {
 
 
 # ===========================================================================
-#  Colour palettes  (click colour bar to cycle)
+#  Data loading helpers
 # ===========================================================================
-
-PALETTES = {
-    "rainbow": [
-        (0.00, ( 30,  58,  95)), (0.25, ( 59, 130, 246)),
-        (0.50, ( 45, 212, 160)), (0.75, (234, 179,   8)),
-        (1.00, (245, 101, 101)),
-    ],
-    "viridis": [
-        (0.00, (68,   1,  84)), (0.25, (59,  82, 139)),
-        (0.50, (33, 145, 140)), (0.75, (94, 201,  98)),
-        (1.00, (253, 231,  37)),
-    ],
-    "inferno": [
-        (0.00, (0,   0,   4)), (0.25, (120,  28, 109)),
-        (0.50, (229, 89,  52)), (0.75, (253, 198,  39)),
-        (1.00, (252, 255, 164)),
-    ],
-    "coolwarm": [
-        (0.00, (59,  76, 192)), (0.25, (141, 176, 254)),
-        (0.50, (221, 221, 221)), (0.75, (245, 148, 114)),
-        (1.00, (180,   4,  38)),
-    ],
-    "hot": [
-        (0.00, (11,   0,   0)), (0.33, (230,   0,   0)),
-        (0.66, (255, 210,   0)), (1.00, (255, 255, 255)),
-    ],
-}
-PALETTE_NAMES = list(PALETTES.keys())
-
-
-# ===========================================================================
-#  Data structures
-# ===========================================================================
-
-@dataclass
-class Module:
-    name: str
-    mod_type: str   # "PbWO4", "PbGlass", "LMS", "Scintillator"
-    x: float
-    y: float
-    sx: float
-    sy: float
-
-
-# ===========================================================================
-#  Data loading
-# ===========================================================================
-
-def load_modules(path: Path) -> List[Module]:
-    with open(path) as f:
-        data = json.load(f)
-    return [Module(e["n"], e["t"], e["x"], e["y"], e["sx"], e["sy"])
-            for e in data]
-
 
 def prepare_modules(modules: List[Module]) -> List[Module]:
     """Reposition LMS1-3 below HyCal and add V1-V4."""
@@ -328,24 +275,6 @@ def _ped_mtime(ped_dir: Path, suffix: str) -> Optional[float]:
     return newest
 
 
-def _lerp(a: int, b: int, t: float) -> int:
-    return int(a + (b - a) * t)
-
-
-def _cmap_qcolor(t: float, stops) -> QColor:
-    t = max(0.0, min(1.0, t))
-    for i in range(len(stops) - 1):
-        t0, c0 = stops[i]
-        t1, c1 = stops[i + 1]
-        if t <= t1:
-            s = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
-            return QColor(_lerp(c0[0], c1[0], s),
-                          _lerp(c0[1], c1[1], s),
-                          _lerp(c0[2], c1[2], s))
-    _, c = stops[-1]
-    return QColor(*c)
-
-
 # ===========================================================================
 #  HyCal map widget
 # ===========================================================================
@@ -353,185 +282,60 @@ def _cmap_qcolor(t: float, stops) -> QColor:
 _LABEL_NAMES = {"LMS1", "LMS2", "LMS3", "V1", "V2", "V3", "V4"}
 
 
-class HyCalMapWidget(QWidget):
-    """Draws a colour-coded HyCal module map using QPainter."""
+class PedestalMapWidget(HyCalMapWidget):
+    """HyCal map with a centred title and labelled LMS/V modules."""
 
-    module_hovered = pyqtSignal(str)
-    palette_clicked = pyqtSignal()
-
-    _SHRINK = 0.92
+    CB_MAX_WIDTH = 300
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMouseTracking(True)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding,
-                           QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(400, 400)
-
-        self._modules: List[Module] = []
-        self._values: Dict[str, float] = {}
+        super().__init__(parent, include_lms=True, margin_top=30)
         self._title = ""
-        self._vmin = 0.0
-        self._vmax = 1.0
-        self._palette_idx = 0
-        self._hovered: Optional[str] = None
-        self._rects: Dict[str, QRectF] = {}
-        self._cb_rect: Optional[QRectF] = None
-        self._layout_dirty = True
-
-    # -- public API --
 
     def set_data(self, modules: List[Module], values: Dict[str, float],
                  title: str, vmin: float, vmax: float):
-        self._modules = modules
-        self._values = values
         self._title = title
-        self._vmin = vmin
-        self._vmax = vmax
-        self._layout_dirty = True
-        self.update()
-
-    def set_range(self, vmin: float, vmax: float):
+        self.set_modules(modules)
+        self._values = values
         self._vmin = vmin
         self._vmax = vmax
         self.update()
 
-    def set_palette(self, idx: int):
-        self._palette_idx = idx % len(PALETTES)
-        self.update()
+    def _fmt_value(self, v: float) -> str:
+        return f"{v:.1f}"
 
-    # -- layout --
+    def _colorbar_center_text(self) -> str:
+        return PALETTE_NAMES[self._palette_idx]   # no [log] flag
 
-    def _recompute_layout(self):
-        self._rects.clear()
-        det = list(self._modules)   # all modules including LMS/V
-        if not det:
-            return
-        w, h = self.width(), self.height()
-        margin, top, bot = 12, 30, 50
-        pw, ph = w - 2 * margin, h - top - bot
-        x0 = min(m.x - m.sx / 2 for m in det)
-        x1 = max(m.x + m.sx / 2 for m in det)
-        y0 = min(m.y - m.sy / 2 for m in det)
-        y1 = max(m.y + m.sy / 2 for m in det)
-        sc = min(pw / (x1 - x0), ph / (y1 - y0))
-        dw, dh = (x1 - x0) * sc, (y1 - y0) * sc
-        ox = margin + (pw - dw) / 2
-        oy = top + (ph - dh) / 2
-        shrink = self._SHRINK
-        for m in det:
-            mw, mh = m.sx * sc * shrink, m.sy * sc * shrink
-            cx = ox + (m.x - x0) * sc
-            cy = oy + (y1 - m.y) * sc
-            self._rects[m.name] = QRectF(cx - mw / 2, cy - mh / 2, mw, mh)
-        self._layout_dirty = False
+    def _paint_before_modules(self, p, w: int, h: int):
+        if self._title:
+            p.setPen(QColor("#c9d1d9"))
+            p.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+            p.drawText(QRectF(0, 4, w, 24),
+                       Qt.AlignmentFlag.AlignCenter, self._title)
 
-    def resizeEvent(self, event):
-        self._layout_dirty = True
-        super().resizeEvent(event)
+    def _paint_empty(self, p, w: int, h: int):
+        # title-only state (pre-data load)
+        if self._title:
+            p.setPen(QColor("#c9d1d9"))
+            p.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
+            p.drawText(QRectF(0, 4, w, 24),
+                       Qt.AlignmentFlag.AlignCenter, self._title)
+        if not self._values:
+            p.setPen(QColor("#555555"))
+            p.setFont(QFont("Monospace", 12))
+            p.drawText(QRectF(0, 0, w, h),
+                       Qt.AlignmentFlag.AlignCenter, "No data")
 
-    # -- painting --
-
-    def paintEvent(self, event):
-        if self._layout_dirty:
-            self._recompute_layout()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, QColor("#0a0e14"))
-
-        # Title
-        p.setPen(QColor("#c9d1d9"))
-        p.setFont(QFont("Monospace", 11, QFont.Weight.Bold))
-        p.drawText(QRectF(0, 4, w, 24), Qt.AlignmentFlag.AlignCenter,
-                   self._title)
-
-        if not self._rects:
-            if not self._values:
-                p.setPen(QColor("#555555"))
-                p.setFont(QFont("Monospace", 12))
-                p.drawText(QRectF(0, 0, w, h),
-                           Qt.AlignmentFlag.AlignCenter, "No data")
-            p.end()
-            return
-
-        stops = list(PALETTES.values())[self._palette_idx]
-        vmin, vmax = self._vmin, self._vmax
-
-        # Modules
-        for name, rect in self._rects.items():
-            v = self._values.get(name)
-            if v is not None:
-                t = ((v - vmin) / (vmax - vmin)) if vmax > vmin else 0.5
-                p.fillRect(rect, _cmap_qcolor(t, stops))
-            else:
-                p.fillRect(rect, QColor("#1a1a2e"))
-
-        # Labels on LMS / V blocks
+    def _paint_overlays(self, p, w: int, h: int):
+        # LMS / V labels
         p.setPen(QColor("#c9d1d9"))
         p.setFont(QFont("Monospace", 7, QFont.Weight.Bold))
         for name in _LABEL_NAMES:
-            if name in self._rects:
-                p.drawText(self._rects[name],
-                           Qt.AlignmentFlag.AlignCenter, name)
-
-        # Hover highlight
-        if self._hovered and self._hovered in self._rects:
-            p.setPen(QPen(QColor("#58a6ff"), 2.0))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(self._rects[self._hovered])
-
-        # Colour bar
-        cb_w = min(300, w - 80)
-        cb_h = 14
-        cb_x = (w - cb_w) / 2
-        cb_y = h - 40
-        self._cb_rect = QRectF(cb_x, cb_y, cb_w, cb_h)
-
-        grad = QLinearGradient(cb_x, 0, cb_x + cb_w, 0)
-        for t, (r, g, b) in stops:
-            grad.setColorAt(t, QColor(r, g, b))
-        p.fillRect(self._cb_rect, QBrush(grad))
-        p.setPen(QPen(QColor("#58a6ff"), 1.0))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(self._cb_rect)
-
-        # Range labels + palette name
-        p.setPen(QColor("#8b949e"))
-        p.setFont(QFont("Monospace", 9))
-        p.drawText(QRectF(cb_x, cb_y + cb_h + 2, 60, 14),
-                   Qt.AlignmentFlag.AlignLeft, f"{vmin:.1f}")
-        p.drawText(QRectF(cb_x + cb_w - 60, cb_y + cb_h + 2, 60, 14),
-                   Qt.AlignmentFlag.AlignRight, f"{vmax:.1f}")
-        pname = PALETTE_NAMES[self._palette_idx]
-        p.drawText(QRectF(cb_x, cb_y + cb_h + 2, cb_w, 14),
-                   Qt.AlignmentFlag.AlignCenter, pname)
-        p.end()
-
-    # -- mouse --
-
-    def mouseMoveEvent(self, event):
-        pos = event.position()
-        # Hand cursor over colour bar
-        if self._cb_rect and self._cb_rect.contains(pos):
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-        found = None
-        for name, rect in self._rects.items():
-            if rect.contains(pos):
-                found = name
-                break
-        if found != self._hovered:
-            self._hovered = found
-            self.update()
-            if found:
-                self.module_hovered.emit(found)
-
-    def mousePressEvent(self, event):
-        if self._cb_rect and self._cb_rect.contains(event.position()):
-            self.palette_clicked.emit()
-        super().mousePressEvent(event)
+            r = self._rects.get(name)
+            if r is not None:
+                p.drawText(r, Qt.AlignmentFlag.AlignCenter, name)
+        # hover highlight (from base)
+        super()._paint_overlays(p, w, h)
 
 
 # ===========================================================================
@@ -620,12 +424,12 @@ class PedestalMonitorWindow(QMainWindow):
         ml = QHBoxLayout(maps)
         ml.setContentsMargins(0, 0, 0, 0)
         ml.setSpacing(8)
-        self._map_left = HyCalMapWidget()
-        self._map_right = HyCalMapWidget()
-        self._map_left.module_hovered.connect(self._on_hover)
-        self._map_right.module_hovered.connect(self._on_hover)
-        self._map_left.palette_clicked.connect(self._cycle_palette_left)
-        self._map_right.palette_clicked.connect(self._cycle_palette_right)
+        self._map_left = PedestalMapWidget()
+        self._map_right = PedestalMapWidget()
+        self._map_left.moduleHovered.connect(self._on_hover)
+        self._map_right.moduleHovered.connect(self._on_hover)
+        self._map_left.paletteClicked.connect(self._cycle_palette_left)
+        self._map_right.paletteClicked.connect(self._cycle_palette_right)
         ml.addWidget(self._map_left)
         ml.addWidget(self._map_right)
         root.addWidget(maps, stretch=1)

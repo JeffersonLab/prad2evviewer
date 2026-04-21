@@ -60,6 +60,26 @@ public:
     virtual void   Close();
     virtual status Read();
 
+    // --- random-access mode (evio "ra") -------------------------------------
+    // Opens the file with evio's random-access mode: the file is mmap'd and
+    // an event-pointer table is built during Open.  Use ReadEventByIndex()
+    // afterwards; Read() is for sequential mode only.  The two modes are
+    // mutually exclusive — calling OpenRandomAccess on an already-open
+    // handle closes it first.
+    virtual status OpenRandomAccess(const std::string &path);
+
+    // Total number of events in the random-access table (0 if not opened in
+    // random-access mode).  Each "event" here is one evio event (one block
+    // in CODA built-trigger streams); use Scan() + GetNEvents() afterwards
+    // to iterate physics sub-events within the block.
+    int GetRandomAccessEventCount() const { return ra_count; }
+
+    // Copy the event at the given 0-based index into the internal buffer, so
+    // Scan() / SelectEvent() / Info() / Fadc() / ... work identically to the
+    // sequential path.  Returns status::failure if the index is out of range
+    // or the handle wasn't opened in random-access mode.
+    status ReadEventByIndex(int evio_event_index);
+
     // --- scan the current event into a flat tree ----------------------------
     // Rebuilds nodes[] and the tag index; invalidates the per-product cache.
     bool Scan();
@@ -147,6 +167,7 @@ protected:
     std::vector<EvNode>   nodes;
     int nevents = 0;
     EventType evtype = EventType::Unknown;
+    int ra_count = 0;   // event count from evGetRandomAccessTable, 0 if sequential
 
     // tag → every node index in the current event that carries it.
     // Rebuilt by Scan(); consulted by the lazy accessors to avoid re-scanning.

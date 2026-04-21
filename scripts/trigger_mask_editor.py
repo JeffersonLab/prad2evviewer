@@ -24,10 +24,12 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QTextEdit, QSplitter, QSizePolicy, QFileDialog,
+    QPushButton, QLabel, QTextEdit, QSplitter, QFileDialog,
 )
 from PyQt6.QtCore import Qt, QRectF, pyqtSignal
-from PyQt6.QtGui import QPainter, QColor, QPen, QFont
+from PyQt6.QtGui import QColor, QPen, QFont
+
+from hycal_geoview import HyCalMapWidget as _HyCalMapBase
 
 
 # ===========================================================================
@@ -214,32 +216,25 @@ def parse_trigger_mask(text: str, modules: List[ModuleInfo]) -> Set[str]:
 #  HyCal Map Widget
 # ===========================================================================
 
-class HyCalMapWidget(QWidget):
+class HyCalMapWidget(_HyCalMapBase):
     """Interactive HyCal geo view for trigger mask editing."""
 
-    module_hovered = pyqtSignal(str)
+    module_hovered = pyqtSignal(str)   # kept snake_case for script-level callers
     mask_changed = pyqtSignal()
 
-    _SHRINK = 0.92
-
     def __init__(self, modules: List[ModuleInfo], parent=None):
-        super().__init__(parent)
-        self.setMouseTracking(True)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding,
-                           QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(500, 500)
-
-        self._modules = modules
-        self._disabled: Set[str] = set()
-        self._hovered: Optional[str] = None
-        self._rects: Dict[str, QRectF] = {}
+        super().__init__(parent, shrink=0.92, margin_top=10,
+                         margin_bottom=12, include_lms=True,
+                         show_colorbar=False, min_size=(500, 500))
         self._mod_map: Dict[str, ModuleInfo] = {m.name: m for m in modules}
-        self._layout_dirty = True
+        self._disabled: Set[str] = set()
 
-        # Drag state
-        self._dragging = False
-        self._drag_mode: Optional[bool] = None  # True = disabling, False = enabling
+        # drag-paint state (distinct from the base's pan-drag state)
+        self._paint_dragging = False
+        self._paint_mode: Optional[bool] = None  # True = disabling, False = enabling
         self._drag_visited: Set[str] = set()
+
+        self.set_modules(modules)
 
     @property
     def disabled(self) -> Set[str]:
@@ -250,53 +245,13 @@ class HyCalMapWidget(QWidget):
         self._disabled = set(s)
         self.update()
 
-    # -- layout --
+    # -- painting: fill-by-state + LMS/V labels + stats line --
 
-    def _recompute_layout(self):
-        self._rects.clear()
-        det = self._modules
-        if not det:
-            return
-        w, h = self.width(), self.height()
-        margin, top, bot = 12, 10, 12
-        pw, ph = w - 2 * margin, h - top - bot
-        x0 = min(m.x - m.sx / 2 for m in det)
-        x1 = max(m.x + m.sx / 2 for m in det)
-        y0 = min(m.y - m.sy / 2 for m in det)
-        y1 = max(m.y + m.sy / 2 for m in det)
-        sc = min(pw / (x1 - x0), ph / (y1 - y0))
-        dw, dh = (x1 - x0) * sc, (y1 - y0) * sc
-        ox = margin + (pw - dw) / 2
-        oy = top + (ph - dh) / 2
-        shrink = self._SHRINK
-        for m in det:
-            mw, mh = m.sx * sc * shrink, m.sy * sc * shrink
-            cx = ox + (m.x - x0) * sc
-            cy = oy + (y1 - m.y) * sc
-            self._rects[m.name] = QRectF(cx - mw / 2, cy - mh / 2, mw, mh)
-        self._layout_dirty = False
-
-    def resizeEvent(self, event):
-        self._layout_dirty = True
-        super().resizeEvent(event)
-
-    # -- painting --
-
-    def paintEvent(self, event):
-        if self._layout_dirty:
-            self._recompute_layout()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, COL_BG)
-
-        if not self._rects:
-            p.end()
-            return
-
+    def _paint_modules(self, p):
         disabled = self._disabled
+        mod_map = self._mod_map
         for name, rect in self._rects.items():
-            m = self._mod_map.get(name)
+            m = mod_map.get(name)
             if m and m.crate < 0:
                 p.fillRect(rect, COL_NO_DAQ)
             elif name in disabled:
@@ -306,29 +261,28 @@ class HyCalMapWidget(QWidget):
             else:
                 p.fillRect(rect, COL_ON)
 
-        # Labels on LMS / V / LMSP
+    def _paint_overlays(self, p, w, h):
+        # LMS / V labels
         p.setPen(COL_TEXT)
         p.setFont(QFont("Monospace", 7, QFont.Weight.Bold))
         for name in _LABEL_NAMES:
-            if name in self._rects:
-                p.drawText(self._rects[name],
-                           Qt.AlignmentFlag.AlignCenter, name)
-
-        # Hover highlight
+            r = self._rects.get(name)
+            if r is not None:
+                p.drawText(r, Qt.AlignmentFlag.AlignCenter, name)
+        # hover highlight (use mask-editor's hover colour)
         if self._hovered and self._hovered in self._rects:
             p.setPen(QPen(COL_HOVER, 2.0))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(self._rects[self._hovered])
 
-        # Stats
-        n_disabled = len(disabled)
+    def _paint_after_colorbar(self, p, w, h):
         p.setPen(QColor("#8b949e"))
         p.setFont(QFont("Monospace", 9))
-        p.drawText(QRectF(8, h - 18, w - 16, 16), Qt.AlignmentFlag.AlignLeft,
-                   f"Disabled: {n_disabled}")
-        p.end()
+        p.drawText(QRectF(8, h - 18, w - 16, 16),
+                   Qt.AlignmentFlag.AlignLeft,
+                   f"Disabled: {len(self._disabled)}")
 
-    # -- hit test --
+    # -- hit test: only DAQ-mapped modules are hittable --
 
     def _hit(self, pos) -> Optional[str]:
         for name, rect in self._rects.items():
@@ -338,7 +292,22 @@ class HyCalMapWidget(QWidget):
                     return name
         return None
 
-    # -- mouse --
+    # -- mouse: drag-paint replaces base zoom/pan --
+
+    def mousePressEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        found = self._hit(event.position())
+        if found:
+            self._paint_dragging = True
+            self._paint_mode = found not in self._disabled  # True = disable
+            self._drag_visited = {found}
+            if self._paint_mode:
+                self._disabled.add(found)
+            else:
+                self._disabled.discard(found)
+            self.update()
+            self.mask_changed.emit()
 
     def mouseMoveEvent(self, event):
         pos = event.position()
@@ -348,28 +317,9 @@ class HyCalMapWidget(QWidget):
             self.update()
             if found:
                 self.module_hovered.emit(found)
-
-        # Drag painting
-        if self._dragging and found and found not in self._drag_visited:
+        if self._paint_dragging and found and found not in self._drag_visited:
             self._drag_visited.add(found)
-            if self._drag_mode:
-                self._disabled.add(found)
-            else:
-                self._disabled.discard(found)
-            self.update()
-            self.mask_changed.emit()
-
-    def mousePressEvent(self, event):
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        pos = event.position()
-        found = self._hit(pos)
-        if found:
-            # Start drag: mode depends on current state of clicked module
-            self._dragging = True
-            self._drag_mode = found not in self._disabled  # True = disable
-            self._drag_visited = {found}
-            if self._drag_mode:
+            if self._paint_mode:
                 self._disabled.add(found)
             else:
                 self._disabled.discard(found)
@@ -378,9 +328,13 @@ class HyCalMapWidget(QWidget):
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
-            self._dragging = False
-            self._drag_mode = None
+            self._paint_dragging = False
+            self._paint_mode = None
             self._drag_visited.clear()
+
+    def wheelEvent(self, event):
+        # wheel events should not do anything here (no zoom)
+        event.ignore()
 
 
 # ===========================================================================

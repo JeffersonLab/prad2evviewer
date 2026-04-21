@@ -14,8 +14,6 @@ Usage
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import random
 import sys
 from pathlib import Path
@@ -26,11 +24,13 @@ from typing import Dict, List, Optional, Tuple
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QPushButton, QLabel, QLineEdit, QSizePolicy,
+    QPushButton, QLabel, QLineEdit,
 )
-from PyQt6.QtCore import Qt, QRectF, QTimer, pyqtSignal
-from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QPalette,
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor, QFont, QPalette
+
+from hycal_geoview import (
+    Module, load_modules, HyCalMapWidget, PALETTES, PALETTE_NAMES,
 )
 
 
@@ -44,28 +44,6 @@ MODULES_JSON = DB_DIR / "hycal_modules.json"
 
 SCALER_PV = "B_DET_HYCAL_FADC_{label}:c"
 POLL_INTERVAL_MS = 2_500   # 1 seconds
-
-
-# ===========================================================================
-#  Module database
-# ===========================================================================
-
-class Module:
-    __slots__ = ("name", "mod_type", "x", "y", "sx", "sy")
-    def __init__(self, name, mod_type, x, y, sx, sy):
-        self.name = name
-        self.mod_type = mod_type
-        self.x = x
-        self.y = y
-        self.sx = sx
-        self.sy = sy
-
-
-def load_modules(path: Path) -> List[Module]:
-    with open(path) as f:
-        data = json.load(f)
-    return [Module(e["n"], e["t"], e["x"], e["y"], e["sx"], e["sy"])
-            for e in data]
 
 
 # ===========================================================================
@@ -110,243 +88,18 @@ class SimulatedScalerEPICS:
 
 
 # ===========================================================================
-#  Colour palettes  (click colour bar to cycle)
+#  HyCal map widget  (subclass customises min size + vmax default)
 # ===========================================================================
 
-PALETTES = {
-    "viridis": [
-        (0.00, (68,   1,  84)), (0.25, (59,  82, 139)),
-        (0.50, (33, 145, 140)), (0.75, (94, 201,  98)),
-        (1.00, (253, 231,  37)),
-    ],
-    "inferno": [
-        (0.00, (0,   0,   4)), (0.25, (120,  28, 109)),
-        (0.50, (229, 89,  52)), (0.75, (253, 198,  39)),
-        (1.00, (252, 255, 164)),
-    ],
-    "coolwarm": [
-        (0.00, (59,  76, 192)), (0.25, (141, 176, 254)),
-        (0.50, (221, 221, 221)), (0.75, (245, 148, 114)),
-        (1.00, (180,   4,  38)),
-    ],
-    "hot": [
-        (0.00, (11,   0,   0)), (0.33, (230,   0,   0)),
-        (0.66, (255, 210,   0)), (1.00, (255, 255, 255)),
-    ],
-    "rainbow": [
-        (0.00, ( 30,  58,  95)), (0.25, ( 59, 130, 246)),
-        (0.50, ( 45, 212, 160)), (0.75, (234, 179,   8)),
-        (1.00, (245, 101, 101)),
-    ],
-}
-PALETTE_NAMES = list(PALETTES.keys())
-
-
-def _lerp(a: int, b: int, t: float) -> int:
-    return int(a + (b - a) * t)
-
-
-def _cmap_qcolor(t: float, stops) -> QColor:
-    t = max(0.0, min(1.0, t))
-    for i in range(len(stops) - 1):
-        t0, c0 = stops[i]
-        t1, c1 = stops[i + 1]
-        if t <= t1:
-            s = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
-            return QColor(_lerp(c0[0], c1[0], s),
-                          _lerp(c0[1], c1[1], s),
-                          _lerp(c0[2], c1[2], s))
-    _, c = stops[-1]
-    return QColor(*c)
-
-
-# ===========================================================================
-#  HyCal map widget
-# ===========================================================================
-
-class HyCalMapWidget(QWidget):
-    module_hovered = pyqtSignal(str)
-    palette_clicked = pyqtSignal()
-
-    _SHRINK = 0.92
+class ScalerMapWidget(HyCalMapWidget):
+    """Simple value → colour map with palette cycle and log scale."""
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMouseTracking(True)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding,
-                           QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(500, 500)
+        super().__init__(parent, min_size=(500, 500))
+        self._vmax = 1000.0   # sensible default for kHz rates
 
-        self._modules: List[Module] = []
-        self._values: Dict[str, float] = {}
-        self._vmin = 0.0
-        self._vmax = 1000.0
-        self._log_scale = False
-        self._palette_idx = 0
-        self._hovered: Optional[str] = None
-        self._rects: Dict[str, QRectF] = {}
-        self._cb_rect: Optional[QRectF] = None
-        self._layout_dirty = True
-
-    def set_modules(self, modules: List[Module]):
-        self._modules = modules
-        self._layout_dirty = True
-        self.update()
-
-    def set_values(self, values: Dict[str, float]):
-        self._values = values
-        self.update()
-
-    def set_range(self, vmin: float, vmax: float):
-        self._vmin = vmin
-        self._vmax = vmax
-        self.update()
-
-    def auto_range(self):
-        vals = list(self._values.values())
-        if vals:
-            self._vmin = min(vals)
-            self._vmax = max(vals)
-            if self._vmin == self._vmax:
-                self._vmax = self._vmin + 1.0
-        self.update()
-        return self._vmin, self._vmax
-
-    def set_palette(self, idx: int):
-        self._palette_idx = idx % len(PALETTES)
-        self.update()
-
-    def set_log_scale(self, on: bool):
-        self._log_scale = on
-        self.update()
-
-    def _value_to_t(self, v: float) -> float:
-        """Map a raw value to [0, 1] using current scale (linear or log)."""
-        import math
-        vmin, vmax = self._vmin, self._vmax
-        if self._log_scale:
-            # clamp to positive range for log
-            floor = max(vmin, 1e-6)
-            ceil = max(vmax, floor * 10)
-            v = max(v, floor)
-            return (math.log10(v) - math.log10(floor)) / \
-                   (math.log10(ceil) - math.log10(floor))
-        else:
-            return (v - vmin) / (vmax - vmin) if vmax > vmin else 0.5
-
-    # -- layout --
-
-    def _recompute_layout(self):
-        self._rects.clear()
-        det = [m for m in self._modules if m.mod_type != "LMS"]
-        if not det:
-            return
-        w, h = self.width(), self.height()
-        margin, top, bot = 12, 10, 50
-        pw, ph = w - 2 * margin, h - top - bot
-        x0 = min(m.x - m.sx / 2 for m in det)
-        x1 = max(m.x + m.sx / 2 for m in det)
-        y0 = min(m.y - m.sy / 2 for m in det)
-        y1 = max(m.y + m.sy / 2 for m in det)
-        sc = min(pw / (x1 - x0), ph / (y1 - y0))
-        dw, dh = (x1 - x0) * sc, (y1 - y0) * sc
-        ox = margin + (pw - dw) / 2
-        oy = top + (ph - dh) / 2
-        shrink = self._SHRINK
-        for m in det:
-            mw, mh = m.sx * sc * shrink, m.sy * sc * shrink
-            cx = ox + (m.x - x0) * sc
-            cy = oy + (y1 - m.y) * sc
-            self._rects[m.name] = QRectF(cx - mw / 2, cy - mh / 2, mw, mh)
-        self._layout_dirty = False
-
-    def resizeEvent(self, event):
-        self._layout_dirty = True
-        super().resizeEvent(event)
-
-    # -- painting --
-
-    def paintEvent(self, event):
-        if self._layout_dirty:
-            self._recompute_layout()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, QColor("#0a0e14"))
-
-        if not self._rects:
-            p.end()
-            return
-
-        stops = list(PALETTES.values())[self._palette_idx]
-
-        for name, rect in self._rects.items():
-            v = self._values.get(name)
-            if v is not None:
-                t = self._value_to_t(v)
-                p.fillRect(rect, _cmap_qcolor(t, stops))
-            else:
-                p.fillRect(rect, QColor("#15181d"))
-
-        # Hover highlight
-        if self._hovered and self._hovered in self._rects:
-            p.setPen(QPen(QColor("#58a6ff"), 2.0))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(self._rects[self._hovered])
-
-        # Colour bar (clickable — cycles palette)
-        cb_w = min(400, w - 80)
-        cb_h = 14
-        cb_x = (w - cb_w) / 2
-        cb_y = h - 40
-        self._cb_rect = QRectF(cb_x, cb_y, cb_w, cb_h)
-
-        grad = QLinearGradient(cb_x, 0, cb_x + cb_w, 0)
-        for t, (r, g, b) in stops:
-            grad.setColorAt(t, QColor(r, g, b))
-        p.fillRect(self._cb_rect, QBrush(grad))
-        p.setPen(QPen(QColor("#58a6ff"), 1.0))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(self._cb_rect)
-
-        # Range labels + palette name
-        vmin, vmax = self._vmin, self._vmax
-        p.setPen(QColor("#8b949e"))
-        p.setFont(QFont("Monospace", 9))
-        p.drawText(QRectF(cb_x, cb_y + cb_h + 2, 80, 14),
-                   Qt.AlignmentFlag.AlignLeft, f"{vmin:.0f}")
-        p.drawText(QRectF(cb_x + cb_w - 80, cb_y + cb_h + 2, 80, 14),
-                   Qt.AlignmentFlag.AlignRight, f"{vmax:.0f}")
-        pname = PALETTE_NAMES[self._palette_idx]
-        if self._log_scale:
-            pname += "  [log]"
-        p.drawText(QRectF(cb_x, cb_y + cb_h + 2, cb_w, 14),
-                   Qt.AlignmentFlag.AlignCenter, pname)
-        p.end()
-
-    # -- mouse --
-
-    def mouseMoveEvent(self, event):
-        pos = event.position()
-        if self._cb_rect and self._cb_rect.contains(pos):
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-        found = None
-        for name, rect in self._rects.items():
-            if rect.contains(pos):
-                found = name
-                break
-        if found != self._hovered:
-            self._hovered = found
-            self.update()
-            if found:
-                self.module_hovered.emit(found)
-
-    def mousePressEvent(self, event):
-        if self._cb_rect and self._cb_rect.contains(event.position()):
-            self.palette_clicked.emit()
-        super().mousePressEvent(event)
+    def _fmt_value(self, v: float) -> str:
+        return f"{v:.0f}"
 
 
 # ===========================================================================
@@ -410,10 +163,10 @@ class ScalerMapWindow(QMainWindow):
         root.addLayout(top)
 
         # -- map --
-        self._map = HyCalMapWidget()
+        self._map = ScalerMapWidget()
         self._map.set_modules(self._modules)
-        self._map.module_hovered.connect(self._on_hover)
-        self._map.palette_clicked.connect(self._cycle_palette)
+        self._map.moduleHovered.connect(self._on_hover)
+        self._map.paletteClicked.connect(self._cycle_palette)
         root.addWidget(self._map, stretch=1)
 
         # -- range controls --
@@ -601,7 +354,7 @@ class ScalerMapWindow(QMainWindow):
         self._map.set_palette(self._palette_idx)
 
     def _toggle_log(self):
-        on = not self._map._log_scale
+        on = not self._map.is_log_scale()
         self._map.set_log_scale(on)
         if on:
             self._log_btn.setText("Log: ON")

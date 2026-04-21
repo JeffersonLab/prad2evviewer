@@ -499,6 +499,30 @@ void bind_channel(py::module_ &m)
                 return self.Read();
             },
             "Read the next record into the internal buffer. Returns Status.")
+        // ---- Random-access mode (evio "ra") -------------------------------
+        .def("open_random_access",
+            [](evc::EvChannel &self, const std::string &path) {
+                py::gil_scoped_release rel;
+                return self.OpenRandomAccess(path);
+            },
+            py::arg("path"),
+            "Open an evio file in random-access mode.  evio mmaps the file "
+            "and builds an event pointer table during open — after this you "
+            "can jump to any event via read_event_by_index().  Use "
+            "get_random_access_event_count() to get the total.")
+        .def("get_random_access_event_count",
+            &evc::EvChannel::GetRandomAccessEventCount,
+            "Total number of events in the random-access table.  Returns 0 "
+            "if not opened in random-access mode.")
+        .def("read_event_by_index",
+            [](evc::EvChannel &self, int i) {
+                py::gil_scoped_release rel;
+                return self.ReadEventByIndex(i);
+            },
+            py::arg("index"),
+            "Read the event at 0-based evio index `i` into the internal "
+            "buffer.  scan() / select_event() / info() / fadc() / ... then "
+            "work identically to the sequential path.  Returns Status.")
         .def("scan", &evc::EvChannel::Scan,
             "Scan the currently-held record. Call after a successful Read().")
         .def("get_event_type", &evc::EvChannel::GetEventType)

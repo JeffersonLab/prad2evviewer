@@ -18,22 +18,33 @@ std::string EvioDataSource::open(const std::string &path)
     close();
     filepath_ = path;
 
-    // scan file to build event index
-    EvChannel ch;
-    ch.SetConfig(cfg_);
-    if (ch.Open(path) != status::success)
-        return "cannot open file";
-
-    int buf = 0;
-    while (ch.Read() == status::success) {
-        ++buf;
-        if (!ch.Scan()) continue;
-        // skip monitoring events (TI only, no waveforms) from file viewer index
-        if (cfg_.is_monitoring(ch.GetEvHeader().tag)) continue;
-        for (int i = 0; i < ch.GetNEvents(); ++i)
-            index_.push_back({buf, i});
+    // Open reader_ in evio random-access mode: the file is mmap'd and an
+    // event-pointer table is built natively during Open.  We keep this
+    // handle alive for the life of the data source so decodeEvent() can
+    // jump directly via ReadEventByIndex().
+    reader_.SetConfig(cfg_);
+    if (reader_.OpenRandomAccess(path) != status::success) {
+        invalidateReader();
+        filepath_.clear();
+        return "cannot open file (random-access mode)";
     }
-    ch.Close();
+    reader_path_ = path;
+    last_decoded_index_ = -1;
+
+    // Iterate evio events, Scan each (cheap — header parse only, no waveform
+    // decode), and record physics sub-events in our index.
+    int n_evio = reader_.GetRandomAccessEventCount();
+    for (int ei = 0; ei < n_evio; ++ei) {
+        if (reader_.ReadEventByIndex(ei) != status::success) continue;
+        if (!reader_.Scan()) continue;
+        // skip monitoring events (TI only, no waveforms) from viewer index
+        if (cfg_.is_monitoring(reader_.GetEvHeader().tag)) continue;
+        for (int si = 0; si < reader_.GetNEvents(); ++si)
+            index_.push_back({ei, si});
+    }
+    // The index pass left reader_'s cache holding the last event scanned;
+    // invalidate so decodeEvent() doesn't reuse a stale cached decode.
+    last_decoded_index_ = -1;
     return "";
 }
 
@@ -67,33 +78,10 @@ DataSourceCaps EvioDataSource::capabilities() const
 // Random-access event decoding
 // =========================================================================
 
-std::string EvioDataSource::seekTo(int buf_num)
-{
-    if (filepath_ != reader_path_ || buf_num < reader_buf_) {
-        reader_.Close();
-        reader_.SetConfig(cfg_);
-        if (reader_.Open(filepath_) != status::success) {
-            invalidateReader();
-            return "cannot open file";
-        }
-        reader_path_ = filepath_;
-        reader_buf_ = 0;
-    }
-    while (reader_buf_ < buf_num) {
-        if (reader_.Read() != status::success) {
-            invalidateReader();
-            return "read error";
-        }
-        reader_buf_++;
-    }
-    return "";
-}
-
 void EvioDataSource::invalidateReader()
 {
     reader_.Close();
     reader_path_.clear();
-    reader_buf_ = 0;
     last_decoded_index_ = -1;
 }
 
@@ -110,9 +98,20 @@ std::string EvioDataSource::decodeEvent(int index, fdec::EventData &evt,
     // viewer_server's common pattern of decodeEvent(N) immediately followed
     // by computeClusters(N).
     if (index != last_decoded_index_) {
-        auto &ei = index_[index];
-        std::string err = seekTo(ei.buffer_num);
-        if (!err.empty()) { last_decoded_index_ = -1; return err; }
+        // Reopen the reader if something invalidated it (e.g. a prior error).
+        if (reader_path_ != filepath_) {
+            reader_.SetConfig(cfg_);
+            if (reader_.OpenRandomAccess(filepath_) != status::success) {
+                invalidateReader();
+                return "cannot open file";
+            }
+            reader_path_ = filepath_;
+        }
+        const auto &ei = index_[index];
+        if (reader_.ReadEventByIndex(ei.evio_event) != status::success) {
+            last_decoded_index_ = -1;
+            return "read error";
+        }
         if (!reader_.Scan()) { last_decoded_index_ = -1; return "scan error"; }
         reader_.SelectEvent(ei.sub_event);
         last_decoded_index_ = index;

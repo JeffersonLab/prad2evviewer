@@ -36,12 +36,16 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QComboBox, QLineEdit, QDoubleSpinBox, QSpinBox,
     QFileDialog, QSplitter, QSizePolicy, QTableWidget,
-    QTableWidgetItem, QHeaderView, QAbstractItemView, QToolTip, QMenu,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu,
     QDialog, QFormLayout, QTextEdit, QDialogButtonBox, QMessageBox,
 )
-from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QSize, QTimer, QProcess
+from PyQt6.QtCore import Qt, QRectF, QPointF, pyqtSignal, QTimer, QProcess
 from PyQt6.QtGui import (
-    QPainter, QColor, QPen, QBrush, QFont, QLinearGradient, QPalette,
+    QPainter, QColor, QPen, QBrush, QFont, QPalette,
+)
+
+from hycal_geoview import (
+    Module, load_modules, HyCalMapWidget, PALETTES, PALETTE_NAMES,
 )
 
 
@@ -57,67 +61,8 @@ LMS_NAMES = ["LMS1", "LMS2", "LMS3"]
 LMS_REF_DEFAULT = 1          # index into LMS_NAMES -> "LMS2"
 FILE_PATTERN = re.compile(r"prad_(\d{6})_LMS\.dat$")
 
-
-# ===========================================================================
-#  Module database (self-contained, mirrors calibration/scan_utils.py)
-# ===========================================================================
-
-class Module:
-    __slots__ = ("name", "mod_type", "x", "y", "sx", "sy")
-
-    def __init__(self, name, mod_type, x, y, sx, sy):
-        self.name = name
-        self.mod_type = mod_type
-        self.x = x
-        self.y = y
-        self.sx = sx
-        self.sy = sy
-
-
-def load_modules(path: Path = MODULES_JSON) -> List[Module]:
-    import json
-    with open(path) as f:
-        data = json.load(f)
-    return [Module(e["n"], e["t"], e["x"], e["y"], e["sx"], e["sy"])
-            for e in data]
-
-
-# ===========================================================================
-#  Colour palettes
-# ===========================================================================
-
-PALETTES = {
-    "blue-orange": [
-        (0.00, (10, 42, 110)), (0.25, (30, 90, 180)),
-        (0.50, (80, 80, 80)), (0.75, (220, 120, 30)),
-        (1.00, (249, 115, 22)),
-    ],
-    "viridis": [
-        (0.00, (68, 1, 84)), (0.25, (59, 82, 139)),
-        (0.50, (33, 145, 140)), (0.75, (94, 201, 98)),
-        (1.00, (253, 231, 37)),
-    ],
-    "inferno": [
-        (0.00, (0, 0, 4)), (0.25, (120, 28, 109)),
-        (0.50, (229, 89, 52)), (0.75, (253, 198, 39)),
-        (1.00, (252, 255, 164)),
-    ],
-    "coolwarm": [
-        (0.00, (59, 76, 192)), (0.25, (141, 176, 254)),
-        (0.50, (221, 221, 221)), (0.75, (245, 148, 114)),
-        (1.00, (180, 4, 38)),
-    ],
-    "hot": [
-        (0.00, (11, 0, 0)), (0.33, (230, 0, 0)),
-        (0.66, (255, 210, 0)), (1.00, (255, 255, 255)),
-    ],
-    "rainbow": [
-        (0.00, (30, 58, 95)), (0.25, (59, 130, 246)),
-        (0.50, (45, 212, 160)), (0.75, (234, 179, 8)),
-        (1.00, (245, 101, 101)),
-    ],
-}
-PALETTE_NAMES = list(PALETTES.keys())
+# Default palette for non-drift modes (matches historical gain-monitor look).
+_DEFAULT_PALETTE = "blue-orange"
 
 # Separate palette used only in Run-to-Run Drift mode (not cycled by the user)
 DRIFT_PALETTE = [
@@ -125,24 +70,6 @@ DRIFT_PALETTE = [
     (0.50, (80, 80, 80)),    # grey  — no drift (always maps to 0 in drift mode)
     (1.00, (249, 115, 22)),  # orange — large positive drift
 ]
-
-
-def _lerp(a: int, b: int, t: float) -> int:
-    return int(a + (b - a) * t)
-
-
-def _cmap_qcolor(t: float, stops) -> QColor:
-    t = max(0.0, min(1.0, t))
-    for i in range(len(stops) - 1):
-        t0, c0 = stops[i]
-        t1, c1 = stops[i + 1]
-        if t <= t1:
-            s = (t - t0) / (t1 - t0) if t1 > t0 else 0.0
-            return QColor(_lerp(c0[0], c1[0], s),
-                          _lerp(c0[1], c1[1], s),
-                          _lerp(c0[2], c1[2], s))
-    _, c = stops[-1]
-    return QColor(*c)
 
 
 # ===========================================================================
@@ -427,69 +354,46 @@ def compute_summary(
 #  HyCal Gain Map Widget
 # ===========================================================================
 
-class HyCalGainMapWidget(QWidget):
-    """Colour-coded HyCal module map with zoom/pan and hover tooltips."""
+_LEGEND_ITEMS = {
+    "drift": [
+        (QColor(0, 210, 230),  "gain decreases"),
+        (QColor(80, 80, 80),   "stable"),
+        (QColor(249, 115, 22), "gain increases"),
+    ],
+    "summary": [
+        (QColor(10, 42, 110),  "low drift count"),
+        (QColor(249, 115, 22), "high drift count"),
+    ],
+    "gain": [
+        (QColor(10, 42, 110),  "low gain"),
+        (QColor(249, 115, 22), "high gain"),
+    ],
+    "deviation": [
+        (QColor(10, 42, 110),  "below mean"),
+        (QColor(80, 80, 80),   "near mean"),
+        (QColor(249, 115, 22), "above mean"),
+    ],
+}
 
-    moduleHovered = pyqtSignal(str)
-    moduleClicked = pyqtSignal(str)   # emits name, or "" to deselect
-    paletteClicked = pyqtSignal()
 
-    _SHRINK = 0.90
-    _CLICK_THRESHOLD = 4
+class HyCalGainMapWidget(HyCalMapWidget):
+    """Gain-monitor specialisation of the shared HyCal map widget.
+
+    Adds a custom palette override (used by Run-to-Run Drift mode), a
+    persistent module selection highlight, and a legend overlay above the
+    colour bar that explains the active view mode.
+    """
+
+    CB_MAX_WIDTH = 300
 
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMouseTracking(True)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding,
-                           QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(400, 400)
-
-        self._modules: List[Module] = []
-        self._values: Dict[str, float] = {}
-        self._vmin = 0.0
-        self._vmax = 1.0
-        self._log_scale = False
-        self._palette_idx = 0
+        super().__init__(parent, shrink=0.90, margin_top=8,
+                         enable_zoom_pan=True)
         self._palette_override = None
-        self._legend_mode: Optional[str] = None  # None | "drift" | "summary"
-        self._hovered: Optional[str] = None
+        self._legend_mode: Optional[str] = None
         self._selected: Optional[str] = None
-        self._rects: Dict[str, QRectF] = {}
-        self._rect_names_rev: List[str] = []
-        self._geo_bounds: Tuple[float, float, float, float] = (0.0, 1.0, 0.0, 1.0)
-        self._cb_rect: Optional[QRectF] = None
-        self._layout_dirty = True
 
-        # zoom / pan
-        self._zoom = 1.0
-        self._pan_x = 0.0
-        self._pan_y = 0.0
-        self._drag_last: Optional[QPointF] = None
-        self._drag_origin: Optional[QPointF] = None
-        self._dragging = False
-
-        # overlay reset button (top-right corner)
-        self._reset_btn = QPushButton("Reset", self)
-        self._reset_btn.setFixedSize(52, 24)
-        self._reset_btn.setStyleSheet(
-            "QPushButton{background:rgba(22,27,34,200);color:#8b949e;"
-            "border:1px solid #30363d;font:bold 9px Consolas;border-radius:3px;}"
-            "QPushButton:hover{background:rgba(33,38,45,220);color:#c9d1d9;}")
-        self._reset_btn.clicked.connect(self.reset_view)
-
-    # -- public API --
-
-    def set_modules(self, modules: List[Module]):
-        self._modules = [m for m in modules if m.mod_type != "LMS"]
-        if self._modules:
-            self._geo_bounds = (
-                min(m.x - m.sx / 2 for m in self._modules),
-                max(m.x + m.sx / 2 for m in self._modules),
-                min(m.y - m.sy / 2 for m in self._modules),
-                max(m.y + m.sy / 2 for m in self._modules),
-            )
-        self._layout_dirty = True
-        self.update()
+    # -- public API additions --
 
     def set_gain_data(self, values: Dict[str, float],
                       vmin: float, vmax: float):
@@ -498,14 +402,9 @@ class HyCalGainMapWidget(QWidget):
         self._vmax = vmax
         self.update()
 
-    def set_log_scale(self, on: bool):
-        self._log_scale = on
-        self.update()
-
-    def set_palette(self, idx: int):
-        self._palette_idx = idx % len(PALETTES)
+    def set_palette(self, idx_or_name):
         self._palette_override = None
-        self.update()
+        super().set_palette(idx_or_name)
 
     def set_palette_override(self, stops):
         """Use a custom stops list instead of the indexed palette. Pass None to clear."""
@@ -513,7 +412,6 @@ class HyCalGainMapWidget(QWidget):
         self.update()
 
     def set_legend_mode(self, mode: Optional[str]):
-        """Set legend overlay: None, 'drift', or 'summary'."""
         if mode != self._legend_mode:
             self._legend_mode = mode
             self.update()
@@ -522,286 +420,87 @@ class HyCalGainMapWidget(QWidget):
         self._selected = name
         self.update()
 
-    def reset_view(self):
-        self._zoom = 1.0
-        self._pan_x = 0.0
-        self._pan_y = 0.0
-        self._layout_dirty = True
-        self.update()
+    # -- base hooks --
 
-    # -- layout --
-
-    def _recompute_layout(self):
-        self._rects.clear()
-        if not self._modules:
-            self._rect_names_rev = []
-            return
-        w, h = self.width(), self.height()
-        margin, top, bot = 12, 8, 50
-        pw, ph = w - 2 * margin, h - top - bot
-
-        x0, x1, y0, y1 = self._geo_bounds
-
-        base_scale = min(pw / (x1 - x0), ph / (y1 - y0))
-        sc = base_scale * self._zoom
-        dw, dh = (x1 - x0) * sc, (y1 - y0) * sc
-        ox = margin + (pw - dw) / 2 + self._pan_x
-        oy = top + (ph - dh) / 2 + self._pan_y
-        shrink = self._SHRINK
-
-        self._geo_x0 = x0
-        self._geo_y1 = y1
-        self._geo_sc = sc
-        self._geo_ox = ox
-        self._geo_oy = oy
-
-        for m in self._modules:
-            mw, mh = m.sx * sc * shrink, m.sy * sc * shrink
-            cx = ox + (m.x - x0) * sc
-            cy = oy + (y1 - m.y) * sc
-            self._rects[m.name] = QRectF(cx - mw / 2, cy - mh / 2, mw, mh)
-        self._rect_names_rev = list(self._rects)[::-1]
-        self._layout_dirty = False
-
-    def resizeEvent(self, event):
-        self._layout_dirty = True
-        # keep reset button in top-right corner
-        self._reset_btn.move(self.width() - self._reset_btn.width() - 6, 6)
-        super().resizeEvent(event)
-
-    # -- painting --
-
-    def paintEvent(self, event):
-        if self._layout_dirty:
-            self._recompute_layout()
-        p = QPainter(self)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-        w, h = self.width(), self.height()
-        p.fillRect(0, 0, w, h, QColor("#0a0e14"))
-
-        if not self._rects:
-            if not self._values:
-                p.setPen(QColor("#555555"))
-                p.setFont(QFont("Consolas", 12))
-                p.drawText(QRectF(0, 0, w, h),
-                           Qt.AlignmentFlag.AlignCenter, "No data loaded")
-            p.end()
-            return
-
+    def palette_stops(self):
         if self._palette_override is not None:
-            stops = self._palette_override
-        else:
-            stops = list(PALETTES.values())[self._palette_idx]
-        vmin, vmax = self._vmin, self._vmax
-        log_scale = self._log_scale
-        no_data = QColor("#1a1a2e")
+            return self._palette_override
+        return super().palette_stops()
 
-        # precompute log bounds
-        if log_scale:
-            log_lo = math.log10(max(vmin, 1e-9))
-            log_hi = math.log10(max(vmax, vmin * 10, 1e-8))
+    def _fmt_value(self, v: float) -> str:
+        return f"{v:.4f}"
 
-        for name, rect in self._rects.items():
-            v = self._values.get(name)
-            if v is not None:
-                if log_scale:
-                    lv = math.log10(max(v, 1e-9))
-                    t = (lv - log_lo) / (log_hi - log_lo) if log_hi > log_lo else 0.5
-                else:
-                    t = ((v - vmin) / (vmax - vmin)) if vmax > vmin else 0.5
-                p.fillRect(rect, _cmap_qcolor(t, stops))
-            else:
-                p.fillRect(rect, no_data)
+    def _tooltip_text(self, name: str) -> str:
+        v = self._values.get(name)
+        if v is None:
+            return name
+        return f"{name}: {v:.5f}"
 
-        # selected highlight (white border)
+    def _colorbar_center_text(self) -> str:
+        if self._palette_override is not None:
+            return "cyan-grey-orange"
+        return super()._colorbar_center_text()
+
+    def _paint_empty(self, p, w, h):
+        if not self._values:
+            p.setPen(QColor("#555555"))
+            p.setFont(QFont("Consolas", 12))
+            p.drawText(QRectF(0, 0, w, h),
+                       Qt.AlignmentFlag.AlignCenter, "No data loaded")
+
+    def _paint_overlays(self, p, w, h):
         if self._selected and self._selected in self._rects:
             p.setPen(QPen(QColor("#ffffff"), 2.5))
             p.setBrush(Qt.BrushStyle.NoBrush)
             p.drawRect(self._rects[self._selected])
+        super()._paint_overlays(p, w, h)
 
-        # hover highlight
-        if self._hovered and self._hovered in self._rects:
-            p.setPen(QPen(QColor("#58a6ff"), 2.0))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            p.drawRect(self._rects[self._hovered])
-
-        # colour bar
-        cb_w = min(300, w - 80)
-        cb_h = 14
-        cb_x = (w - cb_w) / 2
-        cb_y = h - 40
-        self._cb_rect = QRectF(cb_x, cb_y, cb_w, cb_h)
-
-        grad = QLinearGradient(cb_x, 0, cb_x + cb_w, 0)
-        for t, (r, g, b) in stops:
-            grad.setColorAt(t, QColor(r, g, b))
-        p.fillRect(self._cb_rect, QBrush(grad))
-        p.setPen(QPen(QColor("#58a6ff"), 1.0))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(self._cb_rect)
-
-        # range labels + palette name
-        p.setPen(QColor("#8b949e"))
+    def _paint_after_colorbar(self, p, w, h):
+        items = _LEGEND_ITEMS.get(self._legend_mode)
+        if not items or self._cb_rect is None:
+            return
+        cb_y = self._cb_rect.y()
         p.setFont(QFont("Consolas", 9))
-        p.drawText(QRectF(cb_x, cb_y + cb_h + 2, 80, 14),
-                   Qt.AlignmentFlag.AlignLeft, f"{vmin:.4f}")
-        p.drawText(QRectF(cb_x + cb_w - 80, cb_y + cb_h + 2, 80, 14),
-                   Qt.AlignmentFlag.AlignRight, f"{vmax:.4f}")
-        pname = "cyan-grey-orange" if self._palette_override is not None else PALETTE_NAMES[self._palette_idx]
-        p.drawText(QRectF(cb_x, cb_y + cb_h + 2, cb_w, 14),
-                   Qt.AlignmentFlag.AlignCenter, pname)
-
-        # legend (just above the colour bar)
-        if self._legend_mode == "drift":
-            items = [
-                (QColor(0, 210, 230),  "gain decreases"),
-                (QColor(80, 80, 80),   "stable"),
-                (QColor(249, 115, 22), "gain increases"),
-            ]
-        elif self._legend_mode == "summary":
-            items = [
-                (QColor(10, 42, 110),  "low drift count"),
-                (QColor(249, 115, 22), "high drift count"),
-            ]
-        elif self._legend_mode == "gain":
-            items = [
-                (QColor(10, 42, 110),  "low gain"),
-                (QColor(249, 115, 22), "high gain"),
-            ]
-        elif self._legend_mode == "deviation":
-            items = [
-                (QColor(10, 42, 110),  "below mean"),
-                (QColor(80, 80, 80),   "near mean"),
-                (QColor(249, 115, 22), "above mean"),
-            ]
-        else:
-            items = []
-        if items:
-            p.setFont(QFont("Consolas", 9))
-            fm = p.fontMetrics()
-            swatch = 12
-            gap = 5
-            item_w = swatch + gap + max(fm.horizontalAdvance(lbl) for _, lbl in items)
-            spacing = 18
-            total_w = len(items) * item_w + (len(items) - 1) * spacing
-            lh = max(swatch, fm.height())
-            pad = 4
-            lx = (w - total_w) // 2 - pad
-            ly = cb_y - lh - 2 * pad - 4
+        fm = p.fontMetrics()
+        swatch = 12
+        gap = 5
+        item_w = swatch + gap + max(fm.horizontalAdvance(lbl) for _, lbl in items)
+        spacing = 18
+        total_w = len(items) * item_w + (len(items) - 1) * spacing
+        lh = max(swatch, fm.height())
+        pad = 4
+        lx = (w - total_w) // 2 - pad
+        ly = cb_y - lh - 2 * pad - 4
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(10, 14, 20, 200))
+        p.drawRoundedRect(QRectF(lx, ly, total_w + 2 * pad, lh + 2 * pad), 4, 4)
+        x = lx + pad
+        for color, label in items:
+            sy = ly + pad + (lh - swatch) // 2
             p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(QColor(10, 14, 20, 200))
-            p.drawRoundedRect(QRectF(lx, ly, total_w + 2 * pad, lh + 2 * pad), 4, 4)
-            x = lx + pad
-            for color, label in items:
-                sy = ly + pad + (lh - swatch) // 2
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(color)
-                p.drawRect(QRectF(x, sy, swatch, swatch))
-                p.setPen(QColor("#c9d1d9"))
-                p.drawText(QRectF(x + swatch + gap, ly + pad, fm.horizontalAdvance(label), lh),
-                           Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
-                           label)
-                x += item_w + spacing
+            p.setBrush(color)
+            p.drawRect(QRectF(x, sy, swatch, swatch))
+            p.setPen(QColor("#c9d1d9"))
+            p.drawText(QRectF(x + swatch + gap, ly + pad,
+                              fm.horizontalAdvance(label), lh),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                       label)
+            x += item_w + spacing
 
-        p.end()
-
-    # -- mouse events (zoom/pan from scan_geoview pattern) --
-
-    def mousePressEvent(self, e):
-        if e.button() == Qt.MouseButton.MiddleButton:
-            self.reset_view()
-            return
-        if e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
-            self._drag_last = e.position()
-            self._drag_origin = e.position()
-            self._dragging = False
-
-    def mouseReleaseEvent(self, e):
-        if e.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton):
-            if self._dragging:
-                self.setCursor(Qt.CursorShape.ArrowCursor)
-            elif e.button() == Qt.MouseButton.LeftButton:
-                pos = e.position()
-                # click on colour bar -> cycle palette
-                if self._cb_rect and self._cb_rect.contains(pos):
-                    self.paletteClicked.emit()
-                else:
-                    # click on a module -> select/deselect
-                    hit = None
-                    for name in self._rect_names_rev:
-                        if self._rects[name].contains(pos):
-                            hit = name
-                            break
-                    if hit is not None:
-                        new_sel = None if hit == self._selected else hit
-                        self._selected = new_sel
-                        self.update()
-                        self.moduleClicked.emit(new_sel if new_sel else "")
-                    elif self._selected is not None:
-                        self._selected = None
-                        self.update()
-                        self.moduleClicked.emit("")
-            self._drag_last = None
-            self._drag_origin = None
-            self._dragging = False
-
-    def mouseMoveEvent(self, e):
-        # drag
-        if self._drag_last is not None:
-            pos = e.position()
-            if not self._dragging:
-                dx = pos.x() - self._drag_origin.x()
-                dy = pos.y() - self._drag_origin.y()
-                if dx * dx + dy * dy > self._CLICK_THRESHOLD ** 2:
-                    self._dragging = True
-                    self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            if self._dragging:
-                self._pan_x += pos.x() - self._drag_last.x()
-                self._pan_y += pos.y() - self._drag_last.y()
-                self._drag_last = pos
-                self._layout_dirty = True
-                self.update()
-            return
-
-        # hover tooltip
-        pos = e.position()
-        # hand cursor over colour bar
+    def _handle_click(self, pos):
         if self._cb_rect and self._cb_rect.contains(pos):
-            self.setCursor(Qt.CursorShape.PointingHandCursor)
-        else:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-
-        found = None
-        for name in self._rect_names_rev:
-            if self._rects[name].contains(pos):
-                found = name
-                break
-        if found != self._hovered:
-            self._hovered = found
-            self.update()
-            if found:
-                v = self._values.get(found)
-                tip = f"{found}: {v:.5f}" if v is not None else found
-                QToolTip.showText(e.globalPosition().toPoint(), tip, self)
-                self.moduleHovered.emit(found)
-            else:
-                QToolTip.hideText()
-
-    def wheelEvent(self, e):
-        factor = 1.15 if e.angleDelta().y() > 0 else 1.0 / 1.15
-        new_zoom = max(0.5, min(self._zoom * factor, 20.0))
-        if new_zoom == self._zoom:
+            self.paletteClicked.emit()
             return
-        pos = e.position()
-        ratio = new_zoom / self._zoom
-        self._pan_x = pos.x() + (self._pan_x - pos.x()) * ratio
-        self._pan_y = pos.y() + (self._pan_y - pos.y()) * ratio
-        self._zoom = new_zoom
-        self._layout_dirty = True
-        self.update()
-
-    def sizeHint(self):
-        return QSize(680, 680)
+        hit = self._hit(pos)
+        if hit is not None:
+            new_sel = None if hit == self._selected else hit
+            self._selected = new_sel
+            self.update()
+            self.moduleClicked.emit(new_sel if new_sel else "")
+        elif self._selected is not None:
+            self._selected = None
+            self.update()
+            self.moduleClicked.emit("")
 
 
 def _chart_y_range(values: List[float], errors: List[float]) -> Tuple[float, float]:
@@ -2367,7 +2066,7 @@ class GainMonitorWindow(QMainWindow):
         self._runs: List[RunData] = []
         self._current_run_idx: int = 0
         self._current_ref_idx: int = LMS_REF_DEFAULT
-        self._palette_idx = 0
+        self._palette_idx = PALETTE_NAMES.index(_DEFAULT_PALETTE)
         self._auto_range = True
         self._manual_vmin = 0.9
         self._manual_vmax = 1.1
@@ -2398,7 +2097,7 @@ class GainMonitorWindow(QMainWindow):
             self._map.set_palette_override(DRIFT_PALETTE)
 
     def _load_geometry(self):
-        self._all_modules = load_modules()
+        self._all_modules = load_modules(MODULES_JSON)
         self._mod_by_name = {m.name: m for m in self._all_modules}
 
     @property
@@ -2695,6 +2394,7 @@ class GainMonitorWindow(QMainWindow):
         # geo map
         self._map = HyCalGainMapWidget()
         self._map.set_modules(self._all_modules)
+        self._map.set_palette(self._palette_idx)
         self._map.moduleHovered.connect(self._on_module_hovered)
         self._map.moduleClicked.connect(self._on_module_clicked)
         self._map.paletteClicked.connect(self._on_cycle_palette)

@@ -37,8 +37,48 @@ status EvChannel::Open(const std::string &path)
     return evio_status(st);
 }
 
-void EvChannel::Close() { evClose(fHandle); fHandle = -1; }
+void EvChannel::Close() { evClose(fHandle); fHandle = -1; ra_count = 0; }
 status EvChannel::Read() { return evio_status(evRead(fHandle, buffer.data(), buffer.size())); }
+
+// --- random-access open (evio "ra" mode) ------------------------------------
+status EvChannel::OpenRandomAccess(const std::string &path)
+{
+    if (fHandle > 0) Close();
+    ra_count = 0;
+    char *cp = strdup(path.c_str()), *cm = strdup("ra");
+    int st = evOpen(cp, cm, &fHandle);
+    free(cp); free(cm);
+    if (st != S_SUCCESS) return evio_status(st);
+
+    // Retrieve the event count from the random-access table.  The table
+    // itself is owned by evio — we only want the size.
+    uint32_t **table = nullptr;
+    uint32_t n = 0;
+    int r = evGetRandomAccessTable(fHandle, &table, &n);
+    if (r != S_SUCCESS) {
+        Close();
+        return evio_status(r);
+    }
+    ra_count = static_cast<int>(n);
+    return status::success;
+}
+
+status EvChannel::ReadEventByIndex(int evio_event_index)
+{
+    if (fHandle <= 0 || ra_count == 0) return status::failure;
+    if (evio_event_index < 0 || evio_event_index >= ra_count) return status::failure;
+
+    const uint32_t *pEvent = nullptr;
+    uint32_t buflen = 0;
+    // evReadRandom is 1-indexed per the evio API; callers use 0-based.
+    int r = evReadRandom(fHandle, &pEvent, &buflen,
+                          static_cast<uint32_t>(evio_event_index + 1));
+    if (r != S_SUCCESS || pEvent == nullptr) return evio_status(r);
+
+    if (buflen > buffer.size()) buffer.resize(buflen);
+    std::memcpy(buffer.data(), pEvent, buflen * sizeof(uint32_t));
+    return status::success;
+}
 
 // === SetConfig ==============================================================
 // Back-fill data_banks from legacy tag fields for anything the JSON didn't

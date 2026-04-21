@@ -30,13 +30,17 @@ private:
     evc::DaqConfig cfg_;
     std::string filepath_;
 
-    struct EvioIndex { int buffer_num, sub_event; };
+    // 0-based evio event index (for EvChannel::ReadEventByIndex) plus the
+    // sub-event index within that event's built-trigger block.
+    struct EvioIndex { int evio_event, sub_event; };
     std::vector<EvioIndex> index_;
 
-    // cached sequential reader for random access
+    // Persistent random-access reader.  Opened once during open() via evio's
+    // "ra" mode (mmap + native event-pointer table) and kept alive for the
+    // lifetime of the data source; decodeEvent() jumps directly to the
+    // requested event via reader_.ReadEventByIndex().
     evc::EvChannel reader_;
     std::string reader_path_;
-    int reader_buf_ = 0;
     // Index of the event currently decoded in reader_'s lazy cache, or -1 if
     // the cache is invalid.  When decodeEvent() is called with the same index
     // a second time (common for viewer_server's decodeEvent + computeClusters
@@ -45,6 +49,5 @@ private:
     int last_decoded_index_ = -1;
     std::mutex reader_mtx_;
 
-    std::string seekTo(int buf_num);
     void invalidateReader();
 };
