@@ -2109,7 +2109,7 @@ class GainMonitorWindow(QMainWindow):
 
     def _build_ui(self):
         self.setWindowTitle("HyCal Gain Monitor")
-        self.resize(1600, 1000)
+        self.resize(1800, 1000)   # 18:10
         apply_theme_palette(self)
 
         central = QWidget()
@@ -2153,11 +2153,14 @@ class GainMonitorWindow(QMainWindow):
         self._auto_refresh_btn.setEnabled(False)
         self._auto_refresh_btn.setFont(QFont("Consolas", 10))
         self._auto_refresh_btn.setFixedHeight(28)
-        self._auto_refresh_btn.setStyleSheet(themed(
-            "QPushButton{background:#161b22;color:#8b949e;border:1px solid #30363d;"
-            "border-radius:3px;padding:0 8px;}"
-            "QPushButton:checked{background:#1a3a1a;color:#3fb950;border-color:#3fb950;}"
-            "QPushButton:hover{background:#21262d;}"))
+        # Themed via f-string so the :checked state's green tint comes from
+        # THEME.SUCCESS / THEME.BUTTON_HOVER and tracks dark/light correctly.
+        self._auto_refresh_btn.setStyleSheet(
+            f"QPushButton{{background:{THEME.PANEL};color:{THEME.TEXT_DIM};"
+            f"border:1px solid {THEME.BORDER};border-radius:3px;padding:0 8px;}}"
+            f"QPushButton:checked{{background:{THEME.BUTTON_HOVER};"
+            f"color:{THEME.SUCCESS};border-color:{THEME.SUCCESS};}}"
+            f"QPushButton:hover{{background:{THEME.BUTTON};}}")
         self._auto_refresh_btn.toggled.connect(self._on_auto_refresh_toggled)
         top.addWidget(self._auto_refresh_btn)
 

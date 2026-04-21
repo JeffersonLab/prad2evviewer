@@ -58,7 +58,7 @@ class RealScalerEPICS:
         import epics as _epics
         self._pvs: Dict[str, object] = {}
         for m in modules:
-            if m.mod_type in ("PbWO4", "PbGlass"):
+            if m.mod_type in ("PbWO4", "PbGlass", "LMS"):
                 pv = _epics.PV(SCALER_PV.format(label=m.name), connection_timeout=2.0)
                 self._pvs[m.name] = pv
 
@@ -79,7 +79,7 @@ class SimulatedScalerEPICS:
     def __init__(self, modules: List[Module]):
         self._rng = random.Random(0)
         self._names = [m.name for m in modules
-                       if m.mod_type in ("PbWO4", "PbGlass")]
+                       if m.mod_type in ("PbWO4", "PbGlass", "LMS")]
 
     def get(self, name: str) -> Optional[float]:
         return self._rng.uniform(0, 1000)
@@ -96,7 +96,7 @@ class ScalerMapWidget(HyCalMapWidget):
     """Simple value → colour map with palette cycle and log scale."""
 
     def __init__(self, parent=None):
-        super().__init__(parent, min_size=(500, 500))
+        super().__init__(parent, min_size=(500, 500), include_lms=True)
         self._vmax = 1000.0   # sensible default for kHz rates
 
     def _fmt_value(self, v: float) -> str:
@@ -115,7 +115,7 @@ class ScalerMapWindow(QMainWindow):
         self._ep = epics_source
         self._simulation = simulation
         self._scalable = [m for m in modules
-                          if m.mod_type in ("PbWO4", "PbGlass")]
+                          if m.mod_type in ("PbWO4", "PbGlass", "LMS")]
         self._values: Dict[str, float] = {}
         self._polling = True
         self._palette_idx = 0
