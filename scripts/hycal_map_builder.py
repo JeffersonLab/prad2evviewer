@@ -265,10 +265,9 @@ class MapBuilderWidget(HyCalMapWidget):
             log_hi = math.log10(max(vmax, vmin * 10, 1e-8))
 
         glass_alpha = self._pbglass_alpha
-        # PbGlass frame colour — pick a shade that's visible against both the
-        # dark and light backgrounds.
-        frame_col_base = (QColor(60, 65, 75) if self._light_theme
-                          else QColor(160, 165, 175))
+        # Module frame — TEXT_DIM is defined to be readable on the active
+        # theme's canvas, so it's visible in both dark and light modes.
+        frame_col_base = QColor(THEME.TEXT_DIM)
         pbglass_names = self._pbglass_names
 
         for name, rect in self._rects.items():
