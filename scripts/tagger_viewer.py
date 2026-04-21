@@ -432,11 +432,9 @@ class BarChart(QWidget):
         p.drawRect(r)
 
         if self._title:
-            f = QFont()
-            f.setPointSize(9)
-            f.setBold(True)
+            f = QFont("Monospace", 10, QFont.Weight.Bold)
             p.setFont(f)
-            p.drawText(int(r.left()), int(r.top() - 4), self._title)
+            p.drawText(int(r.left()), int(r.top() - 6), self._title)
 
         n = self._counts.size
         if n <= 0:
@@ -462,9 +460,7 @@ class BarChart(QWidget):
 
         # y-axis ticks
         p.setPen(QColor(THEME.TEXT_DIM))
-        f = QFont()
-        f.setPointSize(8)
-        p.setFont(f)
+        p.setFont(QFont("Monospace", 8))
         for frac in (0.0, 0.5, 1.0):
             y = r.bottom() - frac * r.height()
             p.drawLine(int(r.left() - 3), int(y), int(r.left()), int(y))
@@ -521,11 +517,9 @@ class Histogram(QWidget):
         p.drawRect(r)
 
         if self._title:
-            f = QFont()
-            f.setPointSize(10)
-            f.setBold(True)
+            f = QFont("Monospace", 10, QFont.Weight.Bold)
             p.setFont(f)
-            p.drawText(int(r.left()), int(r.top() - 4), self._title)
+            p.drawText(int(r.left()), int(r.top() - 6), self._title)
 
         n = self._counts.size
         if n <= 0 or self._counts.sum() == 0:
@@ -551,9 +545,7 @@ class Histogram(QWidget):
 
         # y ticks
         p.setPen(QColor(THEME.TEXT_DIM))
-        f = QFont()
-        f.setPointSize(8)
-        p.setFont(f)
+        p.setFont(QFont("Monospace", 8))
         for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
             y = r.bottom() - frac * r.height()
             p.drawLine(int(r.left() - 3), int(y), int(r.left()), int(y))
@@ -627,9 +619,13 @@ class Heatmap2D(QWidget):
         r = np.clip(-0.87 + 4.26*t - 4.85*t*t + 2.5*t*t*t, 0.0, 1.0)
         g = np.clip(-0.03 + 0.77*t + 1.32*t*t - 1.87*t*t*t, 0.0, 1.0)
         b = np.clip( 0.33 + 1.74*t - 4.26*t*t + 3.17*t*t*t, 0.0, 1.0)
-        # Zero bins → background grey so they don't pick up the low-t colour.
+        # Zero bins → theme's "no data" surface so they don't pick up the
+        # low-t colormap colour. Resolved at paint time so it follows --theme.
+        zero_rgb = QColor(THEME.NO_DATA)
         zero = n == 0
-        r[zero] = 0.96; g[zero] = 0.96; b[zero] = 0.96
+        r[zero] = zero_rgb.redF()
+        g[zero] = zero_rgb.greenF()
+        b[zero] = zero_rgb.blueF()
 
         # Transpose to (nybins, nxbins) then flip vertically.
         r8 = (r.T[::-1] * 255).astype(np.uint8)
@@ -658,8 +654,7 @@ class Heatmap2D(QWidget):
         p.setPen(QPen(QColor(THEME.TEXT)))
 
         if self._title:
-            f = QFont()
-            f.setPointSize(10); f.setBold(True)
+            f = QFont("Monospace", 10, QFont.Weight.Bold)
             p.setFont(f)
             p.drawText(int(r.left()), int(r.top() - 6), self._title)
 
@@ -675,8 +670,7 @@ class Heatmap2D(QWidget):
         p.drawRect(r)
 
         # tick labels
-        f = QFont(); f.setPointSize(8)
-        p.setFont(f)
+        p.setFont(QFont("Monospace", 8))
         p.setPen(QColor(THEME.TEXT_DIM))
         xe, ye = self._xedges, self._yedges
         for frac in (0.0, 0.25, 0.5, 0.75, 1.0):
@@ -931,6 +925,8 @@ def show_error_dialog(parent, title: str, heading: str, details: str,
     dlg.setWindowTitle(title)
     dlg.resize(width, height)
     dlg.setSizeGripEnabled(True)
+    apply_theme_palette(dlg)
+    dlg.setStyleSheet(_app_stylesheet())
 
     lay = QVBoxLayout(dlg)
 
@@ -959,6 +955,118 @@ def show_error_dialog(parent, title: str, heading: str, details: str,
 
 
 # ---------------------------------------------------------------------------
+# Application-wide Qt stylesheet
+# ---------------------------------------------------------------------------
+
+
+def _app_stylesheet() -> str:
+    """Apple-inspired stylesheet applied to the top-level window.
+
+    Qt stylesheets cascade to child widgets that don't set their own, so
+    this is the single place where buttons / inputs / tree / tab chrome
+    pick up the active :class:`THEME`. Reads values live, so callers
+    should rebuild this string after :func:`set_theme`.
+    """
+    return (
+        # --- Push buttons (8px radius, Apple blue focus) ------------------
+        f"QPushButton {{"
+        f"  background:{THEME.BUTTON};"
+        f"  color:{THEME.TEXT};"
+        f"  border:1px solid {THEME.BORDER};"
+        f"  border-radius:8px;"
+        f"  padding:5px 14px;"
+        f"}}"
+        f"QPushButton:hover    {{ background:{THEME.BUTTON_HOVER}; }}"
+        f"QPushButton:pressed  {{ background:{THEME.BUTTON_HOVER}; }}"
+        f"QPushButton:checked  {{"
+        f"  background:{THEME.ACCENT_STRONG};"
+        f"  color:#ffffff;"
+        f"  border:1px solid {THEME.ACCENT_BORDER};"
+        f"}}"
+        f"QPushButton:disabled {{ color:{THEME.TEXT_MUTED}; }}"
+        f"QPushButton:focus    {{ outline:none; border:1px solid {THEME.ACCENT_BORDER}; }}"
+
+        # --- Text inputs / spin / combo (6px radius) ----------------------
+        f"QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{"
+        f"  background:{THEME.PANEL};"
+        f"  color:{THEME.TEXT};"
+        f"  border:1px solid {THEME.BORDER};"
+        f"  border-radius:6px;"
+        f"  padding:2px 6px;"
+        f"  selection-background-color:{THEME.ACCENT};"
+        f"  selection-color:#ffffff;"
+        f"}}"
+        f"QComboBox QAbstractItemView {{"
+        f"  background:{THEME.PANEL};"
+        f"  color:{THEME.TEXT};"
+        f"  border:1px solid {THEME.BORDER};"
+        f"  selection-background-color:{THEME.ACCENT};"
+        f"}}"
+
+        # --- Check boxes -------------------------------------------------
+        f"QCheckBox {{ color:{THEME.TEXT}; spacing:6px; }}"
+        f"QCheckBox::indicator {{"
+        f"  width:14px; height:14px; border-radius:3px;"
+        f"  border:1px solid {THEME.BORDER}; background:{THEME.PANEL};"
+        f"}}"
+        f"QCheckBox::indicator:hover   {{ border:1px solid {THEME.ACCENT}; }}"
+        f"QCheckBox::indicator:checked {{ background:{THEME.ACCENT}; border:1px solid {THEME.ACCENT}; }}"
+
+        # --- Labels (default text colour — frame-shaped labels get a panel)
+        f"QLabel {{ color:{THEME.TEXT}; }}"
+        f"QLabel[frameShape=\"4\"], QLabel[frameShape=\"1\"] {{"
+        f"  background:{THEME.PANEL}; border:1px solid {THEME.BORDER};"
+        f"  border-radius:6px; padding:1px 6px;"
+        f"}}"
+
+        # --- Tree / Tabs / Splitter / Menu / Status / Tooltip -----------
+        f"QTreeWidget, QTreeView {{"
+        f"  background:{THEME.PANEL};"
+        f"  color:{THEME.TEXT};"
+        f"  border:1px solid {THEME.BORDER};"
+        f"  alternate-background-color:{THEME.ALT_BASE};"
+        f"  selection-background-color:{THEME.ACCENT};"
+        f"  selection-color:#ffffff;"
+        f"}}"
+        f"QHeaderView::section {{"
+        f"  background:{THEME.PANEL};"
+        f"  color:{THEME.TEXT_DIM};"
+        f"  border:0; border-bottom:1px solid {THEME.BORDER};"
+        f"  padding:4px 6px;"
+        f"}}"
+        f"QTabWidget::pane {{ border:1px solid {THEME.BORDER}; border-radius:6px; }}"
+        f"QTabBar::tab {{"
+        f"  background:transparent;"
+        f"  color:{THEME.TEXT_DIM};"
+        f"  padding:5px 12px; margin-right:2px;"
+        f"  border-top-left-radius:6px; border-top-right-radius:6px;"
+        f"}}"
+        f"QTabBar::tab:selected {{ color:{THEME.TEXT}; border-bottom:2px solid {THEME.ACCENT}; }}"
+        f"QTabBar::tab:hover    {{ color:{THEME.TEXT}; }}"
+        f"QSplitter::handle {{ background:{THEME.BORDER}; }}"
+        f"QMenuBar {{ background:{THEME.BG}; color:{THEME.TEXT}; }}"
+        f"QMenuBar::item:selected {{ background:{THEME.BUTTON_HOVER}; }}"
+        f"QMenu {{ background:{THEME.PANEL}; color:{THEME.TEXT}; border:1px solid {THEME.BORDER}; }}"
+        f"QMenu::item:selected {{ background:{THEME.ACCENT}; color:#ffffff; }}"
+        f"QStatusBar {{ background:{THEME.BG}; color:{THEME.TEXT_DIM}; }}"
+        f"QToolTip {{"
+        f"  background:{THEME.TOOLTIP};"
+        f"  color:{THEME.TEXT};"
+        f"  border:1px solid {THEME.BORDER};"
+        f"  border-radius:6px; padding:4px 6px;"
+        f"}}"
+
+        # --- Plain text view (used by the error dialog) ------------------
+        f"QPlainTextEdit, QTextEdit {{"
+        f"  background:{THEME.PANEL};"
+        f"  color:{THEME.TEXT};"
+        f"  border:1px solid {THEME.BORDER};"
+        f"  border-radius:6px;"
+        f"}}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -979,6 +1087,7 @@ class TdcViewer(QMainWindow):
         self.setWindowTitle("Tagger TDC Viewer")
         self.resize(1280, 800)
         apply_theme_palette(self)
+        self.setStyleSheet(_app_stylesheet())
 
         self._hits: np.ndarray = (
             hits if hits is not None else np.zeros(0, dtype=RECORD_DTYPE)

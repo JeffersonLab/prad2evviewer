@@ -215,9 +215,9 @@ install(DIRECTORY resources/ DESTINATION ${CMAKE_INSTALL_DATADIR}/prad2evviewer/
 # equivalent, so the script can't reliably find itself under nested
 # `source`; the baked-in prefix is the fallback when self-detection
 # fails.  prad2_setup.sh uses BASH_SOURCE and doesn't need this treatment.
-configure_file(${CMAKE_SOURCE_DIR}/scripts/prad2_setup.csh.in
+configure_file(${CMAKE_SOURCE_DIR}/scripts/shell/prad2_setup.csh.in
     ${CMAKE_BINARY_DIR}/bin/prad2_setup.csh @ONLY)
-install(FILES scripts/prad2_setup.sh ${CMAKE_BINARY_DIR}/bin/prad2_setup.csh
+install(FILES scripts/shell/prad2_setup.sh ${CMAKE_BINARY_DIR}/bin/prad2_setup.csh
     DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # ---------------------------------------------------------------------------
@@ -237,9 +237,10 @@ install(DIRECTORY scripts/
         PATTERN "README.md"
         PATTERN "__pycache__" EXCLUDE
         PATTERN "daq_tool"    EXCLUDE   # dev-only GUIs, not installed
-        PATTERN "shell"       EXCLUDE   # dev/operator shell scripts
-        PATTERN "prad2_setup.sh"    EXCLUDE   # already in <prefix>/bin/
-        PATTERN "prad2_setup.csh.in" EXCLUDE
+        PATTERN "dev_tool"    EXCLUDE   # dev-only one-shot helpers
+        PATTERN "shell"       EXCLUDE   # operator shell scripts + prad2_setup.*
+                                        #  (setup files live here and are
+                                        #   installed explicitly via install(FILES …))
 )
 
 # ---------------------------------------------------------------------------

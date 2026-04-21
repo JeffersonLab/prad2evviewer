@@ -210,10 +210,17 @@ python scripts/daq_tool/fadc_gain_config.py -c database/calibration/adc_to_mev_f
 python scripts/daq_tool/fadc_gain_config.py --pbwo4-gain 0.15 --pbglass-gain 0.12
 ```
 
-## Operator shell scripts (`scripts/shell/`)
+## Shell scripts (`scripts/shell/`)
 
-Not installed — run directly from the source checkout on DAQ machines.
+Not installed as a directory — `prad2_setup.sh` / `prad2_setup.csh.in`
+are installed explicitly to `<prefix>/bin/` by CMake; everything else is
+meant to be used from the source checkout on DAQ / operator machines.
 
+- `prad2_setup.sh` — bash/zsh env setup (sourced from
+  `<prefix>/bin/prad2_setup.sh` at runtime).
+- `prad2_setup.csh.in` — CMake template; `configure_file` bakes the install
+  prefix in and writes the resulting `prad2_setup.csh` to
+  `<prefix>/bin/`.
 - `run_gain_monitor.sh` — wrapper that parallelises `prad2ana_gain_monitor`
   across sub-files of a run and merges the outputs via `hadd`. Requires
   the installed analysis binaries on `$PATH` (source `prad2_setup.sh`
@@ -223,8 +230,18 @@ Not installed — run directly from the source checkout on DAQ machines.
   scripts/shell/run_gain_monitor.sh <run_number> <num_cpus> [subfile_min] [subfile_max]
   ```
 
-- `prad2_server_tmux_template` — tmux session template for running
-  `prad2_server` alongside `prad2_client` on a split window.
+- `start_prad2mon` — tmux-session template for running `prad2_server`
+  under tmux with a log tee. Copy, edit the site-specific config block
+  at the top, and `chmod +x`.
+- `start_prad2hvd` — same pattern for `prad2hvd` (CAEN HV wrapper).
+
+## Dev one-shot helpers (`scripts/dev_tool/`)
+
+Also not installed — one-off generators kept for reproducibility.
+
+- `extract_tagger_map.py` — converts `docs/Tagger_translation_0.xlsx`
+  into `database/tagger_map.json` (the counter-name lookup used by
+  `tagger_viewer`). Re-run this whenever the tagger cabling changes.
 
 ## Using prad2py directly
 
