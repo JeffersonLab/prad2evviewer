@@ -22,12 +22,16 @@ it immediately; otherwise use File → Open EVIO.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # prad2py auto-discovery — walk up from this script to find build/python/.
@@ -166,48 +170,215 @@ class ScanWorker(QObject):
             cfg = dec.load_daq_config(self._daq)
             ch = dec.EvChannel()
             ch.set_config(cfg)
-            st = ch.open(self._path)
+            st = ch.open_random_access(self._path)
             if st != dec.Status.success:
-                raise RuntimeError(f"cannot open {self._path}: {st}")
+                raise RuntimeError(f"cannot open {self._path} (ra): {st}")
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
 
         events: List[EventMeta] = []
-        record_idx = 0
+        n_evio = ch.get_random_access_event_count()
         start = time.monotonic()
         try:
-            while ch.read() == dec.Status.success:
+            for evio_idx in range(n_evio):
                 if self._cancel:
                     break
+                if ch.read_event_by_index(evio_idx) != dec.Status.success:
+                    continue
                 if not ch.scan():
-                    record_idx += 1
                     continue
                 if ch.get_event_type() != dec.EventType.Physics:
-                    record_idx += 1
                     continue
                 n_sub = ch.get_n_events()
                 for i in range(n_sub):
                     ch.select_event(i)
                     info = ch.info()
                     events.append(EventMeta(
-                        record_idx=record_idx,
+                        record_idx=evio_idx,
                         subevt_idx=i,
                         event_number=int(info.event_number),
                         trigger_number=int(info.trigger_number),
                         trigger_bits=int(info.trigger_bits),
                     ))
                     if len(events) % self.PROGRESS_EVERY == 0:
-                        self.progress.emit(len(events), record_idx + 1)
-                record_idx += 1
+                        self.progress.emit(len(events), evio_idx + 1)
         except Exception as exc:  # noqa: BLE001
             ch.close()
             self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
         ch.close()
         elapsed = time.monotonic() - start
-        self.progress.emit(len(events), record_idx)
+        self.progress.emit(len(events), n_evio)
         self.finished.emit(events, elapsed)
+
+
+# ---------------------------------------------------------------------------
+# Pedestal generation — port of gem_dump.cpp::accumulatePedestals
+# ---------------------------------------------------------------------------
+
+_APV_STRIP_SIZE = 128
+_SSP_TIME_SAMPLES = 6
+_MAX_APVS_PER_MPD = 16
+_CM_DISCARD = 28        # per-timesample, drop top/bottom 28 of 128
+
+
+def _accumulate_pedestals(ssp_evt, accum: Dict[Tuple[int, int, int, int],
+                                               List[float]]):
+    """Per-event contribution to the pedestal accumulator.
+
+    ``accum[(crate, mpd, adc, strip)] = [sum, sum_sq, count]`` — updated in
+    place.  Per-time-sample common mode is the mean of the middle 72
+    strips (sorted, top 28 + bottom 28 discarded).  Per-strip pedestal
+    value = mean of CM-corrected 6 time samples.
+    """
+    for m in range(ssp_evt.nmpds):
+        mpd = ssp_evt.mpd(m)
+        if not mpd.present:
+            continue
+        crate_id, mpd_id = int(mpd.crate_id), int(mpd.mpd_id)
+        for a in range(_MAX_APVS_PER_MPD):
+            apv = mpd.apv(a)
+            if not apv.present or apv.nstrips == 0:
+                continue
+            # strips: [APV_STRIP_SIZE][SSP_TIME_SAMPLES] int16 numpy array
+            strips = apv.strips.astype(np.float32)   # copy-on-cast
+            # per-time-sample CM subtraction
+            col = np.sort(strips, axis=0)
+            cm = col[_CM_DISCARD:_APV_STRIP_SIZE - _CM_DISCARD].mean(axis=0)
+            cm_corrected = strips - cm[np.newaxis, :]   # (128, 6)
+            avg = cm_corrected.mean(axis=1)             # (128,)
+            # accumulate only strips the APV actually reported
+            for s in range(_APV_STRIP_SIZE):
+                if not apv.has_strip(s):
+                    continue
+                key = (crate_id, mpd_id, a, s)
+                v = float(avg[s])
+                entry = accum.get(key)
+                if entry is None:
+                    accum[key] = [v, v * v, 1]
+                else:
+                    entry[0] += v
+                    entry[1] += v * v
+                    entry[2] += 1
+
+
+def _write_pedestals_json(accum: Dict[Tuple[int, int, int, int],
+                                      List[float]],
+                          path: str) -> int:
+    """Group accumulated strips by APV and write the gem_ped.json format
+    GemSystem.LoadPedestals reads.  Returns APV count."""
+    from collections import defaultdict
+    per_apv: Dict[Tuple[int, int, int],
+                  List[Tuple[int, float, float]]] = defaultdict(list)
+    for (crate, mpd, adc, strip), (s, s2, n) in accum.items():
+        mean = s / n if n else 0.0
+        var = (s2 / n - mean * mean) if n >= 2 else 0.0
+        rms = var ** 0.5 if var > 0 else 0.0
+        per_apv[(crate, mpd, adc)].append((strip, mean, rms))
+
+    out = []
+    for (crate, mpd, adc), strips in per_apv.items():
+        strips.sort(key=lambda t: t[0])
+        offsets = [round(m, 3) for _, m, _ in strips]
+        noises  = [round(r, 4) for _, _, r in strips]
+        out.append({"crate": crate, "mpd": mpd, "adc": adc,
+                    "offset": offsets, "noise": noises})
+
+    with open(path, "w") as f:
+        json.dump(out, f, indent=2)
+    return len(out)
+
+
+class PedestalWorker(QObject):
+    """Builds per-strip pedestals by reading up to ``max_events`` events
+    from ``path`` (random-access).  Skips online-ZS APVs — only full-
+    readout data (nstrips == 128) contributes to the common-mode stats.
+    Writes a gem_ped.json to ``output_path``.
+    """
+
+    PROGRESS_EVERY = 50
+
+    progress = pyqtSignal(int, int)           # (done, target)
+    finished = pyqtSignal(str, int, int)      # (output_path, napvs, events_used)
+    failed   = pyqtSignal(str)
+
+    def __init__(self, path: str, daq_config_path: str,
+                 output_path: str, max_events: int = 1000):
+        super().__init__()
+        self._path = path
+        self._daq = daq_config_path
+        self._out = output_path
+        self._max = max_events
+        self._cancel = False
+
+    def request_cancel(self):
+        self._cancel = True
+
+    def run(self):
+        try:
+            cfg = dec.load_daq_config(self._daq)
+            ch = dec.EvChannel(); ch.set_config(cfg)
+            if ch.open_random_access(self._path) != dec.Status.success:
+                raise RuntimeError(f"cannot open {self._path} for pedestals")
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            return
+
+        accum: Dict[Tuple[int, int, int, int], List[float]] = {}
+        n_used = 0
+        target = self._max
+        n_evio = ch.get_random_access_event_count()
+        try:
+            for evio_idx in range(n_evio):
+                if self._cancel or n_used >= target:
+                    break
+                if ch.read_event_by_index(evio_idx) != dec.Status.success:
+                    continue
+                if not ch.scan():
+                    continue
+                if ch.get_event_type() != dec.EventType.Physics:
+                    continue
+                for i in range(ch.get_n_events()):
+                    if n_used >= target:
+                        break
+                    ch.select_event(i)
+                    ssp = ch.gem()
+                    # require at least one full-readout APV (nstrips == 128)
+                    has_full = False
+                    for m in range(ssp.nmpds):
+                        mpd = ssp.mpd(m)
+                        if not mpd.present:
+                            continue
+                        for a in range(_MAX_APVS_PER_MPD):
+                            apv = mpd.apv(a)
+                            if apv.present and apv.nstrips == _APV_STRIP_SIZE:
+                                has_full = True
+                                break
+                        if has_full:
+                            break
+                    if not has_full:
+                        continue
+                    _accumulate_pedestals(ssp, accum)
+                    n_used += 1
+                    if n_used % self.PROGRESS_EVERY == 0:
+                        self.progress.emit(n_used, target)
+        except Exception as exc:  # noqa: BLE001
+            ch.close()
+            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            return
+        ch.close()
+        self.progress.emit(n_used, target)
+
+        if n_used == 0:
+            self.failed.emit("no full-readout events found in file")
+            return
+        try:
+            napvs = _write_pedestals_json(accum, self._out)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"writing {self._out}: {exc}")
+            return
+        self.finished.emit(self._out, napvs, n_used)
 
 
 # ---------------------------------------------------------------------------
@@ -216,12 +387,9 @@ class ScanWorker(QObject):
 
 
 class Stepper:
-    """Positioned EVIO reader.  Fetches SspEventData for any event in the
-    file, using a cache of recently-visited events for fast Prev/Next.
-
-    EVIO is sequential, so random access to event N sometimes requires a
-    re-open + scan-up-to-N.  We only re-open when the requested event is
-    behind our current read position; forward jumps are a linear walk.
+    """Positioned EVIO reader.  Fetches SspEventData for any event by its
+    evio record index via EvChannel's random-access mode — Prev/Next/Jump
+    are all O(1).  A small LRU cache keeps repeat visits instant.
     """
 
     CACHE_SIZE = 16
@@ -230,9 +398,6 @@ class Stepper:
         self._path = path
         self._daq = daq_config_path
         self._ch: Optional[object] = None
-        # Index of the record the reader is currently positioned on
-        # (after a successful scan).  -1 before the first Read().
-        self._position = -1
         self._cache: Dict[int, object] = {}  # event_idx -> SspEventData
         self._cache_order: List[int] = []
 
@@ -242,16 +407,14 @@ class Stepper:
         cfg = dec.load_daq_config(self._daq)
         self._ch = dec.EvChannel()
         self._ch.set_config(cfg)
-        st = self._ch.open(self._path)
+        st = self._ch.open_random_access(self._path)
         if st != dec.Status.success:
-            raise RuntimeError(f"cannot open {self._path}: {st}")
-        self._position = -1
+            raise RuntimeError(f"cannot open {self._path} (ra): {st}")
 
     def close(self):
         if self._ch is not None:
             self._ch.close()
             self._ch = None
-        self._position = -1
 
     # --- fetch -----------------------------------------------------------
 
@@ -266,24 +429,12 @@ class Stepper:
         if self._ch is None:
             self.open()
 
-        target = evmeta.record_idx
-        if self._position > target:
-            # Target is behind us — re-open and walk forward.
-            self.close()
-            self.open()
-
-        # Walk forward until the reader is positioned on the target record.
-        # (If _position == target we're already there — a second sub-event
-        # on the same record.)
-        while self._position < target:
-            st = self._ch.read()
-            if st != dec.Status.success:
-                raise RuntimeError(
-                    f"EOF before reaching record {target}: {st}")
-            self._position += 1
-            if not self._ch.scan():
-                # Non-physics / unscannable record — keep walking.
-                continue
+        if self._ch.read_event_by_index(evmeta.record_idx) != dec.Status.success:
+            raise RuntimeError(
+                f"read_event_by_index({evmeta.record_idx}) failed")
+        if not self._ch.scan():
+            raise RuntimeError(
+                f"scan failed on record {evmeta.record_idx}")
 
         self._ch.select_event(evmeta.subevt_idx)
         ssp = self._ch.gem()
@@ -948,6 +1099,70 @@ class GemEventViewer(QMainWindow):
         self._check_pedestal_requirement(ssp)
         self._re_reconstruct_current()
 
+    def _start_auto_pedestals(self) -> None:
+        """Generate peds from the currently-loaded EVIO file and apply them."""
+        if not self._evio_path:
+            return
+        # Temp JSON in the system temp dir; kept alive until window closes.
+        fd, tmp_path = tempfile.mkstemp(prefix="gem_ped_", suffix=".json")
+        os.close(fd)
+        self._auto_ped_tmp = tmp_path
+
+        dlg = QProgressDialog("Accumulating pedestals…", "Cancel", 0, 1000, self)
+        dlg.setWindowTitle("Auto-generating pedestals")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(True)
+        dlg.setValue(0)
+        dlg.show()
+        QApplication.processEvents()
+
+        worker = PedestalWorker(self._evio_path, self._daq_config_path,
+                                tmp_path, max_events=1000)
+        thread = QThread(self)
+        worker.moveToThread(thread)
+
+        def _on_progress(done: int, target: int):
+            dlg.setMaximum(target)
+            dlg.setValue(done)
+            dlg.setLabelText(
+                f"Accumulating pedestals…\n{done:,} / {target:,} events")
+
+        def _on_finished(out_path: str, napvs: int, n_used: int):
+            dlg.close()
+            try:
+                self._gsys.load_pedestals(out_path)
+            except Exception as exc:  # noqa: BLE001
+                QMessageBox.critical(
+                    self, "Pedestal load failed",
+                    f"Generated {out_path} but load_pedestals raised:\n"
+                    f"{type(exc).__name__}: {exc}")
+                return
+            self._gem_ped_path = out_path
+            self._ped_badge.hide()
+            self._set_status(
+                f"Auto-pedestals applied: {napvs} APVs from {n_used:,} "
+                f"events → {out_path}")
+            self._re_reconstruct_current()
+
+        def _on_failed(msg: str):
+            dlg.close()
+            QMessageBox.critical(self, "Pedestal generation failed", msg)
+
+        thread.started.connect(worker.run)
+        worker.progress.connect(_on_progress)
+        worker.finished.connect(_on_finished)
+        worker.failed.connect(_on_failed)
+        dlg.canceled.connect(worker.request_cancel)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._auto_ped_worker = worker
+        self._auto_ped_thread = thread
+        thread.start()
+
     def _check_pedestal_requirement(self, ssp) -> None:
         """If this event is full-readout (firmware did not run online ZS)
         and we have no pedestal file, warn the user — loudly once, and via
@@ -989,18 +1204,19 @@ class GemEventViewer(QMainWindow):
         self._ped_badge.show()
         if not self._ped_warning_shown:
             self._ped_warning_shown = True
-            QMessageBox.warning(
+            reply = QMessageBox.question(
                 self, "Pedestal file required",
                 "This file contains <b>full-readout</b> GEM data "
                 "(no online zero-suppression), but no pedestal file is "
                 "loaded.<br><br>"
                 "Without pedestals, zero-suppression uses a default noise "
-                "value and nothing will survive → every event will appear "
-                "empty.<br><br>"
-                "Either:<br>"
-                "• Generate pedestals:  "
-                "<code>gem_dump -m ped &lt;file.evio&gt; -o gem_ped.json</code><br>"
-                "• Then load them via File → Choose gem_ped.json…")
+                "value → every event will look empty.<br><br>"
+                "Auto-generate pedestals from this file now?<br>"
+                "(reads up to 1000 full-readout events, takes a few seconds)",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes)
+            if reply == QMessageBox.StandardButton.Yes:
+                self._start_auto_pedestals()
 
     # -----------------------------------------------------------------
     # Reconstruction + drawing
@@ -1102,6 +1318,13 @@ class GemEventViewer(QMainWindow):
         if self._scan_worker is not None:
             self._scan_worker.request_cancel()
             self._tear_down_worker()
+        # Clean up the auto-generated pedestal file if we made one.
+        tmp = getattr(self, "_auto_ped_tmp", None)
+        if tmp:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
         self._close_current_run()
         super().closeEvent(ev)
 
