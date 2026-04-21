@@ -290,8 +290,6 @@ class MapBuilderWidget(HyCalMapWidget):
                 fill.setAlphaF(a)
             if a > 0.0:
                 p.fillRect(rect, fill)
-
-            if is_glass and a > 0.0:
                 frame = QColor(frame_col_base)
                 frame.setAlphaF(a * 0.8)
                 p.setPen(QPen(frame, 1.0))
