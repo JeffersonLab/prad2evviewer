@@ -236,6 +236,8 @@ install(DIRECTORY scripts/
         PATTERN "*.txt"
         PATTERN "README.md"
         PATTERN "__pycache__" EXCLUDE
+        PATTERN "daq_tool"    EXCLUDE   # dev-only GUIs, not installed
+        PATTERN "shell"       EXCLUDE   # dev/operator shell scripts
         PATTERN "prad2_setup.sh"    EXCLUDE   # already in <prefix>/bin/
         PATTERN "prad2_setup.csh.in" EXCLUDE
 )
@@ -259,7 +261,6 @@ if(BUILD_PYTHON)
         "hycal_pedestal_monitor:scripts/hycal_pedestal_monitor.py"
         "hycal_gain_monitor:scripts/hycal_gain_monitor.py"
         "hycal_map_builder:scripts/hycal_map_builder.py"
-        "trigger_mask_editor:scripts/trigger_mask_editor.py"
         "waveform_viewer:scripts/waveform_viewer.py"
     )
     foreach(_entry ${_PRAD2_PY_WRAPPERS})

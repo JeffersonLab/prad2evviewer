@@ -22,6 +22,12 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+# This tool lives in scripts/daq_tool/; import hycal_geoview from the
+# parent scripts/ directory at runtime.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QTextEdit, QSplitter, QFileDialog,
@@ -40,7 +46,7 @@ from hycal_geoview import (
 # ===========================================================================
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DB_DIR = SCRIPT_DIR / ".." / "database"
+DB_DIR = SCRIPT_DIR / ".." / ".." / "database"
 MODULES_JSON = DB_DIR / "hycal_modules.json"
 DAQ_MAP_JSON = DB_DIR / "daq_map.json"
 

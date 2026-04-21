@@ -37,15 +37,42 @@ Pedestals must be measured **before the first DAQ run of each shift** while DAQ 
 
 Thresholds are defined at the top of the script and can be adjusted.
 
-## trigger_mask_editor.py
+## DAQ dev tools (`scripts/daq_tool/`)
+
+Developer GUIs that don't ship with the installation (run them from the
+source checkout).
+
+### trigger_mask_editor.py
 
 PyQt6 visual editor for FAV3 trigger masks. Displays a HyCal geo view (with LMS1-3, LMSP, V1-V4 below) and lets you click or drag modules to toggle channels off/on. Generates trigger mask `.cnf` files -- only slots with disabled channels are written. Unmapped DAQ channels (slot positions with no module) are always masked off.
 
 ```bash
-python scripts/trigger_mask_editor.py                     # start fresh
-python scripts/trigger_mask_editor.py -i existing.cnf     # load existing mask
-python scripts/trigger_mask_editor.py -o output.cnf       # set default save path
+python scripts/daq_tool/trigger_mask_editor.py                     # start fresh
+python scripts/daq_tool/trigger_mask_editor.py -i existing.cnf     # load existing mask
+python scripts/daq_tool/trigger_mask_editor.py -o output.cnf       # set default save path
 ```
+
+### fadc_gain_config.py
+
+Generates a text-based `adchycal_gain.cnf` for the FADC250 DAQ
+(`FAV3_ALLCH_GAIN` entries, one per 16-channel slot). Gains come from a
+calibration JSON (`-c path.json`) or uniform values per module type
+(`--pbwo4-gain` / `--pbglass-gain`).
+
+```bash
+python scripts/daq_tool/fadc_gain_config.py
+python scripts/daq_tool/fadc_gain_config.py -c database/calibration/adc_to_mev_factors_cosmic.json
+python scripts/daq_tool/fadc_gain_config.py --pbwo4-gain 0.15 --pbglass-gain 0.12
+```
+
+## Operator shell scripts (`scripts/shell/`)
+
+Not installed — used directly from the source checkout by on-site operators.
+
+- `run_gain_monitor.sh` — wrapper that parallelises `prad2ana_gain_monitor`
+  across sub-files of a run and merges the outputs.
+- `prad2_server_tmux_template` — tmux session template for running
+  `prad2_server` alongside the viewer.
 
 ## GEM tools
 

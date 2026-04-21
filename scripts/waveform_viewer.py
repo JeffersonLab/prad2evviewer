@@ -939,6 +939,10 @@ class WaveformPlotWidget(QWidget):
 #  WaveformGeoView — small HyCal overview for module selection
 # ===========================================================================
 
+# Module types that should get a small name label painted on top of the cell
+# (so the tiny LMS / V blocks off to the left of HyCal are identifiable).
+_LABEL_TYPES = {"LMS", "SCINT"}
+
 class WaveformGeoView(HyCalMapWidget):
     """Compact HyCal geo view used as a module picker.
 
@@ -966,6 +970,12 @@ class WaveformGeoView(HyCalMapWidget):
                          min_size=(220, 220), shrink=0.90)
         self._available: set = set()
         self._selected_name: Optional[str] = None
+        self._label_names: set = set()   # filled in set_modules()
+
+    def set_modules(self, modules):
+        super().set_modules(modules)
+        self._label_names = {m.name for m in self._modules
+                             if m.mod_type in _LABEL_TYPES}
 
     def set_available(self, names):
         self._available = set(names)
@@ -984,6 +994,14 @@ class WaveformGeoView(HyCalMapWidget):
             p.fillRect(rect, a_col if name in avail else u_col)
 
     def _paint_overlays(self, p, w, h):
+        # LMS / V labels — tiny bold text centred on each non-calorimeter cell.
+        p.setPen(QColor(THEME.TEXT))
+        p.setFont(QFont("Monospace", 7, QFont.Weight.Bold))
+        for name in self._label_names:
+            r = self._rects.get(name)
+            if r is not None:
+                p.drawText(r, Qt.AlignmentFlag.AlignCenter, name)
+
         if self._selected_name and self._selected_name in self._rects:
             p.setPen(QPen(self.SELECT_COLOR, 2.0))
             p.setBrush(Qt.BrushStyle.NoBrush)
