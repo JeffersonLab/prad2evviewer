@@ -372,6 +372,20 @@ static void bind_gem(py::module_ &m)
             py::arg("apv_index"),
             "(128,) bool array: True where the channel survived ZS in the "
             "last process_event().")
+        .def("get_apv_ped_noise",
+            [](const gem::GemSystem &self, int apv_idx) {
+                constexpr int NS = ssp::APV_STRIP_SIZE;
+                py::array_t<float> out(NS);
+                auto buf = out.mutable_unchecked<1>();
+                const auto &cfg = self.GetApvConfig(apv_idx);
+                for (int ch = 0; ch < NS; ++ch)
+                    buf(ch) = cfg.pedestal[ch].noise;
+                return out;
+            },
+            py::arg("apv_index"),
+            "(128,) float32 per-strip pedestal RMS (noise) from the "
+            "loaded pedestal file.  Multiply by zero_sup_threshold to get "
+            "the per-channel ZS cutoff.")
 
         // threshold knobs
         .def_property("common_mode_threshold",

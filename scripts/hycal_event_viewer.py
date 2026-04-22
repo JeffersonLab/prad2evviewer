@@ -1511,6 +1511,15 @@ class HyCalEventViewer(QMainWindow):
         self._wcfg.min_peak_ratio = float(thr_cfg.get(
             "min_secondary_peak_ratio", self._wcfg.min_peak_ratio))
 
+        # Debounce timer for Advanced-dock re-runs: coalesce rapid
+        # slider drags into a single re-read + re-analyse.  Must exist
+        # before the dock widgets are built (they connect to it via
+        # _on_advanced_changed).
+        self._adv_debounce_ms = 150
+        self._adv_redraw_timer = QTimer(self)
+        self._adv_redraw_timer.setSingleShot(True)
+        self._adv_redraw_timer.timeout.connect(self._rerun_current_event)
+
         # File state
         self._evio_path: Optional[Path] = None
         self._index: List[Tuple[int, int]] = []
@@ -1848,14 +1857,60 @@ class HyCalEventViewer(QMainWindow):
         rlay.addWidget(cg)
 
         rlay.addStretch(1)
+
+        # Snapshot initial widget values (from config.json + WaveConfig
+        # defaults + HyCalClusterConfig defaults) so "Reset to defaults"
+        # can restore them after arbitrary tuning.
+        self._adv_defaults: Dict[str, object] = {}
+        for name, sp in self._adv_wave_spins.items():
+            self._adv_defaults[f"wave_{name}"] = sp.value()
+        for name, sp in self._adv_wave_int_spins.items():
+            self._adv_defaults[f"wave_{name}"] = sp.value()
+        self._adv_defaults["hist_threshold"] = self._adv_hist_threshold_spin.value()
+        for name, w in self._adv_cluster_spins.items():
+            if isinstance(w, QCheckBox):
+                self._adv_defaults[f"cluster_{name}"] = w.isChecked()
+            else:
+                self._adv_defaults[f"cluster_{name}"] = w.value()
+
+        reset_btn = QPushButton("Reset to defaults")
+        reset_btn.clicked.connect(self._reset_advanced_defaults)
+        rlay.addWidget(reset_btn)
+
         dock.setWidget(root)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
         dock.hide()
         return dock
 
+    def _reset_advanced_defaults(self):
+        """Restore every Advanced-dock widget to its initial (post-load)
+        value and re-run the current event once."""
+        if not hasattr(self, "_adv_defaults"):
+            return
+        for name, sp in self._adv_wave_spins.items():
+            sp.blockSignals(True)
+            sp.setValue(self._adv_defaults[f"wave_{name}"])
+            sp.blockSignals(False)
+        for name, sp in self._adv_wave_int_spins.items():
+            sp.blockSignals(True)
+            sp.setValue(self._adv_defaults[f"wave_{name}"])
+            sp.blockSignals(False)
+        self._adv_hist_threshold_spin.blockSignals(True)
+        self._adv_hist_threshold_spin.setValue(self._adv_defaults["hist_threshold"])
+        self._adv_hist_threshold_spin.blockSignals(False)
+        for name, w in self._adv_cluster_spins.items():
+            w.blockSignals(True)
+            if isinstance(w, QCheckBox):
+                w.setChecked(self._adv_defaults[f"cluster_{name}"])
+            else:
+                w.setValue(self._adv_defaults[f"cluster_{name}"])
+            w.blockSignals(False)
+        # Single re-run after all widgets are restored.
+        self._on_advanced_changed()
+
     def _on_advanced_changed(self, *_):
         """Push every dock value back into WaveConfig + HyCalClusterConfig,
-        then re-run the current event."""
+        then schedule a debounced re-run of the current event."""
         for name, sp in self._adv_wave_spins.items():
             setattr(self._wcfg, name, float(sp.value()))
         for name, sp in self._adv_wave_int_spins.items():
@@ -1873,7 +1928,11 @@ class HyCalEventViewer(QMainWindow):
                     setattr(ccfg, name, float(widget.value()))
             self._hccl.set_config(ccfg)
 
-        # Re-run the current event so the new settings take effect.
+        # Debounce: coalesce slider drags into one re-run.
+        self._adv_redraw_timer.start(self._adv_debounce_ms)
+
+    def _rerun_current_event(self):
+        """Re-read + re-analyse the current event with the latest config."""
         if self._current_idx >= 0:
             self._goto(self._current_idx)
 

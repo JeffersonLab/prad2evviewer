@@ -550,25 +550,47 @@ class ApvPanel(QWidget):
         self._badge = ""                # e.g. "no hits" for full-readout APVs with no ZS survivors
         self._frame: Optional[np.ndarray] = None    # (128, 6) float or int16
         self._hits:  Optional[np.ndarray] = None    # (128,) bool
-        self._y_auto = True
         self._y_lo = 0.0
         self._y_hi = 1.0
+        # Display options set by RawApvTab on every refresh.
+        self._sample_mask: Tuple[bool, ...] = (True,) * 6
+        self._y_fixed: Optional[Tuple[float, float]] = None
+        self._thr_trace:  Optional[np.ndarray] = None    # (128,) float
+        self._cm_trace:   Optional[np.ndarray] = None    # (6,)  int16
 
     def sizeHint(self):
         return QSize(self.HINT_W, self.HINT_H)
 
     def set_frame(self, title: str, frame: np.ndarray,
                   hits: Optional[np.ndarray] = None,
-                  badge: str = ""):
+                  badge: str = "",
+                  *,
+                  sample_mask: Tuple[bool, ...] = (True,) * 6,
+                  y_fixed: Optional[Tuple[float, float]] = None,
+                  thr_trace: Optional[np.ndarray] = None,
+                  cm_trace: Optional[np.ndarray] = None):
         self._title = title
         self._badge = badge
         self._frame = frame
         self._hits  = hits
-        if frame is None or frame.size == 0:
+        self._sample_mask = sample_mask
+        self._y_fixed = y_fixed
+        self._thr_trace = thr_trace
+        self._cm_trace  = cm_trace
+
+        if y_fixed is not None:
+            self._y_lo, self._y_hi = y_fixed
+        elif frame is None or frame.size == 0:
             self._y_lo, self._y_hi = 0.0, 1.0
         else:
-            lo = float(np.min(frame))
-            hi = float(np.max(frame))
+            # Auto-range considers only the enabled time samples so that
+            # masking doesn't leave empty headroom/footroom.
+            if all(sample_mask):
+                view = frame
+            else:
+                view = frame[:, [i for i, on in enumerate(sample_mask) if on]]
+            lo = float(np.min(view)) if view.size else 0.0
+            hi = float(np.max(view)) if view.size else 1.0
             if hi - lo < 8.0:
                 mid = 0.5 * (lo + hi)
                 lo, hi = mid - 4.0, mid + 4.0
@@ -582,7 +604,33 @@ class ApvPanel(QWidget):
         self._hits  = None
         self._title = ""
         self._badge = ""
+        self._thr_trace = None
+        self._cm_trace  = None
         self.update()
+
+    @staticmethod
+    def compute_fixed_range(frames: Dict[int, np.ndarray],
+                            sample_mask: Tuple[bool, ...]) -> Tuple[float, float]:
+        """Span over every enabled (strip, ts) value in ``frames`` so all
+        panels can share one Y scale."""
+        lo, hi = float("inf"), float("-inf")
+        use_idx = [i for i, on in enumerate(sample_mask) if on]
+        if not use_idx:
+            return 0.0, 1.0
+        for f in frames.values():
+            if f is None or f.size == 0:
+                continue
+            v = f[:, use_idx]
+            if v.size == 0: continue
+            lo = min(lo, float(np.min(v)))
+            hi = max(hi, float(np.max(v)))
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            return 0.0, 1.0
+        if hi - lo < 8.0:
+            mid = 0.5 * (lo + hi)
+            lo, hi = mid - 4.0, mid + 4.0
+        pad = 0.08 * (hi - lo)
+        return lo - pad, hi + pad
 
     def paintEvent(self, _ev):
         p = QPainter(self)
@@ -636,7 +684,6 @@ class ApvPanel(QWidget):
             zy = plot.bottom() - (0 - self._y_lo) / (self._y_hi - self._y_lo) * plot.height()
             p.drawLine(QPointF(plot.left(), zy), QPointF(plot.right(), zy))
 
-        # 6 colored traces — blue (t=0) → red (t=5)
         n_strips = self._frame.shape[0]
         n_ts     = self._frame.shape[1]
         span_y = max(self._y_hi - self._y_lo, 1e-6)
@@ -645,7 +692,47 @@ class ApvPanel(QWidget):
         def to_y(v: float) -> float:
             return plot.bottom() - (v - self._y_lo) / span_y * plot.height()
 
+        # Threshold curve: per-channel ZS cut (ped.noise × zero_sup_thres).
+        # Drawn as a dashed grey line; also mirrored at -threshold so the
+        # reader can see both ±nσ bands that bracket the zero line.
+        if self._thr_trace is not None and self._thr_trace.size == n_strips:
+            pen = QPen(QColor(getattr(THEME, "TEXT_DIM", "#8b949e")), 0.8)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            p.setPen(pen)
+            prev_hi = prev_lo = None
+            for ch in range(n_strips):
+                x = plot.left() + ch * step_x
+                t = float(self._thr_trace[ch])
+                yhi = to_y(+t)
+                ylo = to_y(-t)
+                if prev_hi is not None:
+                    p.drawLine(prev_hi, QPointF(x, yhi))
+                    p.drawLine(prev_lo, QPointF(x, ylo))
+                prev_hi = QPointF(x, yhi)
+                prev_lo = QPointF(x, ylo)
+
+        # CM overlay: firmware's online_cm[6] — 6 short horizontal marks
+        # (one per time sample), each at the CM value for that sample.
+        # Drawn as pale grey so it doesn't fight the data traces.
+        if self._cm_trace is not None and self._cm_trace.size == n_ts:
+            cm_col = QColor(getattr(THEME, "TEXT_DIM", "#8b949e"))
+            cm_col.setAlpha(160)
+            pen = QPen(cm_col, 1.4)
+            p.setPen(pen)
+            seg_w = plot.width() / n_ts
+            for ts in range(n_ts):
+                if not self._sample_mask[ts]:
+                    continue
+                x0 = plot.left() + ts * seg_w
+                x1 = x0 + seg_w * 0.88
+                y  = to_y(float(self._cm_trace[ts]))
+                p.drawLine(QPointF(x0, y), QPointF(x1, y))
+
+        # Colored time-sample traces — blue (t=0) → red (t=5).  Time
+        # samples hidden by the sample-mask checkboxes are skipped.
         for ts in range(n_ts):
+            if not self._sample_mask[ts]:
+                continue
             frac = ts / max(n_ts - 1, 1)
             col = QColor.fromHsvF(0.66 * (1.0 - frac), 0.85, 0.95)
             pen = QPen(col, 0.9)
@@ -699,6 +786,37 @@ class RawApvTab(QWidget):
         self.zs_only_cb.toggled.connect(self._on_control_changed)
         bar.addWidget(self.zs_only_cb)
 
+        self.fixed_y_cb = QCheckBox("Fixed Y")
+        self.fixed_y_cb.setToolTip(
+            "Share one Y-axis range across every visible APV so traces "
+            "can be compared directly.")
+        self.fixed_y_cb.toggled.connect(self._on_control_changed)
+        bar.addWidget(self.fixed_y_cb)
+
+        self.thr_line_cb = QCheckBox("Threshold")
+        self.thr_line_cb.setToolTip(
+            "Draw the ±(ped.noise × ZS σ) cutoff curve as a dashed grey line.")
+        self.thr_line_cb.toggled.connect(self._on_control_changed)
+        bar.addWidget(self.thr_line_cb)
+
+        self.cm_overlay_cb = QCheckBox("CM overlay")
+        self.cm_overlay_cb.setChecked(False)
+        self.cm_overlay_cb.setToolTip(
+            "Overlay the firmware-reported online_cm[6] values as short "
+            "grey ticks — cross-check against software common-mode.")
+        self.cm_overlay_cb.toggled.connect(self._on_control_changed)
+        bar.addWidget(self.cm_overlay_cb)
+
+        # Time-sample mask: one checkbox per sample.  Default all on.
+        bar.addWidget(QLabel("Samples:"))
+        self.sample_cbs: List[QCheckBox] = []
+        for t in range(6):
+            cb = QCheckBox(f"t{t}")
+            cb.setChecked(True)
+            cb.toggled.connect(self._on_control_changed)
+            bar.addWidget(cb)
+            self.sample_cbs.append(cb)
+
         self._status = QLabel("")
         self._status.setStyleSheet(f"color:{THEME.TEXT_DIM};")
         bar.addWidget(self._status)
@@ -715,6 +833,9 @@ class RawApvTab(QWidget):
         self._processed: Dict[int, np.ndarray] = {}    # apv_idx → (128,6) float32
         self._raw:       Dict[int, np.ndarray] = {}    # apv_idx → (128,6) int16
         self._hits:      Dict[int, np.ndarray] = {}    # apv_idx → (128,) bool
+        self._thr:       Dict[int, np.ndarray] = {}    # apv_idx → (128,) float32
+        self._cm:        Dict[int, np.ndarray] = {}    # apv_idx → (6,)  int16
+        self._no_hit_apvs: set = set()
         # det_name → list of apv_index in order
         self._grouped: Dict[str, List[int]] = {}
         # det_name → {apv_idx: ApvPanel}
@@ -727,6 +848,9 @@ class RawApvTab(QWidget):
         self._processed.clear()
         self._raw.clear()
         self._hits.clear()
+        self._thr.clear()
+        self._cm.clear()
+        self._no_hit_apvs.clear()
         self._grouped.clear()
         self._panels.clear()
         self._tab_index_of.clear()
@@ -801,17 +925,24 @@ class RawApvTab(QWidget):
                        processed: Dict[int, np.ndarray],
                        raw:       Dict[int, np.ndarray],
                        hits:      Dict[int, np.ndarray],
-                       no_hit_apvs: Optional[set] = None):
+                       no_hit_apvs: Optional[set] = None,
+                       thresholds: Optional[Dict[int, np.ndarray]] = None,
+                       cm_traces:  Optional[Dict[int, np.ndarray]] = None):
         """Push per-event data; call after process_event() returns.
 
-        ``no_hit_apvs`` = set of GemSystem indices for APVs the caller
-        wants highlighted as suspicious (red frame + 'no hits' badge).
-        The caller typically picks full-readout APVs that produced no
-        software-ZS hits — dead cables / bad pedestals diagnostic."""
+        ``no_hit_apvs`` — GemSystem indices to highlight as suspicious
+        (red frame + 'no hits' badge).
+        ``thresholds``  — per-APV (128,) float32 array of ``ped.noise ×
+        zero_sup_threshold`` values, drawn as a dashed grey curve when
+        the user enables the Threshold toggle.
+        ``cm_traces``   — per-APV (6,) int16 array of firmware online_cm
+        values, drawn as grey ticks when CM overlay is enabled."""
         self._processed = processed
         self._raw       = raw
         self._hits      = hits
         self._no_hit_apvs = no_hit_apvs or set()
+        self._thr = thresholds or {}
+        self._cm  = cm_traces  or {}
         self._refresh_all_panels()
 
     def _on_control_changed(self, *_):
@@ -820,6 +951,24 @@ class RawApvTab(QWidget):
     def _refresh_all_panels(self):
         processed_view = self.process_cb.isChecked()
         signal_only    = self.zs_only_cb.isChecked()
+        fixed_y        = self.fixed_y_cb.isChecked()
+        show_thr       = self.thr_line_cb.isChecked() and processed_view
+        show_cm        = self.cm_overlay_cb.isChecked()
+        sample_mask    = tuple(cb.isChecked() for cb in self.sample_cbs)
+
+        source = self._processed if processed_view else self._raw
+
+        # If "Fixed Y" is on, compute a single (lo, hi) across every
+        # visible APV in the active view and share it.
+        shared_range: Optional[Tuple[float, float]] = None
+        if fixed_y:
+            if signal_only:
+                visible = {i: f for i, f in source.items()
+                           if self._hits.get(i) is not None
+                           and bool(self._hits[i].any())}
+            else:
+                visible = source
+            shared_range = ApvPanel.compute_fixed_range(visible, sample_mask)
 
         shown = 0
         total = 0
@@ -842,15 +991,17 @@ class RawApvTab(QWidget):
                 shown += 1
                 visible_in_tab += 1
 
-                frame = (self._processed.get(idx) if processed_view
-                         else self._raw.get(idx))
+                frame = source.get(idx)
                 title = (f"c{m['crate_id']} m{m['mpd_id']} a{m['adc_ch']}  "
                          f"{m['det_name']} {m['plane_type']} p{m['det_pos']}")
-                # Highlight "no hits" APVs: the caller marks full-readout
-                # channels that produced no software-ZS hits — likely
-                # dead cable / missing pedestal.  Normal APVs stay clean.
                 badge = "no hits" if idx in self._no_hit_apvs else ""
-                panel.set_frame(title, frame, has_zs, badge)
+                panel.set_frame(
+                    title, frame, has_zs, badge,
+                    sample_mask=sample_mask,
+                    y_fixed=shared_range,
+                    thr_trace=self._thr.get(idx) if show_thr else None,
+                    cm_trace=self._cm.get(idx) if show_cm else None,
+                )
 
             tab_i = self._tab_index_of.get(det_name)
             if tab_i is not None:
@@ -868,9 +1019,11 @@ class RawApvTab(QWidget):
 
 class AdvancedDock(QDockWidget):
     """Collapsible dock with every clustering / XY-match knob exposed as
-    spinboxes.  Emits ``changed`` whenever any value changes."""
+    spinboxes.  Emits ``changed`` whenever any value changes and
+    ``resetRequested`` when the user clicks "Reset to defaults"."""
 
-    changed = pyqtSignal()
+    changed         = pyqtSignal()
+    resetRequested  = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__("Advanced tuning", parent)
@@ -916,6 +1069,13 @@ class AdvancedDock(QDockWidget):
         layout.addWidget(xg)
 
         layout.addStretch(1)
+
+        # Reset button — emits resetRequested; the main window is
+        # responsible for reverting widget values to the initial config
+        # (which may have been loaded from gem_map.json + peds).
+        self._reset_btn = QPushButton("Reset to defaults")
+        self._reset_btn.clicked.connect(lambda: self.resetRequested.emit())
+        layout.addWidget(self._reset_btn)
 
         # Wire every editor → changed
         for w in (self.max_cluster_hits, self.consecutive_thres,
@@ -1145,10 +1305,10 @@ class GemEventViewer(QMainWindow):
         # Canvas + Raw APV tabs share the main area.  Event data flows
         # into both after each process_event() call.
         self.tabs = QTabWidget()
-        self.canvas = GemEventCanvas()
-        self.tabs.addTab(self.canvas, "Clustering")
         self.raw_apv_tab = RawApvTab()
         self.tabs.addTab(self.raw_apv_tab, "Raw APV")
+        self.canvas = GemEventCanvas()
+        self.tabs.addTab(self.canvas, "Clustering")
         root.addWidget(self.tabs, 1)
 
         # --- Status bar: left = per-event info, right = file info ---
@@ -1175,6 +1335,7 @@ class GemEventViewer(QMainWindow):
         self.adv_dock.visibilityChanged.connect(
             lambda vis: self.btn_advanced.setChecked(bool(vis)))
         self.adv_dock.changed.connect(self._on_threshold_change)
+        self.adv_dock.resetRequested.connect(self._reset_defaults)
 
         # --- Wire primary threshold widgets ---
         self.zs_spin.valueChanged.connect(lambda *_: self._on_threshold_change())
@@ -1705,6 +1866,7 @@ class GemEventViewer(QMainWindow):
         # returns references through the standard cast path and works.
         MAX_APVS_PER_MPD = 16
         raw_by_addr: Dict[Tuple[int, int, int], np.ndarray] = {}
+        cm_by_addr:  Dict[Tuple[int, int, int], np.ndarray] = {}
         full_readout_addrs: set = set()
         ssp = self._last_ssp
         for m in range(ssp.nmpds):
@@ -1719,34 +1881,49 @@ class GemEventViewer(QMainWindow):
                        int(apv.addr.adc_ch))
                 # Copy so the array outlives the SSP object if cached.
                 raw_by_addr[key] = np.asarray(apv.strips).copy()
+                if getattr(apv, "has_online_cm", False):
+                    cm_by_addr[key] = np.asarray(apv.online_cm).copy()
                 # nstrips == 128 → firmware shipped all 128 channels (no
                 # online ZS).  Software has to do the suppression —
                 # highlight so the user can tell apart from hardware-ZS'd.
                 if apv.nstrips == 128:
                     full_readout_addrs.add(key)
 
-        processed: Dict[int, np.ndarray] = {}
-        raw:       Dict[int, np.ndarray] = {}
-        hits:      Dict[int, np.ndarray] = {}
-        no_hit_fr: set = set()
+        zs_sigma = float(self._gsys.zero_sup_threshold)
+        processed:  Dict[int, np.ndarray] = {}
+        raw:        Dict[int, np.ndarray] = {}
+        hits:       Dict[int, np.ndarray] = {}
+        thresholds: Dict[int, np.ndarray] = {}
+        cm_traces:  Dict[int, np.ndarray] = {}
+        no_hit_fr:  set = set()
         for i in range(self._gsys.get_n_apvs()):
             try:
                 processed[i] = self._gsys.get_apv_frame(i)
                 hits[i]      = self._gsys.get_apv_hit_mask(i)
             except Exception:
                 continue
+            # Threshold curve: noise × ZS σ.  get_apv_ped_noise is a
+            # bulk binding; fall back to a Python-side loop if absent
+            # (older prad2py without the helper).
+            try:
+                noise = self._gsys.get_apv_ped_noise(i)
+                thresholds[i] = noise * zs_sigma
+            except Exception:
+                pass
             cfg = self._gsys.get_apv_config(i)
             key = (int(cfg.crate_id), int(cfg.mpd_id), int(cfg.adc_ch))
             if key in raw_by_addr:
                 raw[i] = raw_by_addr[key]
+                if key in cm_by_addr:
+                    cm_traces[i] = cm_by_addr[key]
                 # Highlight "suspicious" APVs: full-readout (firmware
                 # shipped all 128 strips, no online ZS) AND no channel
-                # survived software ZS.  In a full-readout run this
-                # picks out dead cables / bad pedestals / no-hit APVs;
-                # in a firmware-ZS run nothing triggers.
+                # survived software ZS.
                 if key in full_readout_addrs and not bool(hits[i].any()):
                     no_hit_fr.add(i)
-        self.raw_apv_tab.set_event_data(processed, raw, hits, no_hit_fr)
+        self.raw_apv_tab.set_event_data(processed, raw, hits, no_hit_fr,
+                                         thresholds=thresholds,
+                                         cm_traces=cm_traces)
 
     def _re_reconstruct_current(self):
         if self._gsys is None or self._gcl is None:
