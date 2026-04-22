@@ -25,6 +25,7 @@
 #include "DaqConfig.h"
 #include "load_daq_config.h"
 #include "Fadc250Data.h"
+#include "WaveAnalyzer.h"
 #include "SspData.h"
 #include "VtpData.h"
 #include "TdcData.h"
@@ -187,6 +188,66 @@ void bind_fadc(py::module_ &m)
             py::arg("tag"),
             "Locate a ROC by its bank tag (e.g. 0x80). Returns None if absent.")
         .def("clear", &fdec::EventData::clear);
+
+    // ----- WaveAnalyzer types --------------------------------------------
+    py::class_<fdec::Peak>(m, "Peak",
+        "One FADC pulse found by WaveAnalyzer.")
+        .def(py::init<>())
+        .def_readwrite("height",   &fdec::Peak::height)
+        .def_readwrite("integral", &fdec::Peak::integral)
+        .def_readwrite("time",     &fdec::Peak::time)
+        .def_readwrite("pos",      &fdec::Peak::pos)
+        .def_readwrite("left",     &fdec::Peak::left)
+        .def_readwrite("right",    &fdec::Peak::right)
+        .def_readwrite("overflow", &fdec::Peak::overflow);
+
+    py::class_<fdec::Pedestal>(m, "Pedestal",
+        "Per-channel pedestal (mean + RMS).")
+        .def(py::init<>())
+        .def_readwrite("mean", &fdec::Pedestal::mean)
+        .def_readwrite("rms",  &fdec::Pedestal::rms);
+
+    py::class_<fdec::WaveConfig>(m, "WaveConfig",
+        "Knobs for WaveAnalyzer (smoothing, thresholds, pedestal window, ...).")
+        .def(py::init<>())
+        .def_readwrite("resolution",     &fdec::WaveConfig::resolution)
+        .def_readwrite("threshold",      &fdec::WaveConfig::threshold)
+        .def_readwrite("min_threshold",  &fdec::WaveConfig::min_threshold)
+        .def_readwrite("min_peak_ratio", &fdec::WaveConfig::min_peak_ratio)
+        .def_readwrite("int_tail_ratio", &fdec::WaveConfig::int_tail_ratio)
+        .def_readwrite("ped_nsamples",   &fdec::WaveConfig::ped_nsamples)
+        .def_readwrite("ped_flatness",   &fdec::WaveConfig::ped_flatness)
+        .def_readwrite("ped_max_iter",   &fdec::WaveConfig::ped_max_iter)
+        .def_readwrite("overflow",       &fdec::WaveConfig::overflow)
+        .def_readwrite("clk_mhz",        &fdec::WaveConfig::clk_mhz);
+
+    py::class_<fdec::WaveAnalyzer>(m, "WaveAnalyzer",
+        "Fast C++ pedestal + peak finder used by the server.  Call "
+        "analyze(samples_numpy) to get (ped_mean, ped_rms, [Peak, ...]).")
+        .def(py::init<const fdec::WaveConfig &>(),
+             py::arg("cfg") = fdec::WaveConfig{})
+        .def_readwrite("cfg", &fdec::WaveAnalyzer::cfg)
+        .def("analyze",
+            [](const fdec::WaveAnalyzer &self, py::array_t<uint16_t> samples) {
+                py::buffer_info buf = samples.request();
+                if (buf.ndim != 1)
+                    throw py::value_error("samples must be a 1-D uint16 array");
+                fdec::WaveResult res;
+                {
+                    py::gil_scoped_release rel;
+                    self.Analyze(static_cast<const uint16_t*>(buf.ptr),
+                                 static_cast<int>(buf.shape[0]), res);
+                }
+                py::list peaks;
+                for (int i = 0; i < res.npeaks; ++i)
+                    peaks.append(res.peaks[i]);
+                return py::make_tuple(res.ped.mean, res.ped.rms, peaks);
+            },
+            py::arg("samples"),
+            "Analyze one channel's FADC waveform (uint16 numpy array). "
+            "Returns (pedestal_mean, pedestal_rms, peaks_list).  Peaks "
+            "above ``cfg.min_threshold`` / ``cfg.threshold × rms`` are "
+            "kept; up to ``MAX_PEAKS`` per call.");
 }
 
 // -------------------------------------------------------------------------

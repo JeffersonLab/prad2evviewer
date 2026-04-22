@@ -37,6 +37,7 @@ add_library(prad2det STATIC
     src/EpicsStore.cpp
     src/GemSystem.cpp
     src/GemCluster.cpp
+    src/GemPedestal.cpp
 )
 
 # PIC so the archive can be pulled into shared objects (pybind11 module,

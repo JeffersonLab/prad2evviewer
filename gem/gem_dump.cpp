@@ -26,6 +26,7 @@
 #include "SspData.h"
 #include "load_daq_config.h"
 #include "GemSystem.h"
+#include "GemPedestal.h"
 #include "GemCluster.h"
 #include "InstallPaths.h"
 
@@ -572,145 +573,9 @@ static void accumulateStats(const ssp::SspEventData &ssp,
 }
 
 // -------------------------------------------------------------------------
-// Mode: ped — compute per-strip pedestals from raw SSP data
-// -------------------------------------------------------------------------
-struct StripAccum {
-    double sum  = 0.;
-    double sum2 = 0.;
-    int    count = 0;
-
-    void add(double v) { sum += v; sum2 += v * v; ++count; }
-    double mean() const { return count > 0 ? sum / count : 0.; }
-    double rms() const {
-        if (count < 2) return 0.;
-        double m = mean();
-        double var = sum2 / count - m * m;
-        return var > 0 ? std::sqrt(var) : 0.;
-    }
-};
-
-// key: pack (crate, mpd, apv, strip) into uint64
-static uint64_t packPedKey(int crate, int mpd, int apv, int strip)
-{
-    return (static_cast<uint64_t>(crate & 0xFFFF) << 48) |
-           (static_cast<uint64_t>(mpd   & 0xFFFF) << 32) |
-           (static_cast<uint64_t>(apv   & 0xFFFF) << 16) |
-           static_cast<uint64_t>(strip  & 0xFFFF);
-}
-
-// MPD pedestal algorithm:
-//   Per event, per APV:
-//     1) For each time sample: sort 128 strip ADCs, discard highest 28 and
-//        lowest 28, average the middle 72 → commonMode[ts].
-//        Subtract commonMode[ts] from each strip.
-//     2) For each strip: average the 6 CM-corrected time samples → value.
-//        Accumulate value into per-strip mean/RMS.
-//   After all events: offset = mean, noise = RMS.
-
-static constexpr int CM_DISCARD = 28;  // discard top/bottom 28 of 128
-
-static void accumulatePedestals(const ssp::SspEventData &ssp,
-                                std::map<uint64_t, StripAccum> &accum)
-{
-    float sorted[ssp::APV_STRIP_SIZE];
-    float cm_corrected[ssp::APV_STRIP_SIZE][ssp::SSP_TIME_SAMPLES];
-
-    for (int m = 0; m < ssp.nmpds; ++m) {
-        auto &mpd = ssp.mpds[m];
-        if (!mpd.present) continue;
-
-        for (int a = 0; a < ssp::MAX_APVS_PER_MPD; ++a) {
-            auto &apv = mpd.apvs[a];
-            if (!apv.present || apv.nstrips == 0) continue;
-
-            // Step 1.1: common mode subtraction per time sample
-            for (int t = 0; t < ssp::SSP_TIME_SAMPLES; ++t) {
-                // collect all strip values for this time sample
-                for (int s = 0; s < ssp::APV_STRIP_SIZE; ++s)
-                    sorted[s] = apv.hasStrip(s) ? (float)apv.strips[s][t] : 0.f;
-
-                // sort to find middle 72
-                std::sort(sorted, sorted + ssp::APV_STRIP_SIZE);
-
-                // average middle strips (skip lowest CM_DISCARD and highest CM_DISCARD)
-                double cm_sum = 0.;
-                int cm_count = ssp::APV_STRIP_SIZE - 2 * CM_DISCARD;
-                for (int s = CM_DISCARD; s < ssp::APV_STRIP_SIZE - CM_DISCARD; ++s)
-                    cm_sum += sorted[s];
-                double common_mode = cm_sum / cm_count;
-
-                // subtract common mode
-                for (int s = 0; s < ssp::APV_STRIP_SIZE; ++s)
-                    cm_corrected[s][t] = (apv.hasStrip(s) ? (float)apv.strips[s][t] : 0.f) - common_mode;
-            }
-
-            // Step 1.2: per-strip average across time samples, accumulate
-            for (int s = 0; s < ssp::APV_STRIP_SIZE; ++s) {
-                if (!apv.hasStrip(s)) continue;
-
-                double avg = 0.;
-                for (int t = 0; t < ssp::SSP_TIME_SAMPLES; ++t)
-                    avg += cm_corrected[s][t];
-                avg /= ssp::SSP_TIME_SAMPLES;
-
-                uint64_t key = packPedKey(mpd.crate_id, mpd.mpd_id, a, s);
-                accum[key].add(avg);
-            }
-        }
-    }
-}
-
-static int writePedestals(const std::map<uint64_t, StripAccum> &accum,
-                          const std::string &output_file)
-{
-    std::ofstream of(output_file, std::ios::binary);
-    if (!of.is_open()) {
-        std::cerr << "Error: cannot write " << output_file << "\n";
-        return 1;
-    }
-
-    // group strips by APV: (crate, mpd, adc) → strip data
-    struct ApvKey { int crate, mpd, adc; };
-    std::map<uint64_t, ApvKey> apv_keys;
-    std::map<uint64_t, std::vector<std::pair<int, const StripAccum*>>> apv_strips;
-
-    for (auto &[key, acc] : accum) {
-        int crate = (key >> 48) & 0xFFFF;
-        int mpd   = (key >> 32) & 0xFFFF;
-        int apv   = (key >> 16) & 0xFFFF;
-        int strip = key & 0xFFFF;
-        uint64_t akey = (static_cast<uint64_t>(crate) << 32) |
-                        (static_cast<uint64_t>(mpd) << 16) | apv;
-        apv_keys[akey] = {crate, mpd, apv};
-        apv_strips[akey].emplace_back(strip, &acc);
-    }
-
-    nlohmann::json arr = nlohmann::json::array();
-    int napvs = 0;
-    for (auto &[akey, strips] : apv_strips) {
-        auto &ak = apv_keys[akey];
-        // sort by strip number
-        std::sort(strips.begin(), strips.end());
-
-        nlohmann::json offsets = nlohmann::json::array();
-        nlohmann::json noises  = nlohmann::json::array();
-        for (auto &[s, acc] : strips) {
-            offsets.push_back(std::round(acc->mean() * 1000.) / 1000.);
-            noises.push_back(std::round(acc->rms() * 10000.) / 10000.);
-        }
-        arr.push_back({
-            {"crate", ak.crate}, {"mpd", ak.mpd}, {"adc", ak.adc},
-            {"offset", offsets}, {"noise", noises}
-        });
-        napvs++;
-    }
-    of << arr.dump(2) << "\n";
-    of.close();
-
-    std::cerr << "Written: " << output_file << " (" << napvs << " APVs, "
-              << accum.size() << " strips)\n";
-    return 0;
-}
+// Mode: ped — compute per-strip pedestals from raw SSP data.  The
+// accumulation + write logic lives in gem::GemPedestal (prad2det) so the
+// gem_event_viewer GUI can share it.
 
 // -------------------------------------------------------------------------
 // Main
@@ -967,7 +832,7 @@ int main(int argc, char *argv[])
     EventStats totals;
 
     // pedestal accumulator
-    std::map<uint64_t, StripAccum> ped_accum;
+    gem::GemPedestal ped_accum;
 
     // Emit a single loud warning the first time we see full-readout data
     // without a pedestal file.  Only meaningful in modes that rely on
@@ -1050,7 +915,7 @@ int main(int argc, char *argv[])
 
             // output based on mode
             if (mode == "ped") {
-                accumulatePedestals(ssp_evt, ped_accum);
+                ped_accum.Accumulate(ssp_evt);
                 if (ssp_events % 1000 == 0)
                     std::cerr << "  " << ssp_events << " events...\r" << std::flush;
             }
@@ -1147,10 +1012,14 @@ done:
     ch.Close();
 
     // pedestal output
-    if (mode == "ped" && !ped_accum.empty()) {
+    if (mode == "ped" && ped_accum.NumStrips() > 0) {
         std::cerr << "Computed pedestals from " << ssp_events << " events, "
-                  << ped_accum.size() << " strips\n";
-        return writePedestals(ped_accum, output_file);
+                  << ped_accum.NumStrips() << " strips\n";
+        int napvs = ped_accum.Write(output_file);
+        if (napvs < 0) return 1;
+        std::cerr << "Written: " << output_file << " (" << napvs << " APVs, "
+                  << ped_accum.NumStrips() << " strips)\n";
+        return 0;
     }
 
     // summary footer

@@ -39,6 +39,7 @@
 
 #include "GemSystem.h"
 #include "GemCluster.h"
+#include "GemPedestal.h"
 #include "HyCalSystem.h"
 #include "HyCalCluster.h"
 #include "DetectorTransform.h"
@@ -352,6 +353,37 @@ static void bind_gem(py::module_ &m)
             &gem::GemSystem::SetZeroSupThreshold)
         .def_property_readonly("cross_talk_threshold",
             &gem::GemSystem::GetCrossTalkThreshold);
+
+    // --- GemPedestal -------------------------------------------------------
+    py::class_<gem::GemPedestal>(m, "GemPedestal",
+        "Accumulate GEM per-strip pedestals from SSP raw data, then write "
+        "a JSON file that GemSystem.load_pedestals can consume.  Same "
+        "algorithm as `gem_dump -m ped` — both call this class.")
+        .def(py::init<>())
+        .def("clear", &gem::GemPedestal::Clear,
+             "Drop all accumulated stats.")
+        .def("accumulate",
+            [](gem::GemPedestal &self, const ssp::SspEventData &evt) {
+                py::gil_scoped_release rel;
+                self.Accumulate(evt);
+            },
+            py::arg("ssp_event"),
+            "Fold one event's SSP data into the running pedestal "
+            "accumulators.  APVs with nstrips != 128 (online-ZS) are "
+            "silently skipped.")
+        .def_property_readonly("num_apvs", &gem::GemPedestal::NumApvs,
+             "Number of APVs with at least one contribution.")
+        .def_property_readonly("num_strips", &gem::GemPedestal::NumStrips,
+             "Number of strips (across all APVs) with at least one "
+             "contribution.")
+        .def("write",
+            [](const gem::GemPedestal &self, const std::string &path) {
+                py::gil_scoped_release rel;
+                return self.Write(path);
+            },
+            py::arg("output_path"),
+            "Serialize the accumulated mean/RMS to JSON.  Returns the "
+            "number of APVs written, or a negative value on I/O failure.");
 }
 
 // -------------------------------------------------------------------------

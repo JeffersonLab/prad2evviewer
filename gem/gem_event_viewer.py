@@ -22,7 +22,6 @@ it immediately; otherwise use File → Open EVIO.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import tempfile
@@ -30,8 +29,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-
-import numpy as np
 
 # ---------------------------------------------------------------------------
 # prad2py auto-discovery — walk up from this script to find build/python/.
@@ -248,80 +245,26 @@ class ScanWorker(QObject):
 
 
 # ---------------------------------------------------------------------------
-# Pedestal generation — port of gem_dump.cpp::accumulatePedestals
+# Pedestal generation — delegates to det.GemPedestal (same implementation
+# gem_dump -m ped uses).
 # ---------------------------------------------------------------------------
 
+# APV full-readout guard — accumulate only events where at least one APV
+# sent all 128 strips (i.e. firmware-level ZS was off).
 _APV_STRIP_SIZE = 128
-_SSP_TIME_SAMPLES = 6
 _MAX_APVS_PER_MPD = 16
-_CM_DISCARD = 28        # per-timesample, drop top/bottom 28 of 128
 
 
-def _accumulate_pedestals(ssp_evt, accum: Dict[Tuple[int, int, int, int],
-                                               List[float]]):
-    """Per-event contribution to the pedestal accumulator.
-
-    ``accum[(crate, mpd, adc, strip)] = [sum, sum_sq, count]`` — updated in
-    place.  Per-time-sample common mode is the mean of the middle 72
-    strips (sorted, top 28 + bottom 28 discarded).  Per-strip pedestal
-    value = mean of CM-corrected 6 time samples.
-    """
+def _event_has_full_readout(ssp_evt) -> bool:
     for m in range(ssp_evt.nmpds):
         mpd = ssp_evt.mpd(m)
         if not mpd.present:
             continue
-        crate_id, mpd_id = int(mpd.crate_id), int(mpd.mpd_id)
         for a in range(_MAX_APVS_PER_MPD):
             apv = mpd.apv(a)
-            if not apv.present or apv.nstrips == 0:
-                continue
-            # strips: [APV_STRIP_SIZE][SSP_TIME_SAMPLES] int16 numpy array
-            strips = apv.strips.astype(np.float32)   # copy-on-cast
-            # per-time-sample CM subtraction
-            col = np.sort(strips, axis=0)
-            cm = col[_CM_DISCARD:_APV_STRIP_SIZE - _CM_DISCARD].mean(axis=0)
-            cm_corrected = strips - cm[np.newaxis, :]   # (128, 6)
-            avg = cm_corrected.mean(axis=1)             # (128,)
-            # accumulate only strips the APV actually reported
-            for s in range(_APV_STRIP_SIZE):
-                if not apv.has_strip(s):
-                    continue
-                key = (crate_id, mpd_id, a, s)
-                v = float(avg[s])
-                entry = accum.get(key)
-                if entry is None:
-                    accum[key] = [v, v * v, 1]
-                else:
-                    entry[0] += v
-                    entry[1] += v * v
-                    entry[2] += 1
-
-
-def _write_pedestals_json(accum: Dict[Tuple[int, int, int, int],
-                                      List[float]],
-                          path: str) -> int:
-    """Group accumulated strips by APV and write the gem_ped.json format
-    GemSystem.LoadPedestals reads.  Returns APV count."""
-    from collections import defaultdict
-    per_apv: Dict[Tuple[int, int, int],
-                  List[Tuple[int, float, float]]] = defaultdict(list)
-    for (crate, mpd, adc, strip), (s, s2, n) in accum.items():
-        mean = s / n if n else 0.0
-        var = (s2 / n - mean * mean) if n >= 2 else 0.0
-        rms = var ** 0.5 if var > 0 else 0.0
-        per_apv[(crate, mpd, adc)].append((strip, mean, rms))
-
-    out = []
-    for (crate, mpd, adc), strips in per_apv.items():
-        strips.sort(key=lambda t: t[0])
-        offsets = [round(m, 3) for _, m, _ in strips]
-        noises  = [round(r, 4) for _, _, r in strips]
-        out.append({"crate": crate, "mpd": mpd, "adc": adc,
-                    "offset": offsets, "noise": noises})
-
-    with open(path, "w") as f:
-        json.dump(out, f, indent=2)
-    return len(out)
+            if apv.present and apv.nstrips == _APV_STRIP_SIZE:
+                return True
+    return False
 
 
 class PedestalWorker(QObject):
@@ -358,43 +301,26 @@ class PedestalWorker(QObject):
             self.failed.emit(f"{type(exc).__name__}: {exc}")
             return
 
-        accum: Dict[Tuple[int, int, int, int], List[float]] = {}
+        ped    = det.GemPedestal()
         n_used = 0
         target = self._max
 
-        def _process_current_event():
-            """Fold the current scanned event into ``accum`` if it's a
-            physics event with at least one full-readout APV.  Returns
-            True if anything was accumulated."""
+        def _fold_current_record():
+            """Fold physics sub-events with full-readout data into ``ped``."""
             nonlocal n_used
             if ch.get_event_type() != dec.EventType.Physics:
-                return False
-            any_used = False
+                return
             for i in range(ch.get_n_events()):
                 if n_used >= target:
                     break
                 ch.select_event(i)
                 ssp = ch.gem()
-                has_full = False
-                for m in range(ssp.nmpds):
-                    mpd = ssp.mpd(m)
-                    if not mpd.present:
-                        continue
-                    for a in range(_MAX_APVS_PER_MPD):
-                        apv = mpd.apv(a)
-                        if apv.present and apv.nstrips == _APV_STRIP_SIZE:
-                            has_full = True
-                            break
-                    if has_full:
-                        break
-                if not has_full:
+                if not _event_has_full_readout(ssp):
                     continue
-                _accumulate_pedestals(ssp, accum)
+                ped.accumulate(ssp)
                 n_used += 1
-                any_used = True
                 if n_used % self.PROGRESS_EVERY == 0:
                     self.progress.emit(n_used, target)
-            return any_used
 
         try:
             if is_ra:
@@ -406,14 +332,14 @@ class PedestalWorker(QObject):
                         continue
                     if not ch.scan():
                         continue
-                    _process_current_event()
+                    _fold_current_record()
             else:
                 while not self._cancel and n_used < target:
                     if ch.read() != dec.Status.success:
                         break
                     if not ch.scan():
                         continue
-                    _process_current_event()
+                    _fold_current_record()
         except Exception as exc:  # noqa: BLE001
             ch.close()
             self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -424,10 +350,9 @@ class PedestalWorker(QObject):
         if n_used == 0:
             self.failed.emit("no full-readout events found in file")
             return
-        try:
-            napvs = _write_pedestals_json(accum, self._out)
-        except Exception as exc:  # noqa: BLE001
-            self.failed.emit(f"writing {self._out}: {exc}")
+        napvs = ped.write(self._out)
+        if napvs < 0:
+            self.failed.emit(f"write failed: {self._out}")
             return
         self.finished.emit(self._out, napvs, n_used)
 
