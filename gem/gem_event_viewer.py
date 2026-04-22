@@ -590,10 +590,12 @@ class ApvPanel(QWidget):
         dim = QColor(getattr(THEME, "TEXT_DIM", "#8b949e"))
         p.fillRect(0, 0, w, h, bg)
 
-        # Frame border, tinted red if badge is set
+        # Frame border; tint with the theme accent when a badge is set so
+        # the informational flag is visible at a glance but not alarming.
         border = QColor(getattr(THEME, "BORDER", "#30363d"))
+        badge_col = QColor(getattr(THEME, "ACCENT", "#ffd166"))
         if self._badge:
-            border = QColor(getattr(THEME, "DANGER", "#ff6b6b"))
+            border = badge_col
         p.setPen(QPen(border, 1))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(0, 0, w - 1, h - 1)
@@ -605,7 +607,7 @@ class ApvPanel(QWidget):
         p.drawText(title_rect, Qt.AlignmentFlag.AlignLeft
                    | Qt.AlignmentFlag.AlignVCenter, self._title)
         if self._badge:
-            p.setPen(QColor(getattr(THEME, "DANGER", "#ff6b6b")))
+            p.setPen(badge_col)
             p.drawText(title_rect, Qt.AlignmentFlag.AlignRight
                        | Qt.AlignmentFlag.AlignVCenter, self._badge)
 
@@ -681,12 +683,6 @@ class RawApvTab(QWidget):
         self.show_combo.currentIndexChanged.connect(self._on_control_changed)
         bar.addWidget(self.show_combo)
 
-        bar.addWidget(QLabel("Detector:"))
-        self.det_combo = QComboBox()
-        self.det_combo.addItem("All", -1)
-        self.det_combo.currentIndexChanged.connect(self._on_control_changed)
-        bar.addWidget(self.det_combo)
-
         self.zs_only_cb = QCheckBox("ZS-hit only")
         self.zs_only_cb.setChecked(False)
         self.zs_only_cb.toggled.connect(self._on_control_changed)
@@ -708,13 +704,12 @@ class RawApvTab(QWidget):
         self._processed: Dict[int, np.ndarray] = {}    # apv_idx → (128,6) float32
         self._raw:       Dict[int, np.ndarray] = {}    # apv_idx → (128,6) int16
         self._hits:      Dict[int, np.ndarray] = {}    # apv_idx → (128,) bool
-        # crate → list of apv_index in order
-        self._grouped: Dict[int, List[int]] = {}
-        # crate → {apv_idx: ApvPanel}
-        self._panels: Dict[int, Dict[int, ApvPanel]] = {}
-        # crate → tab index (for re-enable / text colour)
-        self._tab_index_of: Dict[int, int] = {}
-        self._dets_seen: set = set()
+        # det_name → list of apv_index in order
+        self._grouped: Dict[str, List[int]] = {}
+        # det_name → {apv_idx: ApvPanel}
+        self._panels: Dict[str, Dict[int, ApvPanel]] = {}
+        # det_name → tab index (for grey-out)
+        self._tab_index_of: Dict[str, int] = {}
 
     def reset_all(self):
         self._apv_meta.clear()
@@ -723,34 +718,24 @@ class RawApvTab(QWidget):
         self._hits.clear()
         self._grouped.clear()
         self._panels.clear()
-        self._dets_seen.clear()
+        self._tab_index_of.clear()
         self._tabs.clear()
-        self.det_combo.blockSignals(True)
-        while self.det_combo.count() > 1:
-            self.det_combo.removeItem(1)
-        self.det_combo.blockSignals(False)
         self._status.setText("")
 
     def set_apv_metadata(self, apv_meta: List[Dict]):
-        """Call once per run (after geometry load): fixes the per-crate
+        """Call once per run (after geometry load): fixes the per-detector
         groupings and builds the sub-tab skeletons.  ``apv_meta`` is a list
         of dicts keyed by ``apv_index`` (GemSystem index)."""
         self.reset_all()
         self._apv_meta = {int(m["apv_index"]): m for m in apv_meta}
 
-        # Group by crate; panels within a crate sort by (mpd, adc_ch).
+        # Group by det_name; panels within a detector sort by
+        # (plane, crate, mpd, adc_ch) so hardware-adjacent APVs land next
+        # to each other while X/Y planes stay grouped.
         for idx, m in self._apv_meta.items():
-            self._grouped.setdefault(int(m["crate_id"]), []).append(idx)
-            self._dets_seen.add(m["det_name"])
+            self._grouped.setdefault(m["det_name"], []).append(idx)
 
-        # Populate detector filter
-        self.det_combo.blockSignals(True)
-        for name in sorted(self._dets_seen):
-            self.det_combo.addItem(name, name)
-        self.det_combo.blockSignals(False)
-
-        # Build one sub-tab per crate
-        for crate in sorted(self._grouped.keys()):
+        for det_name in sorted(self._grouped.keys()):
             page = QScrollArea()
             page.setWidgetResizable(True)
             content = QWidget()
@@ -759,8 +744,10 @@ class RawApvTab(QWidget):
             grid.setVerticalSpacing(4)
             panels: Dict[int, ApvPanel] = {}
             sorted_apvs = sorted(
-                self._grouped[crate],
-                key=lambda i: (self._apv_meta[i]["mpd_id"],
+                self._grouped[det_name],
+                key=lambda i: (self._apv_meta[i]["plane_type"],
+                               self._apv_meta[i]["crate_id"],
+                               self._apv_meta[i]["mpd_id"],
                                self._apv_meta[i]["adc_ch"]))
             for n, idx in enumerate(sorted_apvs):
                 r, c = divmod(n, self.COLS)
@@ -774,29 +761,33 @@ class RawApvTab(QWidget):
                 panels[idx] = panel
             grid.setRowStretch(grid.rowCount(), 1)
             page.setWidget(content)
-            self._panels[crate] = panels
-            tab_i = self._tabs.addTab(page, f"crate {crate}")
-            self._tab_index_of[crate] = tab_i
+            self._panels[det_name] = panels
+            tab_i = self._tabs.addTab(page, det_name)
+            self._tab_index_of[det_name] = tab_i
 
     def set_event_data(self,
                        processed: Dict[int, np.ndarray],
                        raw:       Dict[int, np.ndarray],
                        hits:      Dict[int, np.ndarray],
-                       full_readout_apvs: Optional[set] = None):
-        """Push per-event data; call after process_event() returns."""
+                       online_zs_apvs: Optional[set] = None):
+        """Push per-event data; call after process_event() returns.
+
+        ``online_zs_apvs`` = set of GemSystem indices where the firmware
+        applied zero suppression (nstrips < 128).  Used to tag affected
+        panels with a 'zero-suppressed' badge so users know the raw view
+        is already sparse when that flag is on."""
         self._processed = processed
         self._raw       = raw
         self._hits      = hits
-        self._full_readout = full_readout_apvs or set()
+        self._online_zs = online_zs_apvs or set()
         self._refresh_all_panels()
 
     def _on_control_changed(self, *_):
         self._refresh_all_panels()
 
     def _refresh_all_panels(self):
-        show_raw   = self.show_combo.currentIndex() == 1
-        det_filter = self.det_combo.currentData()
-        zs_only    = self.zs_only_cb.isChecked()
+        show_raw = self.show_combo.currentIndex() == 1
+        zs_only  = self.zs_only_cb.isChecked()
 
         shown = 0
         total = 0
@@ -805,16 +796,14 @@ class RawApvTab(QWidget):
         dim_col = QColor(active_col)
         dim_col.setAlpha(100)
 
-        for crate, panels in self._panels.items():
+        for det_name, panels in self._panels.items():
             visible_in_tab = 0
             for idx, panel in panels.items():
                 m = self._apv_meta[idx]
                 total += 1
-                det_match = (det_filter == -1 or det_filter is None
-                             or m["det_name"] == det_filter)
                 has_zs = self._hits.get(idx)
                 has_any_zs = bool(has_zs is not None and has_zs.any())
-                if not det_match or (zs_only and not has_any_zs):
+                if zs_only and not has_any_zs:
                     panel.setVisible(False)
                     continue
                 panel.setVisible(True)
@@ -825,12 +814,11 @@ class RawApvTab(QWidget):
                          else self._processed.get(idx))
                 title = (f"c{m['crate_id']} m{m['mpd_id']} a{m['adc_ch']}  "
                          f"{m['det_name']} {m['plane_type']} p{m['det_pos']}")
-                badge = ("full-readout" if idx in self._full_readout
-                         and not show_raw and not has_any_zs else "")
+                badge = "zero-suppressed" if idx in self._online_zs else ""
                 panel.set_frame(title, frame, has_zs, badge)
 
             # Grey the tab header if nothing survives the current filters.
-            tab_i = self._tab_index_of.get(crate)
+            tab_i = self._tab_index_of.get(det_name)
             if tab_i is not None:
                 tab_bar.setTabTextColor(
                     tab_i, dim_col if visible_in_tab == 0 else active_col)
@@ -1682,7 +1670,7 @@ class GemEventViewer(QMainWindow):
         # returns references through the standard cast path and works.
         MAX_APVS_PER_MPD = 16
         raw_by_addr: Dict[Tuple[int, int, int], np.ndarray] = {}
-        full_readout_addrs: set = set()
+        online_zs_addrs: set = set()
         ssp = self._last_ssp
         for m in range(ssp.nmpds):
             mpd = ssp.mpd(m)
@@ -1696,13 +1684,15 @@ class GemEventViewer(QMainWindow):
                        int(apv.addr.adc_ch))
                 # Copy so the array outlives the SSP object if cached.
                 raw_by_addr[key] = np.asarray(apv.strips).copy()
-                if apv.nstrips == 128:
-                    full_readout_addrs.add(key)
+                # nstrips < 128 means firmware already applied ZS — only
+                # surviving channels shipped.  nstrips == 128 is full-readout.
+                if 0 < apv.nstrips < 128:
+                    online_zs_addrs.add(key)
 
         processed: Dict[int, np.ndarray] = {}
         raw:       Dict[int, np.ndarray] = {}
         hits:      Dict[int, np.ndarray] = {}
-        full_readout: set = set()
+        online_zs: set = set()
         for i in range(self._gsys.get_n_apvs()):
             try:
                 processed[i] = self._gsys.get_apv_frame(i)
@@ -1713,9 +1703,9 @@ class GemEventViewer(QMainWindow):
             key = (int(cfg.crate_id), int(cfg.mpd_id), int(cfg.adc_ch))
             if key in raw_by_addr:
                 raw[i] = raw_by_addr[key]
-                if key in full_readout_addrs:
-                    full_readout.add(i)
-        self.raw_apv_tab.set_event_data(processed, raw, hits, full_readout)
+                if key in online_zs_addrs:
+                    online_zs.add(i)
+        self.raw_apv_tab.set_event_data(processed, raw, hits, online_zs)
 
     def _re_reconstruct_current(self):
         if self._gsys is None or self._gcl is None:
