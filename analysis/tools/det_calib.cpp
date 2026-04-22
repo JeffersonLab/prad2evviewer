@@ -75,7 +75,7 @@ void setupReconBranches(TTree *tree, EventVars_Recon &ev)
 }
 
 static std::vector<std::string> collectRootFiles(const std::string &path);
-void projectToHyCalSurface(PhysicsTools::MollerData &m_data, float hycal_z);
+void projectToHyCalSurface(MollerData &m_data, float hycal_z);
 float fitAndDraw(TH1F* hist, const std::string& out_path, const float survey_position, const float fit_range = 4.);
 
 // ── Main ─────────────────────────────────────────────────────────────────
@@ -90,6 +90,9 @@ int main(int argc, char *argv[])
     float gem_z[4] = {5423.71, 5384.00, 5823.71, 5784.00}; //mm, the default position of each GEM plane, TO DO: read from database
     float gem_x[4] = {0., 0., 0., 0.}; //mm, the default center x of each GEM plane, TO DO: read from database
     float gem_y[4] = {0., 0., 0., 0.}; //mm, the default center y of each GEM plane, TO DO: read from database
+
+    float shift_hx = 0.f, shift_hy = 0.f;
+    float shift_gx[4] = {0.f, 0.f, 0.f, 0.f}, shift_gy[4] = {0.f, 0.f, 0.f, 0.f};
 
     int max_events = -1;
     int opt;
@@ -175,8 +178,8 @@ int main(int argc, char *argv[])
     }
     TFile outfile(outName, "RECREATE");
 
-    PhysicsTools::MollerData hycal_mollers;
-    PhysicsTools::MollerData gem_mollers[4];
+    MollerData hycal_mollers;
+    MollerData gem_mollers[4];
 
     // --- event loop : select Moller events on HyCal and each GEM plane ---
     int N = tree->GetEntries();
@@ -197,17 +200,17 @@ int main(int argc, char *argv[])
         if(!good_moller) continue;
 
         //have selected good Moller events for further analysis
-        PhysicsTools::MollerEvent h_m;
-        PhysicsTools::MollerEvent g_m;
+        MollerEvent h_m;
+        MollerEvent g_m;
         
-        h_m = PhysicsTools::MollerEvent(
+        h_m = MollerEvent(
                 {ev.matchHC_x[0], ev.matchHC_y[0], ev.matchHC_z[0], ev.matchHC_energy[0]},
                 {ev.matchHC_x[1], ev.matchHC_y[1], ev.matchHC_z[1], ev.matchHC_energy[1]});
         hycal_mollers.push_back(h_m);
         
         // select two moller on one chamber for upstream GEMs 
         if(ev.matchG_det_id[0][0] == ev.matchG_det_id[1][0]){
-            g_m = PhysicsTools::MollerEvent(
+            g_m = MollerEvent(
                 {ev.matchG_x[0][0], ev.matchG_y[0][0], ev.matchG_z[0][0], ev.matchHC_energy[0]},
                 {ev.matchG_x[1][0], ev.matchG_y[1][0], ev.matchG_z[1][0], ev.matchHC_energy[1]});
             int det_id = ev.matchG_det_id[0][0];
@@ -217,7 +220,7 @@ int main(int argc, char *argv[])
 
         // select two moller on one chamber for downstream GEMs
         if(ev.matchG_det_id[0][1] == ev.matchG_det_id[1][1]){
-            g_m = PhysicsTools::MollerEvent(
+            g_m = MollerEvent(
                 {ev.matchG_x[0][1], ev.matchG_y[0][1], ev.matchG_z[0][1], ev.matchHC_energy[0]},
                 {ev.matchG_x[1][1], ev.matchG_y[1][1], ev.matchG_z[1][1], ev.matchHC_energy[1]});
             int det_id = ev.matchG_det_id[0][1];
@@ -236,6 +239,8 @@ int main(int argc, char *argv[])
 
     //hycal Moller events
     //projectToHyCalSurface(hycal_mollers, hycal_z); //project to HyCal surface
+    //move to beam center coordinates
+    TransformDetData(hycal_mollers, shift_hx, shift_hy, 0.f);
     for (int i = 0; i < hycal_mollers.size(); i++) {
         vertex_hycal->Fill(physics.GetMollerZdistance(hycal_mollers[i], Ebeam));
         if (i >= 1) {
@@ -248,6 +253,7 @@ int main(int argc, char *argv[])
 
     //gem Moller events
     for (int d = 0; d < 4; d++) {
+        TransformDetData(gem_mollers[d], shift_gx[d], shift_gy[d], 0.f);
         for (int i = 0; i < gem_mollers[d].size(); i++) {
             vertex_gem[d]->Fill(physics.GetMollerZdistance(gem_mollers[d][i], Ebeam));
             if (i >= 1) {
@@ -316,7 +322,7 @@ static std::vector<std::string> collectRootFiles(const std::string &path)
     return files;
 }
 
-void projectToHyCalSurface(PhysicsTools::MollerData &m_data, float hycal_z)
+void projectToHyCalSurface(MollerData &m_data, float hycal_z)
 {
     //project the Moller event from target center(z = 0) to the HyCal surface (z = hycal_z)
     for (auto &evt : m_data) {

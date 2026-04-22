@@ -117,6 +117,19 @@ void TransformDetData(std::vector<GEMHit> &gem_hits, float beamX, float beamY, f
     }
 }
 
+void TransformDetData(MollerData          &mollers,  float beamX, float beamY, float ZfromTarget)
+{
+    // Transform Moller event coordinates from detector frame to target frame
+    for (auto &moller : mollers) {
+        moller.first.x -= beamX;
+        moller.first.y -= beamY;
+        moller.first.z += ZfromTarget;
+        moller.second.x -= beamX;
+        moller.second.y -= beamY;
+        moller.second.z += ZfromTarget;
+    }
+}
+
 void PhysicsTools::FillModuleEnergy(int module_id, float energy)
 {   
     if (module_id >= 0){
