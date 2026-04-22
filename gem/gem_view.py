@@ -410,7 +410,7 @@ _LEGEND_ENTRIES = [
     ("patch-red",     "Y strip hits"),
     ("tri-up-blue",   "X cluster"),
     ("tri-right-red", "Y cluster"),
-    ("plus-black",    "2D hit"),
+    ("plus-fg",       "2D hit"),
     ("dash-gray",     "Cross-talk"),
 ]
 
@@ -503,12 +503,13 @@ def _draw_event_panel(p: QPainter, panel: QRectF,
     if x_plane_size == 0: x_plane_size = x_size
     if y_plane_size == 0: y_plane_size = y_size
 
-    # Leave room above + below for title & axis label
+    # Leave room above for the title; bottom padding is just enough for the
+    # X-cluster triangles (drawn ~8 px below the detector frame).
     TITLE_H = 18
-    AXLBL_H = 14
+    BOTTOM_PAD = 10
     inner = QRectF(panel.x() + 6, panel.y() + TITLE_H,
                    panel.width() - 12,
-                   panel.height() - TITLE_H - AXLBL_H)
+                   panel.height() - TITLE_H - BOTTOM_PAD)
     scale, ox, oy = _panel_transform(x_size, y_size, inner)
 
     # Detector outline
@@ -538,7 +539,7 @@ def _draw_event_panel(p: QPainter, panel: QRectF,
     # Clusters + 2D hits
     _draw_clusters_and_2d(p, det_data, x_plane_size, y_plane_size,
                           x_pitch, y_pitch,
-                          scale, ox, oy, y_size, x_size)
+                          scale, ox, oy, y_size, x_size, fg)
     p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     # Per-panel title
@@ -553,12 +554,6 @@ def _draw_event_panel(p: QPainter, panel: QRectF,
     p.drawText(QRectF(panel.x(), panel.y() + 2, panel.width(), TITLE_H - 2),
                Qt.AlignmentFlag.AlignCenter,
                f"{name}  X:{n_xh}/{n_xcl}cl   Y:{n_yh}/{n_ycl}cl   2D:{n_2d}")
-
-    # Axis label
-    p.setFont(_font(8))
-    p.drawText(QRectF(panel.x(), panel.bottom() - AXLBL_H,
-                      panel.width(), AXLBL_H),
-               Qt.AlignmentFlag.AlignCenter, "X (mm)")
 
 
 def _draw_charge_strips(p: QPainter, hits, plane: str, lut,
@@ -605,7 +600,8 @@ def _draw_clusters_and_2d(p: QPainter, det_data: dict,
                           x_plane_size: float, y_plane_size: float,
                           x_pitch: float, y_pitch: float,
                           scale: float, ox: float, oy: float,
-                          y_size: float, x_size: float):
+                          y_size: float, x_size: float,
+                          fg: QColor):
     # X cluster centres — blue ▲ along the bottom edge
     p.setPen(QPen(QColor("#1f6feb"), 1.2))
     p.setBrush(QColor("#1f6feb"))
@@ -629,8 +625,9 @@ def _draw_clusters_and_2d(p: QPainter, det_data: dict,
                          QPointF(cx - tri_s, cy + tri_s)])
         p.drawPolygon(pts)
 
-    # 2D hits — black "+" marker
-    pen = QPen(QColor("#000"), 2.4)
+    # 2D hits — "+" marker drawn in the theme foreground so it's visible on
+    # both light (dark ink) and dark (light ink) backgrounds.
+    pen = QPen(fg, 2.4)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     p.setPen(pen)
     plus_s = 7.0
@@ -694,12 +691,12 @@ def _paint_legend(p: QPainter, area: QRectF, entries, fg: QColor):
     for i, (kind, label) in enumerate(entries):
         cx = area.x() + i * cell_w + 8
         cy = area.center().y()
-        _draw_legend_glyph(p, kind, cx, cy)
+        _draw_legend_glyph(p, kind, cx, cy, fg)
         p.setPen(fg)
         p.drawText(QPointF(cx + mark_w + 4, cy + fm.ascent() / 2 - 2), label)
 
 
-def _draw_legend_glyph(p: QPainter, kind: str, cx: float, cy: float):
+def _draw_legend_glyph(p: QPainter, kind: str, cx: float, cy: float, fg: QColor):
     if kind == "patch-teal":
         c = QColor(*CMAP_WINTER_RGB[len(CMAP_WINTER_RGB) // 2])
         p.setPen(QPen(c, 0)); p.setBrush(c)
@@ -720,8 +717,8 @@ def _draw_legend_glyph(p: QPainter, kind: str, cx: float, cy: float):
         p.drawPolygon(QPolygonF([QPointF(cx + 2, cy - s),
                                  QPointF(cx + 2 + s * 1.4, cy),
                                  QPointF(cx + 2, cy + s)]))
-    elif kind == "plus-black":
-        pen = QPen(QColor("#000"), 2.4); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    elif kind == "plus-fg":
+        pen = QPen(fg, 2.4); pen.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setPen(pen)
         s = 6
         p.drawLine(QPointF(cx + 7 - s, cy), QPointF(cx + 7 + s, cy))
@@ -837,12 +834,6 @@ def draw_layout(painter: QPainter, canvas: QRectF,
         painter.drawLine(QPointF(ox, ya), QPointF(ox + x_size * scale, ya))
 
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-
-    # Axis labels
-    painter.setPen(fg)
-    painter.setFont(_font(9))
-    painter.drawText(QRectF(panel.x(), panel.bottom() - 14, panel.width(), 14),
-                     Qt.AlignmentFlag.AlignCenter, "X (mm)")
 
     # Legend
     legend_entries = [
