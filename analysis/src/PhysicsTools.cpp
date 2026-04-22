@@ -229,6 +229,7 @@ std::array<float, 3> PhysicsTools::FitPeakResolution(int module_id) const
     h->Fit(&gaus, "RQ");
 
     float mean  = gaus.GetParameter(1);
+    if( mean < 0 ) mean = 0.f;
     float sigma = gaus.GetParameter(2);
     float chi2 = (gaus.GetNDF() > 0) ? gaus.GetChisquare() / gaus.GetNDF() : 0.f;
     return {mean, sigma, chi2};
