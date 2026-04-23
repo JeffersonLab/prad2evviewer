@@ -113,11 +113,14 @@ struct ReconEventData {
     uint8_t cl_nblocks[kMaxClusters] = {};
     uint16_t cl_center[kMaxClusters]  = {};
     uint32_t cl_flag[kMaxClusters]    = {};
-    // Matching results to GEM hits
-    uint32_t cl_matchFlag[kMaxClusters] = {};
-    float    cl_matchGEMx[kMaxClusters][2] = {};
-    float    cl_matchGEMy[kMaxClusters][2] = {};
-    float    cl_matchGEMz[kMaxClusters][2] = {};
+    // Matching results
+    uint32_t matchFlag[kMaxClusters] = {};
+    float    matchHC_x[kMaxClusters] = {};
+    float    matchHC_y[kMaxClusters] = {};
+    float    matchHC_z[kMaxClusters] = {};
+    float    matchGEMx[kMaxClusters][2] = {};
+    float    matchGEMy[kMaxClusters][2] = {};
+    float    matchGEMz[kMaxClusters][2] = {};
 
     // GEM reconstructed hits
     int        n_gem_hits = 0;
@@ -130,19 +133,6 @@ struct ReconEventData {
     float   gem_y_peak[kMaxGemHits]   = {};
     uint8_t gem_x_size[kMaxGemHits]   = {};
     uint8_t gem_y_size[kMaxGemHits]   = {};
-
-    // Detector matching results
-    int      match_num = 0;
-    float matchHC_x[kMaxClusters] = {};
-    float matchHC_y[kMaxClusters] = {};
-    float matchHC_z[kMaxClusters] = {};
-    float matchHC_energy[kMaxClusters] = {};
-    uint16_t matchHC_center[kMaxClusters] = {};
-    uint32_t matchHC_flag[kMaxClusters] = {};
-    float matchG_x[kMaxClusters][2] = {}; // up/down GEM for each cluster
-    float matchG_y[kMaxClusters][2] = {};
-    float matchG_z[kMaxClusters][2] = {};
-    uint8_t matchG_det_id[kMaxClusters][2] = {};
 
     //veto information
     int      veto_nch = 0;
