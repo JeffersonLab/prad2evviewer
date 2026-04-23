@@ -106,7 +106,7 @@ int main(int argc, char *argv[])
     // --- load detector geometry config from JSON ---
     std::string run_str = get_run_str(root_files[0]);
     int run_num = get_run_int(root_files[0]);
-    gCalibConfig = LoadTransformConfig(dbDir + "/calibration/calibration_config.json", run_num);
+    gCalibConfig = LoadCalibConfig(dbDir + "/calibration/calibration_config.json", run_num);
 
     // --- init detector system ---
     fdec::HyCalSystem hycal;
@@ -200,9 +200,9 @@ int main(int argc, char *argv[])
             int hycal_idx = m.hycal_idx;  //index of the cluster in the original vector
 
             //projection to same z plane (e.g. Hycal crystal surface)
-            GetProjection(hycal_hit, geoconfig.hycal_z);
-            GetProjection(gem_up_hit, geoconfig.hycal_z);
-            GetProjection(gem_down_hit, geoconfig.hycal_z);
+            GetProjection(hycal_hit, gCalibConfig.hycal_z);
+            GetProjection(gem_up_hit, gCalibConfig.hycal_z);
+            GetProjection(gem_down_hit, gCalibConfig.hycal_z);
 
             //save the matching result into output tree
             if (hitN < 100) { // safety check for array size

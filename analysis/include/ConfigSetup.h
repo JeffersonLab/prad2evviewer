@@ -29,8 +29,8 @@ namespace fs = std::filesystem;
 // Holds all run-specific detector geometry and beam parameters.
 // Using a struct allows multi-run processing without shared mutable state:
 //
-//   auto geo1 = LoadTransformConfig(path, run1);
-//   auto geo2 = LoadTransformConfig(path, run2);
+//   auto geo1 = LoadCalibConfig(path, run1);
+//   auto geo2 = LoadCalibConfig(path, run2);
 //   TransformDetData(hits1, geo1);
 //   TransformDetData(hits2, geo2);
 //
@@ -46,7 +46,7 @@ struct CalibConfig {
 };
 
 // Global geometry config for single-run tools.
-// Multi-run code should capture LoadTransformConfig()'s return value into a
+// Multi-run code should capture LoadCalibConfig()'s return value into a
 // local CalibConfig instead of relying on this global.
 inline CalibConfig gCalibConfig;
 
@@ -67,10 +67,10 @@ inline float *const  gem_y_   = gCalibConfig.gem_y;
 // Selects the entry whose run_number is the largest value <= run_num.
 // If run_num < 0 (unknown), uses the entry with the largest run_number.
 //
-// Single-run tools:  gCalibConfig = LoadTransformConfig(path, run);
-// Multi-run tools:   auto geo1 = LoadTransformConfig(path, run1);
-//                    auto geo2 = LoadTransformConfig(path, run2);
-inline CalibConfig LoadTransformConfig(const std::string &transform_config, int run_num)
+// Single-run tools:  gCalibConfig = LoadCalibConfig(path, run);
+// Multi-run tools:   auto geo1 = LoadCalibConfig(path, run1);
+//                    auto geo2 = LoadCalibConfig(path, run2);
+inline CalibConfig LoadCalibConfig(const std::string &transform_config, int run_num)
 {
     CalibConfig result;   // start from defaults defined in CalibConfig
 
@@ -233,7 +233,7 @@ inline bool WriteTransformConfig(const std::string &transform_config, int run_nu
 //   Always available; callers supply the numbers directly.
 //
 // CalibConfig overloads (const CalibConfig &geo = gCalibConfig):
-//   Use the geometry loaded by LoadTransformConfig().
+//   Use the geometry loaded by LoadCalibConfig().
 //   Default argument = gCalibConfig, so existing single-arg calls like
 //     TransformDetData(hc_hits);
 //   still compile and use the global config unchanged.
