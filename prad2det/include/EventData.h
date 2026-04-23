@@ -113,6 +113,11 @@ struct ReconEventData {
     uint8_t cl_nblocks[kMaxClusters] = {};
     uint16_t cl_center[kMaxClusters]  = {};
     uint32_t cl_flag[kMaxClusters]    = {};
+    // Matching results to GEM hits
+    uint32_t cl_matchFlag[kMaxClusters] = {};
+    float    cl_matchGEMx[kMaxClusters][2] = {};
+    float    cl_matchGEMy[kMaxClusters][2] = {};
+    float    cl_matchGEMz[kMaxClusters][2] = {};
 
     // GEM reconstructed hits
     int        n_gem_hits = 0;

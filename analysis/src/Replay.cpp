@@ -173,6 +173,10 @@ void Replay::setupReconBranches(TTree *tree, EventVars_Recon &ev)
     tree->Branch("cl_nblocks",   ev.cl_nblocks,    "cl_nblocks[n_clusters]/b");
     tree->Branch("cl_center",    ev.cl_center,     "cl_center[n_clusters]/s");
     tree->Branch("cl_flag",      ev.cl_flag,       "cl_flag[n_clusters]/i");
+    tree->Branch("cl_matchFlag", ev.cl_matchFlag,  "cl_matchFlag[n_clusters]/i");
+    tree->Branch("cl_matchGEMx", ev.cl_matchGEMx,  "cl_matchGEMx[n_clusters][2]/F");
+    tree->Branch("cl_matchGEMy", ev.cl_matchGEMy,  "cl_matchGEMy[n_clusters][2]/F");
+    tree->Branch("cl_matchGEMz", ev.cl_matchGEMz,  "cl_matchGEMz[n_clusters][2]/F");
     // GEM part
     //detector coordinate system (GEM plane)
     tree->Branch("n_gem_hits",   &ev.n_gem_hits,   "n_gem_hits/I");
@@ -658,6 +662,13 @@ if(!prad1){
                 ev->cl_nblocks[i] = hits[i].nblocks;
                 ev->cl_center[i]  = hits[i].center_id;
                 ev->cl_flag[i]    = hits[i].flag;
+                //reset matching flags and matched GEM positions
+                ev->cl_matchFlag[i] = 0;
+                for(int j = 0; j < 2; ++j){
+                    ev->cl_matchGEMx[i][j] = -999.f;
+                    ev->cl_matchGEMy[i][j] = -999.f;
+                    ev->cl_matchGEMz[i][j] = -999.f;
+                }
             }
 
             //decode GEM data and reconstruct GEM hits
@@ -718,6 +729,15 @@ if(!prad1){
                     ev->matchG_y[i][j] = matched_hits[i].gem[j].y;
                     ev->matchG_z[i][j] = matched_hits[i].gem[j].z;
                     ev->matchG_det_id[i][j] = matched_hits[i].gem[j].det_id;
+                }
+
+                //set matchFlag for hycal clusters
+                int cl_idx = matched_hits[i].hycal_idx; // assuming center_id corresponds to cluster index, adjust if needed
+                ev->cl_matchFlag[cl_idx] = matched_hits[i].mflag;
+                for(int j = 0; j < 2; j++) {
+                    ev->cl_matchGEMx[cl_idx][j] = matched_hits[i].gem[j].x;
+                    ev->cl_matchGEMy[cl_idx][j] = matched_hits[i].gem[j].y;
+                    ev->cl_matchGEMz[cl_idx][j] = matched_hits[i].gem[j].z;
                 }
             }
 
