@@ -383,6 +383,13 @@ class ModuleDetailPanel(QWidget):
         self._refit_btn.setEnabled(False)
         self._refit_btn.clicked.connect(self._do_refit)
         btn_row.addWidget(self._refit_btn)
+        self._mean_btn = QPushButton("Use Mean (χ²=1)")
+        self._mean_btn.setEnabled(False)
+        self._mean_btn.setToolTip(
+            "Compute weighted mean/σ from histogram (in fit range if set)\n"
+            "and use as peak value; χ²/ndf is fixed at 1.0")
+        self._mean_btn.clicked.connect(self._do_use_mean)
+        btn_row.addWidget(self._mean_btn)
         self._apply_btn = QPushButton("Apply && Save JSON")
         self._apply_btn.setEnabled(False)
         self._apply_btn.clicked.connect(self._apply_and_save)
@@ -409,6 +416,7 @@ class ModuleDetailPanel(QWidget):
         self._apply_btn.setEnabled(False)
         self._refit_status.setText("")
         self._refit_btn.setEnabled(bool(name) and HAS_SCIPY and HAS_UPROOT)
+        self._mean_btn.setEnabled(bool(name) and HAS_UPROOT)
 
         # Pre-populate fit range from current fit result
         if mm and mm.peak > 0 and mm.sigma > 0:
@@ -500,6 +508,76 @@ class ModuleDetailPanel(QWidget):
     def set_iter_data(self, data: Optional["IterData"]) -> None:
         """Store reference to current IterData (needed for JSON write-back)."""
         self._iter_data = data
+
+    def _do_use_mean(self) -> None:
+        """Use histogram weighted mean as peak value; chi2/ndf is fixed at 1.0."""
+        name = self._cur_module_name
+        if not name or self._root_path is None:
+            self._refit_status.setText("No module selected")
+            return
+
+        hist_data = self._read_module_hist(name)
+        if hist_data is None:
+            self._refit_status.setText("Histogram not available in ROOT file")
+            return
+
+        counts, edges = hist_data
+        centers = 0.5 * (edges[:-1] + edges[1:])
+
+        # Apply fit range if provided
+        xmin_txt = self._rf_xmin.text().strip()
+        xmax_txt = self._rf_xmax.text().strip()
+        try:
+            xmin = float(xmin_txt) if xmin_txt else None
+        except ValueError:
+            xmin = None
+        try:
+            xmax = float(xmax_txt) if xmax_txt else None
+        except ValueError:
+            xmax = None
+
+        mask = counts > 0
+        if xmin is not None:
+            mask &= centers >= xmin
+        if xmax is not None:
+            mask &= centers <= xmax
+
+        c_sel = counts[mask]
+        x_sel = centers[mask]
+        total = c_sel.sum()
+        if total < 1:
+            self._refit_status.setText("No data in selected range")
+            return
+
+        mu0  = float((x_sel * c_sel).sum() / total)
+        var  = float(((x_sel - mu0) ** 2 * c_sel).sum() / total)
+        bw   = float(edges[1] - edges[0]) if len(edges) > 1 else 1.0
+        sig0 = math.sqrt(max(var, bw ** 2 / 12.0))
+
+        old_peak   = self._mm.peak   if (self._mm and self._mm.peak > 0.0) else 0.0
+        old_factor = self._mm.factor if self._mm else 1.0
+        new_factor = old_factor * mu0 / old_peak if old_peak > 0.0 else 0.0
+
+        self._refit_peak       = mu0
+        self._refit_sigma      = sig0
+        self._refit_chi2       = 1.0
+        self._refit_new_factor = new_factor
+
+        range_note = ""
+        if xmin is not None or xmax is not None:
+            lo_s = f"{xmin:.1f}" if xmin is not None else "-inf"
+            hi_s = f"{xmax:.1f}" if xmax is not None else "+inf"
+            range_note = f"  [range: {lo_s} – {hi_s}]"
+
+        msg = (
+            f"Mean:  μ = {mu0:.2f} MeV     "
+            f"σ = {sig0:.2f} MeV     χ²/ndf = 1.000  (fixed){range_note}"
+        )
+        if new_factor > 0.0:
+            msg += f"\nNew factor: {new_factor:.5f}   (was {old_factor:.5f})"
+        self._refit_status.setText(msg)
+        self._apply_btn.setEnabled(new_factor > 0.0)
+        self._redraw_refit_overlay(name, counts, edges, mu0, sig0)
 
     def _do_refit(self) -> None:
         """Gaussian refit using user-specified range and initial peak center."""
