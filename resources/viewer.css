@@ -438,10 +438,11 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
     font-size:12px; color:var(--text); border-bottom:1px solid var(--border); flex-wrap:wrap; }
 .gem-apv-toolbar label { display:inline-flex; align-items:center; gap:4px; }
 .gem-apv-body { flex:1; min-height:0; overflow-y:auto; padding:0; }
-.gem-apv-section { padding:6px 8px 8px 8px; min-height:70px; }
+.gem-apv-section { padding:6px 8px 8px 8px; min-height:70px;
+    border-top:1px solid var(--border); }
+.gem-apv-section.first-visible { border-top:none; }
 .gem-apv-section-header { font-size:12px; font-weight:600; color:var(--text);
     padding:2px 0 4px 0; }
-.gem-apv-sep { height:1px; background:var(--border); }
 .gem-apv-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(240px, 1fr));
     gap:6px; }
 .gem-apv-panel { height:160px; min-width:0; }

@@ -62,6 +62,14 @@ let gemApvShowProcessed = true;
 let gemApvShowSignalOnly = false;
 let gemApvSharedY = true;
 let gemApvSampleMask = [true, true, true, true, true, true];
+// Per-detector visibility — index = det_id (0..3 cover all current PRad-II
+// GEMs).  Out-of-range det_ids fall back to "show" so unexpected
+// configurations don't disappear silently.
+let gemApvDetMask = [true, true, true, true];
+function gemApvDetVisible(detId) {
+    if (detId < 0 || detId >= gemApvDetMask.length) return true;
+    return gemApvDetMask[detId];
+}
 let gemApvBuiltKey = '';        // signature of section layout currently in DOM
 const gemApvCanvases = new Map(); // apv_id → canvas element
 
@@ -138,12 +146,12 @@ function buildGemApvSections() {
     body.innerHTML = '';
     gemApvCanvases.clear();
 
-    dets.forEach((det, sectionIdx) => {
-        if (sectionIdx > 0) {
-            const sep = document.createElement('div');
-            sep.className = 'gem-apv-sep';
-            body.appendChild(sep);
-        }
+    dets.forEach((det) => {
+        // Section separators are drawn as a top border on the section
+        // itself (see .gem-apv-section in viewer.css) so hiding a GEM
+        // via the toolbar checkboxes also hides its separator naturally.
+        // The topmost visible section gets .first-visible to suppress its
+        // border — applied in renderGemApvPanels after visibility is set.
         const section = document.createElement('div');
         section.className = 'gem-apv-section';
         section.dataset.det = det.id;
@@ -182,10 +190,28 @@ function renderGemApvPanels() {
     const apvs  = gemApvData.apvs || [];
     const field = gemApvShowProcessed ? 'processed' : 'raw';
 
+    // Section visibility — toggle whole sections (header + grid + tint
+    // background) for GEMs the user has unchecked.  The topmost visible
+    // section gets .first-visible so its top border (which acts as the
+    // separator above it) is hidden.
+    const body = document.getElementById('gem-apv-body');
+    let firstVisibleSection = null;
+    if (body) {
+        body.querySelectorAll('.gem-apv-section').forEach(sec => {
+            const detId = parseInt(sec.dataset.det, 10);
+            const visible = gemApvDetVisible(detId);
+            sec.style.display = visible ? '' : 'none';
+            sec.classList.remove('first-visible');
+            if (visible && !firstVisibleSection) firstVisibleSection = sec;
+        });
+        if (firstVisibleSection) firstVisibleSection.classList.add('first-visible');
+    }
+
     // Compute global Y range across visible (non-filtered) APVs.
     let yLo = Infinity, yHi = -Infinity;
     if (gemApvSharedY) {
         for (const apv of apvs) {
+            if (!gemApvDetVisible(apv.det_id)) continue;
             if (gemApvShowSignalOnly && !apvHasSignal(apv)) continue;
             const f = apv[field];
             if (!f) continue;
@@ -213,6 +239,9 @@ function renderGemApvPanels() {
         total++;
         const panel = panelOf(apv.id);
         if (!panel) continue;
+        // Skip rendering work for APVs in a hidden GEM — the section is
+        // already display:none, so any draw would be invisible anyway.
+        if (!gemApvDetVisible(apv.det_id)) continue;
         const hasSig = apvHasSignal(apv);
         if (gemApvShowSignalOnly && !hasSig) {
             panel.style.display = 'none';
@@ -405,6 +434,17 @@ function setupGemApvControls() {
     cb('gem-apv-process',     gemApvShowProcessed);
     cb('gem-apv-signal-only', gemApvShowSignalOnly);
     cb('gem-apv-shared-y',    gemApvSharedY);
+    // Per-GEM filter (gem0…gem3) — hides whole sections, including the
+    // separator above (which is a top border on the section itself).
+    for (let d = 0; d < gemApvDetMask.length; d++) {
+        const el = document.getElementById('gem-apv-d' + d);
+        if (!el) continue;
+        el.checked = gemApvDetMask[d];
+        el.onchange = () => {
+            gemApvDetMask[d] = el.checked;
+            renderGemApvPanels();
+        };
+    }
     for (let t = 0; t < 6; t++) {
         const el = document.getElementById('gem-apv-t' + t);
         if (!el) continue;
