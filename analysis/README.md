@@ -5,7 +5,18 @@ Replay and physics analysis for PRad2. **Requires ROOT 6.0+.**
 ```bash
 cmake -B build -DBUILD_ANALYSIS=ON
 cmake --build build -j$(nproc)
+cmake --install build --prefix /your/install/prefix    # optional
 ```
+
+Builds three things:
+
+| Artifact | Where |
+|----------|-------|
+| `prad2ana_*` executables (replay, calibration, …) | `<build>/bin/`, installed to `<prefix>/bin/` |
+| **`libprad2ana.a`** — static library exposing `analysis::*` (Replay, PhysicsTools, MatchingTools) | `<build>/analysis/`, installed to `<prefix>/lib/` |
+| Headers (`PhysicsTools.h`, `MatchingTools.h`, `Replay.h`, `ConfigSetup.h`) | installed to `<prefix>/include/prad2ana/` |
+
+The library is what makes ACLiC scripts work in install mode — without it, `analysis::*` symbols would be unresolved at link time.
 
 ## Tools
 
@@ -57,14 +68,33 @@ prad2ana_cosmic_test <input.root> [-o output.root] [-D daq_config.json] [-n max_
 
 ## ACLiC Scripts (`scripts/`)
 
-ROOT macros that compile against `libprad2dec` / `libprad2det` via ACLiC. They share one prelude — `rootlogon.C` — that resolves include paths, finds the static libraries in your build directory, and sets `PRAD2_DATABASE_DIR`. Run it once per ROOT session:
+ROOT macros that compile against `libprad2dec` / `libprad2det` / `libprad2ana` via ACLiC. They share one prelude — `rootlogon.C` — that auto-detects whether you're in a build tree or an install tree and configures include paths + linker line accordingly.
 
+**Build-tree mode** (preferred, picks up the freshest libs):
 ```bash
 cd build
-root -l ../analysis/scripts/rootlogon.C
+root -l ../analysis/scripts/rootlogon.C        # CMakeCache.txt in cwd → build mode
+# or from anywhere:
+PRAD2_BUILD_DIR=/path/to/build root -l rootlogon.C
 ```
 
-Then `.x` any of the macros below. All accept a final `daq_config` argument that defaults to `$PRAD2_DATABASE_DIR/daq_config.json`.
+**Install-tree mode** (after `cmake --install`):
+```bash
+source <prefix>/bin/prad2_setup.sh             # exports PRAD2_DATABASE_DIR
+root -l <prefix>/share/prad2evviewer/analysis/scripts/rootlogon.C
+```
+
+Each path probe is logged as `[+] tag : path` (resolved) or `[-] tag : path` (skipped/missing) so a failed setup is one glance to debug. Set `PRAD2_ROOTLOGON_QUIET=1` to suppress the per-probe lines and keep just the section headers.
+
+| Env var | What it overrides |
+|---------|-------------------|
+| `PRAD2_BUILD_DIR`        | build dir if not the cwd |
+| `PRAD2_DATABASE_DIR`     | install-mode prefix anchor (set by `prad2_setup.sh`) |
+| `PRAD2_EVIO_LIB`         | explicit `libevio.a` path (skips all evio probes) |
+| `PRAD2_CODA_ROOT`        | non-default Hall-B CODA install root |
+| `PRAD2_ROOTLOGON_QUIET`  | suppress per-probe `[+]/[-]` lines |
+
+Then `.x` any of the macros below.
 
 ### gem_raw_dump.C
 
@@ -78,32 +108,60 @@ Smallest GEM example — opens an EVIO file, finds every GEM raw bank (tags from
 
 ### gem_clusters_to_root.C
 
-Full GEM analysis pipeline → ROOT tree.  Per event runs `EvChannel.DecodeEvent` → `GemSystem.ProcessEvent` (pedestal + CM + ZS) → `GemSystem.Reconstruct(GemCluster)`, then writes a flat `TTree` with all 1D strip clusters and their constituent strip hits including the full 6 time samples per hit.
+Full **HyCal + GEM** reconstruction pipeline with straight-line cluster matching → ROOT tree of matched HC↔GEM pairs and the constituent X/Y GEM strip waveforms.
 
-Tree layout (one entry per physics event):
+Per event:
+- `EvChannel.DecodeEvent` → FADC + SSP buffers
+- HyCal: `WaveAnalyzer` → `mod->energize` → `HyCalCluster.FormClusters() / ReconstructHits()`
+- GEM: `GemSystem.ProcessEvent` (pedestal + CM + ZS) → `Reconstruct(GemCluster)` → 2D X×Y matched hits per detector
+- Lab-frame transform via `RotateDetData` / `TransformDetData` (uses `runinfo` geometry for HyCal + each GEM)
+- For each HyCal cluster, draw a line from `(0,0,0)` target through the lab-frame centroid (z = `hycal_z` + shower depth); intersect each GEM plane and accept GEM hits within `N · σ_total` of the projection
+- For each match, look up the X & Y constituent `StripCluster` on the corresponding plane and copy every strip's full 6-sample waveform
 
-| Group   | Branches | Sized by |
-|---------|----------|----------|
+Matching geometry:
+```
+σ_hc(face) = 2.6 / sqrt(E / 1 GeV)     [mm at HyCal face]
+σ_hc@gem   = σ_hc(face) · (z_gem / z_hc)
+σ_gem      = 0.1 mm
+σ_total    = sqrt(σ_hc@gem² + σ_gem²)
+match if  |residual| < N · σ_total     [N defaults to 3, configurable]
+```
+The actual residual + `σ_total` are stored per match so downstream cuts can be tuned without re-running.
+
+Tree layout (`match`, one entry per physics event):
+
+| Group | Branches | Sized by |
+|-------|----------|----------|
 | event   | `event_num`, `trigger_bits` | scalar |
-| cluster | `cl_det`, `cl_plane`, `cl_position`, `cl_peak_charge`, `cl_total_charge`, `cl_max_tb`, `cl_cross_talk`, `cl_nhits`, `cl_first` | `ncl` |
-| hit     | `hit_cl`, `hit_strip`, `hit_position`, `hit_charge`, `hit_max_tb`, `hit_cross_talk`, `hit_ts0`…`hit_ts5` | `nhits` |
+| HyCal   | `hc_x`, `hc_y`, `hc_z`, `hc_energy`, `hc_center`, `hc_nblocks`, `hc_flag`, `hc_sigma` | `ncl` |
+| match   | `m_hc_idx`, `m_det`, `m_gem_x`, `m_gem_y`, `m_gem_z`, `m_gem_x_charge`, `m_gem_y_charge`, `m_gem_x_size`, `m_gem_y_size`, `m_proj_x`, `m_proj_y`, `m_residual`, `m_sigma_total` | `nmatch` |
+| match X cl | `m_xcl_position`, `m_xcl_total`, `m_xcl_peak`, `m_xcl_max_tb`, `m_xcl_first`, `m_xcl_nstrips` | `nmatch` |
+| match Y cl | `m_ycl_position`, `m_ycl_total`, `m_ycl_peak`, `m_ycl_max_tb`, `m_ycl_first`, `m_ycl_nstrips` | `nmatch` |
+| strips  | `s_match_idx`, `s_plane` (0=X, 1=Y), `s_strip`, `s_position`, `s_charge`, `s_max_tb`, `s_cross_talk`, `s_ts0`…`s_ts5` | `nstrips` |
 
-`cl_first` + `cl_nhits` slice the hit arrays per cluster; `hit_cl` is the back-pointer for hit→cluster joins.
+`m_xcl_first` + `m_xcl_nstrips` slice the strip arrays per matched X cluster (and `m_ycl_*` for Y); `s_match_idx` is the back-pointer hit→match.
+
+Pedestals, common-mode files, and HyCal calibration are auto-discovered from `database/config.json` → `runinfo` (the same path `app_state_init.cpp` uses on the live monitor), so the analysis tree's reconstruction matches what the monitor sees. Pass an explicit path to override.
 
 ```bash
-# simplest — pedestal/CM auto-discovered from database/config.json's
-# runinfo (latest entry; same path the live monitor uses):
+# simplest — everything auto-discovered:
 .x ../analysis/scripts/gem_clusters_to_root.C+( \
     "/data/stage6/prad_023867/prad_023867.evio.00000", \
-    "gem_clusters_023867.root")
+    "match_023867.root")
 
-# explicit override (paths relative to PRAD2_DATABASE_DIR or absolute):
+# tighter matching cut (2σ instead of 3σ default):
 .x ../analysis/scripts/gem_clusters_to_root.C+( \
     "/data/.../prad_023867.evio.00000", "out.root", \
-    "gem_peds/peds_23867.txt", "gem_peds/cm_23867.txt")
+    nullptr, nullptr, nullptr, 0, /*run_num=*/-1, /*nsigma=*/2.0f)
+
+# explicit overrides (paths relative to PRAD2_DATABASE_DIR or absolute):
+.x ../analysis/scripts/gem_clusters_to_root.C+( \
+    "/data/.../prad_023867.evio.00000", "out.root", \
+    "gem_peds/peds_23867.txt", "gem_peds/cm_23867.txt", \
+    "calibration/calibration_factor_0.json")
 ```
 
-Full signature: `gem_clusters_to_root(evio_path, out_path, gem_ped_file=nullptr, gem_cm_file=nullptr, max_events=0, run_num=-1, daq_config=nullptr, gem_map_file=nullptr)`. Pass `nullptr` for the ped/cm args to auto-discover via `database/config.json` → `runinfo` → `LoadRunConfig(run_num)`. The script reads the GEM crate-remap from `daq_config.json` so it always matches what the live monitor reconstructs.
+Full signature: `gem_clusters_to_root(evio_path, out_path, gem_ped_file=null, gem_cm_file=null, hc_calib_file=null, max_events=0, run_num=-1, match_nsigma=3.0, daq_config=null, gem_map_file=null, hc_map_file=null)`.
 
 ### tagger_hycal_correlation.C
 
@@ -150,7 +208,13 @@ Create `tools/my_tool.cpp`, then add to `CMakeLists.txt`:
 add_analysis_tool(my_tool tools/my_tool.cpp)
 ```
 
-Shared sources (`Replay.cpp`, `PhysicsTools.cpp`, `MatchingTools.cpp`) and dependencies linked automatically.
+The helper takes care of the rest:
+- compiles your `.cpp` into `prad2ana_my_tool` (binary prefix matches the install convention)
+- links `libprad2ana.a` (transitively pulls in `prad2dec`, `prad2det`, ROOT)
+- defines `DATABASE_DIR=...` so install-relative paths resolve
+- routes the binary to `<build>/bin/`
+
+If you add a *shared* source (something callable from multiple tools and from ACLiC scripts), put the implementation in `src/` and the declaration in `include/`, then list the new `.cpp` inside the `add_library(prad2ana STATIC ...)` call near the top of `CMakeLists.txt`. ACLiC scripts that link `libprad2ana.a` will pick up the new symbols automatically.
 
 ## Contributors
 Yuan Li, Weizhi Xiong — Shandong University
