@@ -241,7 +241,7 @@ int main(int argc, char *argv[])
     //hycal Moller events
     //projectToHyCalSurface(hycal_mollers, hycal_z); //project to HyCal surface
     //move to beam center coordinates
-    TransformDetData(hycal_mollers, hycal_x_, hycal_y_, 0.f);
+    TransformDetData(hycal_mollers, geo.hycal_x, geo.hycal_y, 0.f);
     for (int i = 0; i < hycal_mollers.size(); i++) {
         vertex_hycal->Fill(physics.GetMollerZdistance(hycal_mollers[i], geo.Ebeam));
         if (i >= 1) {
@@ -254,7 +254,7 @@ int main(int argc, char *argv[])
 
     //gem Moller events
     for (int d = 0; d < 4; d++) {
-        TransformDetData(gem_mollers[d], gem_x_[d], gem_y_[d], 0.f);
+        TransformDetData(gem_mollers[d], geo.gem_x[d], geo.gem_y[d], 0.f);
         for (int i = 0; i < gem_mollers[d].size(); i++) {
             vertex_gem[d]->Fill(physics.GetMollerZdistance(gem_mollers[d][i], geo.Ebeam));
             if (i >= 1) {

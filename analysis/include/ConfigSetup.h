@@ -36,19 +36,6 @@ using ::prad2::WriteRunConfig;
 // local RunConfig instead of relying on this global.
 inline RunConfig gRunConfig;
 
-// Backward-compatible aliases pointing into gRunConfig (zero overhead).
-// Existing code that reads/writes Ebeam_, hycal_x_, gem_z_[] etc. continues
-// to work without any modification.
-inline std::string  &energy_calib_file_ = gRunConfig.energy_calib_file;
-inline float        &Ebeam_   = gRunConfig.Ebeam;
-inline float        &hycal_z_ = gRunConfig.hycal_z;
-inline float        &hycal_x_ = gRunConfig.hycal_x;
-inline float        &hycal_y_ = gRunConfig.hycal_y;
-inline float *const  gem_z_   = gRunConfig.gem_z;
-inline float *const  gem_x_   = gRunConfig.gem_x;
-inline float *const  gem_y_   = gRunConfig.gem_y;
-
-
 // Transform detector-frame coordinates to the target/beam-centered frame.
 //
 // Explicit-offset overloads (float beamX, float beamY, float ZfromTarget):
