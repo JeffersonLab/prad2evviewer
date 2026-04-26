@@ -13,8 +13,14 @@ let currentNclustHist=null, currentNblocksHist=null;
 
 // cluster count histograms (configurable via config.json clustering section)
 let nclustBins=null, nblocksBins=null;
-let nclustMin=0, nclustMax=20, nclustStep=1;
+let nclustMin=0.5, nclustMax=10.5, nclustStep=1;
 let nblocksMin=0, nblocksMax=40, nblocksStep=1;
+// Per-Ncl bucket arrays (parallel to nclustBins): when the user clicks
+// a bar in cl-nclust-hist, we redraw cl-energy-hist and cl-nblocks-hist
+// from the corresponding bucket instead of the unfiltered histograms.
+// `selectedNcl` is the bucket index, or -1 for "show unfiltered".
+let clEnergyBinsByNcl=null, nblocksBinsByNcl=null;
+let selectedNcl=-1;
 
 function geoCluster(){
     if(!clusterData){ renderGeo(i=>geoEmptyColor(modules[i].t),null,null); return; }
@@ -187,12 +193,29 @@ function fetchClHist(){
         clHistEvents=data.events||0;
         // nclusters/nblocks from server
         if(data.nclusters&&data.nclusters.bins&&data.nclusters.bins.length){
-            nclustMin=data.nclusters.min||0; nclustMax=data.nclusters.max||20;
-            nclustStep=data.nclusters.step||1; nclustBins=data.nclusters.bins;
+            // Use ?? so legitimate 0 / 0.5 don't get clobbered by ||.
+            nclustMin=data.nclusters.min ?? 0.5;
+            nclustMax=data.nclusters.max ?? 10.5;
+            nclustStep=data.nclusters.step ?? 1;
+            nclustBins=data.nclusters.bins;
         }
         if(data.nblocks&&data.nblocks.bins&&data.nblocks.bins.length){
-            nblocksMin=data.nblocks.min||0; nblocksMax=data.nblocks.max||40;
-            nblocksStep=data.nblocks.step||1; nblocksBins=data.nblocks.bins;
+            nblocksMin=data.nblocks.min ?? 0;
+            nblocksMax=data.nblocks.max ?? 40;
+            nblocksStep=data.nblocks.step ?? 1;
+            nblocksBins=data.nblocks.bins;
+        }
+        // Per-Ncl bucket arrays (added 2026-04 — older servers omit them,
+        // in which case selection just falls back to the unfiltered hist).
+        clEnergyBinsByNcl = Array.isArray(data.bins_by_ncl)
+            ? data.bins_by_ncl : null;
+        nblocksBinsByNcl = (data.nblocks && Array.isArray(data.nblocks.bins_by_ncl))
+            ? data.nblocks.bins_by_ncl : null;
+        // If the selected bucket no longer exists (e.g. server reconfig),
+        // fall back to unfiltered.
+        if (selectedNcl >= 0 && (!clEnergyBinsByNcl
+                || selectedNcl >= clEnergyBinsByNcl.length)) {
+            selectedNcl = -1;
         }
         plotClHist(); plotClStatHists();
     }).catch(()=>{});
@@ -219,25 +242,56 @@ function fillClHist(clusters){
     clHistEvents++;
 }
 
+// Pick the energy hist to display: a per-Ncl bucket if one is selected
+// and available, otherwise the unfiltered one.  Returns {bins, label}
+// where `label` annotates the title (empty for unfiltered).
+function selectedClEnergy(){
+    if (selectedNcl >= 0 && clEnergyBinsByNcl
+        && selectedNcl < clEnergyBinsByNcl.length) {
+        const ncl = nclustValueAt(selectedNcl);
+        return { bins: clEnergyBinsByNcl[selectedNcl],
+                 label: ` · Ncl=${ncl}` };
+    }
+    return { bins: clHistBins, label: '' };
+}
+
+function selectedNblocks(){
+    if (selectedNcl >= 0 && nblocksBinsByNcl
+        && selectedNcl < nblocksBinsByNcl.length) {
+        const ncl = nclustValueAt(selectedNcl);
+        return { bins: nblocksBinsByNcl[selectedNcl],
+                 label: ` · Ncl=${ncl}` };
+    }
+    return { bins: nblocksBins, label: '' };
+}
+
+// Convert a bucket index to its Ncl value (bin center).  Used in titles
+// so the user sees "Ncl=2", not "bucket 1".
+function nclustValueAt(bucketIdx){
+    return Math.round(nclustMin + (bucketIdx + 0.5) * nclustStep);
+}
+
 function plotClHist(){
     const div='cl-energy-hist';
-    if(!clHistBins||!clHistBins.length){
+    const sel=selectedClEnergy();
+    const bins=sel.bins;
+    if(!bins||!bins.length){
         currentClHist=null;
         Plotly.react(div,[],{...PL,title:{text:'Cluster Energy — No data',font:{size:10,color:THEME.textMuted}}},PC2);
         return;
     }
-    const x=clHistBins.map((_,i)=>clHistMin+(i+0.5)*clHistStep);
-    const entries=clHistBins.reduce((a,b)=>a+b,0);
+    const x=bins.map((_,i)=>clHistMin+(i+0.5)*clHistStep);
+    const entries=bins.reduce((a,b)=>a+b,0);
     // store non-zero for copy
     const cx=[],cy=[];
-    for(let i=0;i<clHistBins.length;i++){if(clHistBins[i]>0){cx.push(x[i]);cy.push(clHistBins[i]);}}
+    for(let i=0;i<bins.length;i++){if(bins[i]>0){cx.push(x[i]);cy.push(bins[i]);}}
     currentClHist={x:cx,y:cy};
 
     Plotly.react(div,[{
-        x,y:clHistBins,type:'bar',marker:{color:'#ff922b',line:{width:0}},
+        x,y:bins,type:'bar',marker:{color:'#ff922b',line:{width:0}},
         hovertemplate:'%{x:.0f} MeV: %{y}<extra></extra>',
     }],{...PL,
-        title:{text:`Cluster Energy<br><span style="font-size:9px;color:var(--theme-text-dim)">${clHistEvents} evts | ${entries} clusters</span>`,font:{size:10,color:THEME.textDim}},
+        title:{text:`Cluster Energy${sel.label}<br><span style="font-size:9px;color:var(--theme-text-dim)">${clHistEvents} evts | ${entries} clusters</span>`,font:{size:10,color:THEME.textDim}},
         xaxis:{...PL.xaxis,title:'Energy (MeV)',range:[clHistMin,clHistMax]},
         yaxis:{...PL.yaxis,title:'Counts',
             type:document.getElementById('clhist-logy').checked?'log':'linear'},
@@ -247,28 +301,62 @@ function plotClHist(){
 }
 
 function plotClStatHists(){
-    // number of clusters histogram
-    function plotStat(divId, bins, bmin, bstep, title, xTitle, color, refKey){
-        if(!bins||!bins.length){
-            return null;
-        }
-        const x=bins.map((_,i)=>bmin+i*bstep);  // left edge = actual value for integer bins
+    // Generic bar histogram.  `selectedIdx` (optional) highlights the
+    // chosen bar in HIGHLIGHT colour; titlePrefix/Suffix get prepended /
+    // appended to the title.
+    function plotStat(divId, bins, bmin, bstep, title, xTitle, baseColor,
+                      refKey, opts={}){
+        if(!bins||!bins.length) return null;
+        // Bin centers — works whether the user picked an integer-aligned
+        // range (e.g. 0.5..10.5/1 → 1, 2, …) or a normal one.
+        const x=bins.map((_,i)=>bmin+(i+0.5)*bstep);
         const entries=bins.reduce((a,b)=>a+b,0);
         const cx=[],cy=[];
         for(let i=0;i<bins.length;i++){if(bins[i]>0){cx.push(x[i]);cy.push(bins[i]);}}
+        // Per-bar colour: highlight the selected bin so the user can
+        // see at a glance which slice the dependent hists are showing.
+        const colors = (opts.selectedIdx>=0 && opts.selectedIdx<bins.length)
+            ? bins.map((_,i)=>i===opts.selectedIdx?THEME.highlight:baseColor)
+            : baseColor;
+        const fullTitle = (opts.titleSuffix||'')
+            ? `${title}${opts.titleSuffix}` : title;
         Plotly.react(divId,[{
-            x,y:bins,type:'bar',marker:{color,line:{width:0}},
-            hovertemplate:'%{x}: %{y}<extra></extra>',
+            x,y:bins,type:'bar',marker:{color:colors,line:{width:0}},
+            hovertemplate:(opts.hoverFmt||'%{x}: %{y}<extra></extra>'),
         }],{...PL,
-            title:{text:`${title}<br><span style="font-size:9px;color:var(--theme-text-dim)">${entries} entries</span>`,font:{size:10,color:THEME.textDim}},
-            xaxis:{...PL.xaxis,title:xTitle,range:[bmin-0.5,bmin+bins.length*bstep-0.5]},
+            title:{text:`${fullTitle}<br><span style="font-size:9px;color:var(--theme-text-dim)">${entries} entries${opts.titleHint||''}</span>`,font:{size:10,color:THEME.textDim}},
+            xaxis:{...PL.xaxis,title:xTitle,
+                   range:[bmin, bmin+bins.length*bstep]},
             yaxis:{...PL.yaxis,title:'Counts'},bargap:0.05,
             shapes:refKey?refShapes(refKey):[],
         },PC2);
         return {x:cx,y:cy};
     }
+    const nblocksSel = selectedNblocks();
     currentNclustHist=plotStat('cl-nclust-hist',nclustBins,nclustMin,nclustStep,
-        'Clusters per Event','# Clusters','#00b4d8','cluster_number');
-    currentNblocksHist=plotStat('cl-nblocks-hist',nblocksBins,nblocksMin,nblocksStep,
-        'Blocks per Cluster','# Blocks','#51cf66','cluster_size');
+        'Clusters per Event','# Clusters','#00b4d8','cluster_number',
+        { selectedIdx: selectedNcl,
+          hoverFmt: '%{x:.0f} clusters: %{y}<extra></extra>',
+          titleHint: selectedNcl>=0
+            ? ` · click again or another bar to change` : ` · click a bar to filter` });
+    currentNblocksHist=plotStat('cl-nblocks-hist',nblocksSel.bins,nblocksMin,nblocksStep,
+        'Blocks per Cluster','# Blocks','#51cf66','cluster_size',
+        { titleSuffix: nblocksSel.label });
+
+    // Wire up the click handler on the Ncl histogram once.  Plotly's
+    // graphDiv keeps event subscriptions across Plotly.react calls, so
+    // we only need to bind on the first paint.  Cache the flag on the
+    // div itself so repeat calls don't stack listeners.
+    const nclDiv = document.getElementById('cl-nclust-hist');
+    if (nclDiv && nclDiv.on && !nclDiv._nclickBound) {
+        nclDiv.on('plotly_click', ev => {
+            if (!ev || !ev.points || !ev.points.length) return;
+            const idx = ev.points[0].pointIndex;
+            // Toggle: clicking the already-selected bar deselects.
+            selectedNcl = (selectedNcl === idx) ? -1 : idx;
+            plotClHist();
+            plotClStatHists();
+        });
+        nclDiv._nclickBound = true;
+    }
 }

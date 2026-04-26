@@ -366,9 +366,27 @@ void AppState::processEvent(fdec::EventData &event,
             ci.theta = std::atan2(rv, dz) * (180.f / 3.14159265f);
         }
 
+        // Per-Ncl bucket index (-1 if Ncl falls outside the nclusters_hist
+        // range, in which case the bucketed hists get no fill — same
+        // semantics as Histogram::fill underflow/overflow).
+        int ncl_bucket = -1;
+        {
+            float fb = ((float)reco_hits.size() - nclusters_hist_min) / nclusters_hist_step;
+            if (fb >= 0.f) {
+                int b = (int)fb;
+                if (b < (int)cluster_energy_hist_by_ncl.size())
+                    ncl_bucket = b;
+            }
+        }
         for (size_t i = 0; i < reco_hits.size(); ++i) {
             cluster_energy_hist.fill(reco_hits[i].energy, cl_hist_min, cl_hist_step);
             nblocks_hist.fill(reco_hits[i].nblocks, nblocks_hist_min, nblocks_hist_step);
+            if (ncl_bucket >= 0) {
+                cluster_energy_hist_by_ncl[ncl_bucket].fill(
+                    reco_hits[i].energy, cl_hist_min, cl_hist_step);
+                nblocks_hist_by_ncl[ncl_bucket].fill(
+                    reco_hits[i].nblocks, nblocks_hist_min, nblocks_hist_step);
+            }
         }
         nclusters_hist.fill(reco_hits.size(), nclusters_hist_min, nclusters_hist_step);
         cluster_events_processed++;
@@ -412,9 +430,25 @@ void AppState::processReconEvent(const ReconEventData &recon)
     events_processed++;
 
     if (do_cluster && !recon.clusters.empty()) {
+        int ncl_bucket = -1;
+        {
+            float fb = ((float)recon.clusters.size() - nclusters_hist_min)
+                       / nclusters_hist_step;
+            if (fb >= 0.f) {
+                int b = (int)fb;
+                if (b < (int)cluster_energy_hist_by_ncl.size())
+                    ncl_bucket = b;
+            }
+        }
         for (auto &cl : recon.clusters) {
             cluster_energy_hist.fill(cl.energy, cl_hist_min, cl_hist_step);
             nblocks_hist.fill(cl.nblocks, nblocks_hist_min, nblocks_hist_step);
+            if (ncl_bucket >= 0) {
+                cluster_energy_hist_by_ncl[ncl_bucket].fill(
+                    cl.energy, cl_hist_min, cl_hist_step);
+                nblocks_hist_by_ncl[ncl_bucket].fill(
+                    cl.nblocks, nblocks_hist_min, nblocks_hist_step);
+            }
         }
         nclusters_hist.fill(recon.clusters.size(), nclusters_hist_min, nclusters_hist_step);
         cluster_events_processed++;
@@ -827,6 +861,8 @@ void AppState::clearHistograms()
     cluster_energy_hist.clear();
     nclusters_hist.clear();
     nblocks_hist.clear();
+    for (auto &h : cluster_energy_hist_by_ncl) h.clear();
+    for (auto &h : nblocks_hist_by_ncl)        h.clear();
     energy_angle_hist.clear();
     moller_xy_hist.clear();
     moller_energy_hist.clear();

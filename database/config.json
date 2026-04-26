@@ -46,8 +46,8 @@
             "step": 10
         },
         "nclusters_hist": {
-            "min": 0,
-            "max": 20,
+            "min": 0.5,
+            "max": 10.5,
             "step": 1
         },
         "nblocks_hist": {

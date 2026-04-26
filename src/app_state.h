@@ -193,9 +193,15 @@ struct AppState {
     float    cl_hist_min       = 0.f;
     float    cl_hist_max       = 3000.f;
     float    cl_hist_step      = 10.f;
-    int      nclusters_hist_min  = 0;
-    int      nclusters_hist_max  = 20;
-    int      nclusters_hist_step = 1;
+    // nclusters_hist range is float so the user can shift bin edges by half
+    // a step (default 0.5 .. 10.5 / 1 → bin centers land on 1, 2, …, 10).
+    // The bucket index that a given Ncl event falls in is reused as the
+    // index into cluster_energy_hist_by_ncl / nblocks_hist_by_ncl, so the
+    // dependent histograms can be filtered to "events with this many
+    // clusters" by clicking a bar in the GUI.
+    float    nclusters_hist_min  = 0.5f;
+    float    nclusters_hist_max  = 10.5f;
+    float    nclusters_hist_step = 1.0f;
     int      nblocks_hist_min    = 0;
     int      nblocks_hist_max    = 40;
     int      nblocks_hist_step   = 1;
@@ -231,6 +237,13 @@ struct AppState {
     Histogram cluster_energy_hist;
     Histogram nclusters_hist;
     Histogram nblocks_hist;
+    // Per-Ncl-bucket dependent histograms.  Index = the bucket of the
+    // event's Ncl in nclusters_hist (i.e. floor((Ncl - min) / step)),
+    // so size matches nclusters_hist.bins.size() once init() runs.
+    // Filled alongside the unfiltered hists; the GUI selects which one
+    // to plot when the user clicks an Ncl bar.
+    std::vector<Histogram> cluster_energy_hist_by_ncl;
+    std::vector<Histogram> nblocks_hist_by_ncl;
     Histogram2D energy_angle_hist;
     Histogram2D moller_xy_hist;
     Histogram   moller_energy_hist;

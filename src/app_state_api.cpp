@@ -46,9 +46,19 @@ json AppState::apiClusterHist() const
     json r = histToJson(cluster_energy_hist, cl_hist_min, cl_hist_max, cl_hist_step);
     r["events"] = cluster_events_processed;
     r["nclusters"] = histToJson(nclusters_hist,
-        (float)nclusters_hist_min, (float)nclusters_hist_max, (float)nclusters_hist_step);
+        nclusters_hist_min, nclusters_hist_max, nclusters_hist_step);
     r["nblocks"] = histToJson(nblocks_hist,
         (float)nblocks_hist_min, (float)nblocks_hist_max, (float)nblocks_hist_step);
+    // Per-Ncl bucket dependent histograms — bins_by_ncl[i] is the
+    // bins array of the i-th bucket (same indexing as nclusters_hist).
+    // Frontend uses these to redraw the energy / blocks histos when the
+    // user clicks a particular Ncl bar.
+    json energy_by_ncl = json::array();
+    json blocks_by_ncl = json::array();
+    for (auto &h : cluster_energy_hist_by_ncl) energy_by_ncl.push_back(h.bins);
+    for (auto &h : nblocks_hist_by_ncl)        blocks_by_ncl.push_back(h.bins);
+    r["bins_by_ncl"]            = energy_by_ncl;
+    r["nblocks"]["bins_by_ncl"] = blocks_by_ncl;
     return r;
 }
 

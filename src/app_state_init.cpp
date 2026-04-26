@@ -498,8 +498,17 @@ void AppState::init(const std::string &db_dir,
     // init cluster histograms
     int cl_nbins = std::max(1, (int)std::ceil((cl_hist_max - cl_hist_min) / cl_hist_step));
     cluster_energy_hist.init(cl_nbins);
-    nclusters_hist.init(std::max(1, (nclusters_hist_max - nclusters_hist_min) / nclusters_hist_step));
-    nblocks_hist.init(std::max(1, (nblocks_hist_max - nblocks_hist_min) / nblocks_hist_step));
+    int nb_nclusters = std::max(1, (int)std::ceil(
+        (nclusters_hist_max - nclusters_hist_min) / nclusters_hist_step));
+    nclusters_hist.init(nb_nclusters);
+    int nb_blocks = std::max(1, (nblocks_hist_max - nblocks_hist_min) / nblocks_hist_step);
+    nblocks_hist.init(nb_blocks);
+    // One dependent histogram per Ncl bucket — sized to match the
+    // unfiltered ones so the frontend can swap them in 1:1.
+    cluster_energy_hist_by_ncl.assign(nb_nclusters, Histogram{});
+    nblocks_hist_by_ncl.assign(nb_nclusters, Histogram{});
+    for (auto &h : cluster_energy_hist_by_ncl) h.init(cl_nbins);
+    for (auto &h : nblocks_hist_by_ncl)        h.init(nb_blocks);
     int ea_nx = std::max(1, (int)std::ceil((ea_angle_max - ea_angle_min) / ea_angle_step));
     int ea_ny = std::max(1, (int)std::ceil((ea_energy_max - ea_energy_min) / ea_energy_step));
     energy_angle_hist.init(ea_nx, ea_ny);
