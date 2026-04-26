@@ -31,11 +31,20 @@ Output columns (one row per matched pair):
 
   event_num, trigger_bits,
   hc_idx, hc_x, hc_y, hc_z, hc_energy, hc_center, hc_nblocks, hc_sigma,
-  det_id, gem_x, gem_y, gem_z,
-  gem_x_charge, gem_y_charge, gem_x_size, gem_y_size,
+  det_id,
+  gem_x, gem_y, gem_z,                 # lab/target-centered (mm)
+  gem_x_local, gem_y_local,            # detector-frame (mm)
+  gem_x_charge, gem_y_charge,          # X/Y cluster total ADC
+  gem_x_peak,   gem_y_peak,            # X/Y cluster max-strip ADC
+  gem_x_max_tb, gem_y_max_tb,          # time sample of max-ADC strip (int)
+  gem_x_size,   gem_y_size,            # X/Y cluster strip count
   proj_x, proj_y, residual, sigma_total
 
-Coordinates are lab/target-centered (mm).  hc_z includes shower-depth.
+Coordinates labelled "lab" are target-centered (mm); hc_z includes
+shower-depth.  The "_local" coords are the GEM detector frame (no
+rotation/translation), useful for per-detector hit maps.  Convert
+gem_*_max_tb to ns by multiplying by the cluster config's ts_period
+(default 25 ns).
 
 Usage
 -----
@@ -93,8 +102,13 @@ def main(argv: list[str] | None = None) -> int:
         "event_num", "trigger_bits",
         "hc_idx", "hc_x", "hc_y", "hc_z", "hc_energy",
         "hc_center", "hc_nblocks", "hc_sigma",
-        "det_id", "gem_x", "gem_y", "gem_z",
-        "gem_x_charge", "gem_y_charge", "gem_x_size", "gem_y_size",
+        "det_id",
+        "gem_x", "gem_y", "gem_z",
+        "gem_x_local", "gem_y_local",
+        "gem_x_charge", "gem_y_charge",
+        "gem_x_peak",   "gem_y_peak",
+        "gem_x_max_tb", "gem_y_max_tb",
+        "gem_x_size",   "gem_y_size",
         "proj_x", "proj_y", "residual", "sigma_total",
     ]
     fh, write_row = C.open_table_writer(args.out_path, args.csv)
@@ -167,7 +181,14 @@ def main(argv: list[str] | None = None) -> int:
                     C.reconstruct_gem(p, ssp_evt)
 
                     # Per-detector lab-frame hit lists, plus the raw GEMHit
-                    # for charge / size lookup at write time.
+                    # for charge / size / peak / timing lookup at write time.
+                    # Tuple layout (positional, frozen):
+                    #   0: x_lab     1: y_lab     2: z_lab
+                    #   3: x_local   4: y_local
+                    #   5: x_charge  6: y_charge
+                    #   7: x_peak    8: y_peak
+                    #   9: x_max_tb 10: y_max_tb
+                    #  11: x_size   12: y_size
                     gem_lab: list[list[tuple]] = [[], [], [], []]
                     n_dets = min(p.gem_sys.get_n_detectors(), 4)
                     for d in range(n_dets):
@@ -179,7 +200,10 @@ def main(argv: list[str] | None = None) -> int:
                                 g.x, g.y, 0.0, d, p.geo)
                             gem_lab[d].append((
                                 x, y, z,
+                                float(g.x), float(g.y),
                                 float(g.x_charge), float(g.y_charge),
+                                float(g.x_peak),   float(g.y_peak),
+                                int(g.x_max_timebin), int(g.y_max_timebin),
                                 int(g.x_size),     int(g.y_size),
                             ))
 
@@ -229,7 +253,10 @@ def main(argv: list[str] | None = None) -> int:
                                 d,
                                 f"{g[0]:.4f}", f"{g[1]:.4f}", f"{g[2]:.4f}",
                                 f"{g[3]:.4f}", f"{g[4]:.4f}",
-                                g[5], g[6],
+                                f"{g[5]:.4f}", f"{g[6]:.4f}",
+                                f"{g[7]:.4f}", f"{g[8]:.4f}",
+                                g[9], g[10],
+                                g[11], g[12],
                                 f"{proj_x:.4f}", f"{proj_y:.4f}",
                                 f"{best_dr:.4f}", f"{sig_total:.4f}",
                             ])

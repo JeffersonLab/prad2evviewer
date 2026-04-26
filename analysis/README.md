@@ -286,7 +286,12 @@ Same pipeline as `gem_hycal_matching.C`, same best-match rule (closest GEM hit p
 | `event_num`, `trigger_bits` | event-level |
 | `hc_idx`, `hc_x/y/z`, `hc_energy`, `hc_center`, `hc_nblocks`, `hc_sigma` | HyCal cluster (lab frame, z includes shower depth) |
 | `det_id` (0..3) | which GEM won this row |
-| `gem_x/y/z`, `gem_x_charge`, `gem_y_charge`, `gem_x_size`, `gem_y_size` | best-matched GEM hit |
+| `gem_x/y/z` | best-matched GEM hit, lab/target-centered mm |
+| `gem_x_local`, `gem_y_local` | same hit in the GEM detector frame (no rotation/translation) |
+| `gem_x_charge`, `gem_y_charge` | total ADC of the X / Y constituent cluster |
+| `gem_x_peak`, `gem_y_peak` | max-strip ADC of the X / Y cluster |
+| `gem_x_max_tb`, `gem_y_max_tb` | time sample (int) of the max-ADC strip — multiply by `ts_period` (default 25 ns) for ns |
+| `gem_x_size`, `gem_y_size` | strip count of the X / Y cluster |
 | `proj_x`, `proj_y`, `residual`, `sigma_total` | matching geometry |
 
 ```bash
@@ -324,6 +329,33 @@ for kind, sub in df.groupby("kind"):
 ```
 
 Each script accepts the same path / overrides as its C++ counterpart (`--max-events`, `--run-num`, `--gem-ped-file`, etc.). Run with `--help` for the full list.
+
+### plot_match_summary.py
+
+Reads the per-match TSV/CSV from `gem_hycal_matching.py` (pandas) and emits four PNG plots (matplotlib) — no EVIO replay, just a fast post-processing pass on a table you already have.
+
+| Output | What it shows |
+|--------|---------------|
+| `{prefix}_local_hits.png`  | 2×2 grid of 2D heatmaps — `(gem_x_local, gem_y_local)` per detector. Reveals acceptance / dead regions on each GEM in its own frame. |
+| `{prefix}_lab_scatter.png` | Single scatter — `(gem_x, gem_y)` lab-frame, color-coded by `det_id`. All four GEMs overlaid. |
+| `{prefix}_peak_adc.png`    | 2×2 histograms — `gem_x_peak` and `gem_y_peak` overlaid per detector. |
+| `{prefix}_timing.png`      | 2×2 histograms — timing of the max-ADC strip per X / Y cluster, in ns (`gem_*_max_tb · ts_period`). |
+
+Requires the post-2026-04 `gem_hycal_matching.py` columns (`gem_*_local`, `gem_*_peak`, `gem_*_max_tb`) — re-run the matcher if your TSV is older.
+
+```bash
+# default — saves four PNGs next to the input, then pops a GUI window:
+python analysis/pyscripts/plot_match_summary.py match_023867.tsv
+
+# headless / CI: explicit out-dir, finer binning, no GUI:
+python analysis/pyscripts/plot_match_summary.py match_023867.tsv \
+    --out-dir plots/ --bins 200 --no-show
+
+# CSV input + non-default time-sample period (ns/sample):
+python analysis/pyscripts/plot_match_summary.py match.csv --csv --ts-period 25.0
+```
+
+Flags: `--csv` (force CSV input), `--out-dir`, `--prefix` (default = input stem), `--bins` (default 120), `--ts-period` (default 25.0 ns), `--no-show`.
 
 ## Adding a Tool
 
