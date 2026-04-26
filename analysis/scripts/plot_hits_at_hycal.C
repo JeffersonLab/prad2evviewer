@@ -18,6 +18,10 @@
 // detectors are combined into the left histogram; HyCal cluster centroids
 // (one entry per cluster) populate the right histogram.
 //
+// Trigger filter: only events with `trigger_bits == 0x100` (production
+// physics trigger) contribute.  Everything else (LMS / Alpha / cosmic /
+// etc.) is skipped.
+//
 // Heap-allocate the big POD-ish decoder structs (fdec::EventData,
 // ssp::SspEventData) — see the project's `feedback_heap_allocate_decoder
 // _structs` memory: stack-allocating them SEGVs at function prologue.
@@ -315,7 +319,7 @@ int plot_hits_at_hycal(const char *evio_path,
     fdec::WaveAnalyzer ana;
     fdec::WaveResult   wres;
 
-    long n_read = 0, n_phys = 0;
+    long n_read = 0, n_phys = 0, n_kept = 0;
     long n_hc_clusters = 0, n_gem_hits = 0;
 
     while (ch.Read() == status::success) {
@@ -328,6 +332,15 @@ int plot_hits_at_hycal(const char *evio_path,
             hc_clusterer.Clear();
             if (!ch.DecodeEvent(i, fadc_evt, &ssp_evt)) continue;
             ++n_phys;
+
+            // Trigger filter: keep only events with trigger_bits exactly
+            // == 0x100.  max_events still gates against n_phys (raw
+            // physics count) so file-scan extent stays predictable.
+            if (fadc_evt.info.trigger_bits != 0x100u) {
+                if (max_events > 0 && n_phys >= max_events) goto done;
+                continue;
+            }
+            ++n_kept;
 
             // ---------- HyCal: waveform → energy → clusters ----------
             for (int r = 0; r < fadc_evt.nrocs; ++r) {
@@ -455,12 +468,13 @@ done:
     Printf("--- summary ---");
     Printf("  EVIO records          : %ld", n_read);
     Printf("  physics events        : %ld", n_phys);
-    Printf("  HyCal clusters total  : %ld  (avg %.2f / event)",
+    Printf("  passed trig cut 0x100 : %ld", n_kept);
+    Printf("  HyCal clusters total  : %ld  (avg %.2f / kept event)",
            n_hc_clusters,
-           n_phys ? double(n_hc_clusters) / n_phys : 0.0);
-    Printf("  GEM hits total (4 det): %ld  (avg %.2f / event)",
+           n_kept ? double(n_hc_clusters) / n_kept : 0.0);
+    Printf("  GEM hits total (4 det): %ld  (avg %.2f / kept event)",
            n_gem_hits,
-           n_phys ? double(n_gem_hits) / n_phys : 0.0);
+           n_kept ? double(n_gem_hits) / n_kept : 0.0);
     Printf("  elapsed (s)           : %.2f", secs);
     Printf("  wrote canvas          : %s", out_path);
     return 0;

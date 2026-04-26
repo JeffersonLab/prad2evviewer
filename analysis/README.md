@@ -106,11 +106,13 @@ Smallest GEM example — opens an EVIO file, finds every GEM raw bank (tags from
 # args: evio_path, max_events (0=all), n_words_show
 ```
 
-### gem_clusters_to_root.C
+### gem_hycal_matching.C
 
 Full **HyCal + GEM** reconstruction pipeline with straight-line cluster matching → ROOT tree of matched HC↔GEM pairs and the constituent X/Y GEM strip waveforms.
 
-Per event:
+**Trigger filter**: only events with `trigger_bits == 0x100` (production physics trigger) are reconstructed and written. Everything else (LMS / Alpha / cosmic / etc.) is skipped — the summary reports raw physics count vs. kept count.
+
+Per event (after the trigger cut):
 - `EvChannel.DecodeEvent` → FADC + SSP buffers
 - HyCal: `WaveAnalyzer` → `mod->energize` → `HyCalCluster.FormClusters() / ReconstructHits()`
 - GEM: `GemSystem.ProcessEvent` (pedestal + CM + ZS) → `Reconstruct(GemCluster)` → 2D X×Y matched hits per detector
@@ -145,36 +147,38 @@ Pedestals, common-mode files, and HyCal calibration are auto-discovered from `da
 
 ```bash
 # simplest — everything auto-discovered:
-.x ../analysis/scripts/gem_clusters_to_root.C+( \
+.x ../analysis/scripts/gem_hycal_matching.C+( \
     "/data/stage6/prad_023867/prad_023867.evio.00000", \
     "match_023867.root")
 
 # tighter matching cut (2σ instead of 3σ default) — 5-arg overload:
-.x ../analysis/scripts/gem_clusters_to_root.C+( \
+.x ../analysis/scripts/gem_hycal_matching.C+( \
     "/data/.../prad_023867.evio.00000", "out.root", \
     0L, -1, 2.0f)
 
 # explicit overrides (paths relative to PRAD2_DATABASE_DIR or absolute):
-.x ../analysis/scripts/gem_clusters_to_root.C+( \
+.x ../analysis/scripts/gem_hycal_matching.C+( \
     "/data/.../prad_023867.evio.00000", "out.root", \
     "gem_peds/peds_23867.txt", "gem_peds/cm_23867.txt", \
     "calibration/calibration_factor_0.json")
 ```
 
 Convenience overloads (sidestep a cling default-arg-marshalling SEGV):
-- `gem_clusters_to_root(evio, out)`
-- `gem_clusters_to_root(evio, out, max_events)`
-- `gem_clusters_to_root(evio, out, max_events, run_num)`
-- `gem_clusters_to_root(evio, out, max_events, run_num, match_nsigma)`
+- `gem_hycal_matching(evio, out)`
+- `gem_hycal_matching(evio, out, max_events)`
+- `gem_hycal_matching(evio, out, max_events, run_num)`
+- `gem_hycal_matching(evio, out, max_events, run_num, match_nsigma)`
 
 Full 11-arg version (for explicit overrides — pass `""` to auto-discover any path):
-`gem_clusters_to_root(evio_path, out_path, gem_ped_file, gem_cm_file, hc_calib_file, max_events, run_num, match_nsigma, daq_config, gem_map_file, hc_map_file)`.
+`gem_hycal_matching(evio_path, out_path, gem_ped_file, gem_cm_file, hc_calib_file, max_events, run_num, match_nsigma, daq_config, gem_map_file, hc_map_file)`.
 
 ### plot_hits_at_hycal.C
 
 Side-by-side 2D occupancy maps of **GEM hits projected to the HyCal surface** (left) and **HyCal cluster centroids on the HyCal surface** (right). Both plots share the same lab/target-centered, beam-aligned frame at z = `hycal_z`, so structure overlays directly between the two.
 
-Per event:
+**Trigger filter**: only events with `trigger_bits == 0x100` (production physics trigger) contribute to the histograms.
+
+Per event (after the trigger cut):
 - HyCal: `WaveAnalyzer` → `mod->energize` → `HyCalCluster.FormClusters / ReconstructHits`. HC hits are built with `z = 0` (no shower-depth applied) so the lab transform places them at exactly z = `hycal_z`.
 - GEM: `GemSystem.ProcessEvent` → `Reconstruct(GemCluster)` → per-detector hit list.
 - Both go through the prad2det/prad2ana transforms: `RotateDetData` (per-detector tilt) → `TransformDetData` (per-detector position offset).

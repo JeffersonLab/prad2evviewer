@@ -1,5 +1,5 @@
 //============================================================================
-// gem_clusters_to_root.C — full HyCal+GEM reconstruction with straight-line
+// gem_hycal_matching.C — full HyCal+GEM reconstruction with straight-line
 // matching, dumping per-match cluster + strip-level info into a ROOT tree.
 //
 // Pipeline per physics event:
@@ -26,6 +26,11 @@
 //
 // Defaults: N = 3 (3-sigma).  The actual residual is stored in the tree so
 // downstream cuts can be tightened or loosened without re-running.
+//
+// Trigger filter: only events with `trigger_bits == 0x100` (production
+// physics trigger) are reconstructed and written.  Everything else
+// (LMS / Alpha / cosmic / etc.) is skipped.  The summary lines report
+// raw physics count vs. kept count.
 //
 // Pedestals, common-mode files, and HyCal calibration are auto-discovered
 // from database/config.json -> runinfo (matches the live monitor).  Pass
@@ -66,7 +71,7 @@
 // -----
 //   cd build
 //   root -l ../analysis/scripts/rootlogon.C
-//   .x ../analysis/scripts/gem_clusters_to_root.C+( \
+//   .x ../analysis/scripts/gem_hycal_matching.C+( \
 //       "/data/stage6/prad_023867/prad_023867.evio.00000", \
 //       "match_023867.root")
 //============================================================================
@@ -342,14 +347,14 @@ append_strips(EventVars &ev, int mi, int plane,
 
 //=============================================================================
 // Tiny probe — call this from the ROOT prompt right after `.L file.C+`.
-//   gem_clusters_to_root_probe(7)
+//   gem_hycal_matching_probe(7)
 // If THIS prints `[probe] called with 7` and returns 14, the .so loads
 // cleanly and basic dispatch works.  If even this dies silently, the
 // problem is at .so load time (despite `.L` appearing to succeed); if
 // this works but the real function crashes, the issue is specific to
-// `gem_clusters_to_root`'s body or wrapper.
+// `gem_hycal_matching`'s body or wrapper.
 //=============================================================================
-extern "C" int gem_clusters_to_root_probe(int x)
+extern "C" int gem_hycal_matching_probe(int x)
 {
     std::fprintf(stderr, "[probe] called with %d\n", x);
     std::fflush(stderr);
@@ -360,7 +365,7 @@ extern "C" int gem_clusters_to_root_probe(int x)
 // Forward declaration of the full 11-arg version so the convenience
 // overloads below can delegate to it.
 //=============================================================================
-int gem_clusters_to_root(const char *evio_path,
+int gem_hycal_matching(const char *evio_path,
                          const char *out_path,
                          const char *gem_ped_file,
                          const char *gem_cm_file,
@@ -376,27 +381,27 @@ int gem_clusters_to_root(const char *evio_path,
 // empty-string defaults (auto-discovery via runinfo).  Adding these
 // sidesteps a cling default-arg-marshalling bug that SEGVs at the call
 // site for 2..N arg invocations of the full signature.
-int gem_clusters_to_root(const char *evio_path, const char *out_path)
+int gem_hycal_matching(const char *evio_path, const char *out_path)
 {
-    return gem_clusters_to_root(evio_path, out_path,
+    return gem_hycal_matching(evio_path, out_path,
                                 "", "", "", 0L, -1, 3.0f, "", "", "");
 }
-int gem_clusters_to_root(const char *evio_path, const char *out_path,
+int gem_hycal_matching(const char *evio_path, const char *out_path,
                          long max_events)
 {
-    return gem_clusters_to_root(evio_path, out_path,
+    return gem_hycal_matching(evio_path, out_path,
                                 "", "", "", max_events, -1, 3.0f, "", "", "");
 }
-int gem_clusters_to_root(const char *evio_path, const char *out_path,
+int gem_hycal_matching(const char *evio_path, const char *out_path,
                          long max_events, int run_num)
 {
-    return gem_clusters_to_root(evio_path, out_path,
+    return gem_hycal_matching(evio_path, out_path,
                                 "", "", "", max_events, run_num, 3.0f, "", "", "");
 }
-int gem_clusters_to_root(const char *evio_path, const char *out_path,
+int gem_hycal_matching(const char *evio_path, const char *out_path,
                          long max_events, int run_num, float match_nsigma)
 {
-    return gem_clusters_to_root(evio_path, out_path,
+    return gem_hycal_matching(evio_path, out_path,
                                 "", "", "", max_events, run_num, match_nsigma,
                                 "", "", "");
 }
@@ -409,7 +414,7 @@ int gem_clusters_to_root(const char *evio_path, const char *out_path,
 // The full version takes 11 explicit args (no defaults).  Cling has a
 // long-standing bug marshalling many mixed-type default arguments
 // (`const char*` interleaved with `long`, `int`, `float`) — a 2-arg call
-// like `gem_clusters_to_root(path, out)` would SEGV at the call site
+// like `gem_hycal_matching(path, out)` would SEGV at the call site
 // before the function body even runs, because the default values get
 // synthesized with the wrong calling convention.
 //
@@ -420,7 +425,7 @@ int gem_clusters_to_root(const char *evio_path, const char *out_path,
 //
 // To override paths, use empty strings for the ones you want auto-
 // discovered from runinfo (e.g. ped="" cm="" calib="").
-int gem_clusters_to_root(const char *evio_path,
+int gem_hycal_matching(const char *evio_path,
                          const char *out_path,
                          const char *gem_ped_file,
                          const char *gem_cm_file,
@@ -437,7 +442,7 @@ int gem_clusters_to_root(const char *evio_path,
     // fire, the crash is at the call site itself (the function body is
     // never executing) and we need a gdb backtrace.
     std::fprintf(stderr,
-                 "[gem_clusters_to_root] ENTRY: evio=%s out=%s\n",
+                 "[gem_hycal_matching] ENTRY: evio=%s out=%s\n",
                  evio_path ? evio_path : "(null)",
                  out_path  ? out_path  : "(null)");
     std::fflush(stderr);
@@ -445,7 +450,7 @@ int gem_clusters_to_root(const char *evio_path,
     // Treat null / empty interchangeably so callers who pass nullptr
     // (e.g. through a wrapper) still get the auto-discovery path.
     auto blank = [](const char *s) -> bool { return !s || !*s; };
-    Printf("[gem_clusters_to_root] entered: evio=%s out=%s",
+    Printf("[gem_hycal_matching] entered: evio=%s out=%s",
            evio_path ? evio_path : "(null)",
            out_path  ? out_path  : "(null)");
 
@@ -569,7 +574,7 @@ int gem_clusters_to_root(const char *evio_path,
     fdec::WaveAnalyzer ana;
     fdec::WaveResult   wres;
 
-    long n_read = 0, n_phys = 0, n_filled = 0;
+    long n_read = 0, n_phys = 0, n_kept = 0, n_filled = 0;
     long total_clusters = 0, total_matches = 0, total_strips = 0;
     long total_gem_2d   = 0;
     long gem_2d_per_det[4] = {0, 0, 0, 0};
@@ -584,6 +589,16 @@ int gem_clusters_to_root(const char *evio_path,
             hc_clusterer.Clear();
             if (!ch.DecodeEvent(i, fadc_evt, &ssp_evt)) continue;
             ++n_phys;
+
+            // Trigger filter: keep only events with trigger_bits exactly
+            // == 0x100.  We still gate against max_events / progress on
+            // n_phys (raw physics count) so behavior is consistent
+            // regardless of how many events pass the trigger cut.
+            if (fadc_evt.info.trigger_bits != 0x100u) {
+                if (max_events > 0 && n_phys >= max_events) goto done;
+                continue;
+            }
+            ++n_kept;
 
             ev.clear();
             ev.event_num    = static_cast<int>(fadc_evt.info.event_number);
@@ -798,6 +813,7 @@ done:
     Printf("--- summary ---");
     Printf("  EVIO records          : %ld", n_read);
     Printf("  physics events        : %ld", n_phys);
+    Printf("  passed trig cut 0x100 : %ld", n_kept);
     Printf("  tree entries written  : %ld", n_filled);
     Printf("  total HyCal clusters  : %ld", total_clusters);
     Printf("  total GEM 2D hits     : %ld  (det0=%ld det1=%ld det2=%ld det3=%ld)",
