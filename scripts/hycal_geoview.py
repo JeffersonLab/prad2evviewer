@@ -285,7 +285,22 @@ def load_modules(path: Path) -> List[Module]:
 #  Colour palettes
 # ===========================================================================
 
+# First two palettes (``rainbow`` and ``blue-yellow``) match the
+# corresponding palettes in prad2hvmon's web monitor (resources/
+# monitor_geo_view.js: ``rainbow``, ``darkblue``) so the desktop and web
+# views use the same color language.  Order matters — palette cycle
+# starts at index 0.
 PALETTES: Dict[str, List[Tuple[float, Tuple[int, int, int]]]] = {
+    "rainbow": [
+        (0.00, (30,   58,  95)), (0.25, (59,  130, 246)),
+        (0.50, (45,  212, 160)), (0.75, (234, 179,   8)),
+        (1.00, (245, 101, 101)),
+    ],
+    "blue-yellow": [
+        (0.00, (11,   22,  40)),
+        (0.50, (59,  158, 255)),
+        (1.00, (234, 179,   8)),
+    ],
     "viridis": [
         (0.00, (68,   1,  84)), (0.25, (59,  82, 139)),
         (0.50, (33, 145, 140)), (0.75, (94, 201,  98)),
@@ -304,11 +319,6 @@ PALETTES: Dict[str, List[Tuple[float, Tuple[int, int, int]]]] = {
     "hot": [
         (0.00, (11,   0,   0)), (0.33, (230,   0,   0)),
         (0.66, (255, 210,   0)), (1.00, (255, 255, 255)),
-    ],
-    "rainbow": [
-        (0.00, (30,   58,  95)), (0.25, (59,  130, 246)),
-        (0.50, (45,  212, 160)), (0.75, (234, 179,   8)),
-        (1.00, (245, 101, 101)),
     ],
     "blue-orange": [
         (0.00, (10,   42, 110)), (0.25, (30,   90, 180)),

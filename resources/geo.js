@@ -29,8 +29,26 @@ function geoStrokeColor(){ return THEME.border; }
 
 // =========================================================================
 // Color scale — click the colorbar to cycle palettes
+// First two ("rainbow", "blue-yellow") match prad2hvmon's web monitor
+// palettes (resources/monitor_geo_view.js) so the two viewers share a
+// color language.  Cycling starts from "rainbow".
 // =========================================================================
+function _lerpHex(a,b,t){
+    const ar=parseInt(a.slice(1,3),16),ag=parseInt(a.slice(3,5),16),ab=parseInt(a.slice(5,7),16);
+    const br=parseInt(b.slice(1,3),16),bg=parseInt(b.slice(3,5),16),bb=parseInt(b.slice(5,7),16);
+    return `rgb(${Math.round(ar+(br-ar)*t)},${Math.round(ag+(bg-ag)*t)},${Math.round(ab+(bb-ab)*t)})`;
+}
 const PALETTES={
+    rainbow(t){
+        if(t<0.25) return _lerpHex('#1e3a5f','#3b82f6',t*4);
+        if(t<0.50) return _lerpHex('#3b82f6','#2dd4a0',(t-0.25)*4);
+        if(t<0.75) return _lerpHex('#2dd4a0','#eab308',(t-0.50)*4);
+        return _lerpHex('#eab308','#f56565',(t-0.75)*4);
+    },
+    'blue-yellow'(t){
+        if(t<0.5) return _lerpHex('#0b1628','#3b9eff',t*2);
+        return _lerpHex('#3b9eff','#eab308',(t-0.5)*2);
+    },
     viridis(t){
         return `rgb(${Math.round(255*Math.min(1,Math.max(0,-0.87+4.26*t-4.85*t*t+2.5*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,-0.03+0.77*t+1.32*t*t-1.87*t*t*t)))},${Math.round(255*Math.min(1,Math.max(0,0.33+1.74*t-4.26*t*t+3.17*t*t*t)))})`;
     },
