@@ -234,8 +234,9 @@ void AppState::processEvent(fdec::EventData &event,
     bool do_hist    = waveform_trigger(tb);
     bool do_cluster = cluster_trigger(tb);
     bool do_lms     = lms_trigger.accept != 0 && lms_trigger(tb);
+    bool do_alpha   = alpha_trigger.accept != 0 && alpha_trigger(tb);
 
-    if (!do_hist && !do_cluster && !do_lms) {
+    if (!do_hist && !do_cluster && !do_lms && !do_alpha) {
         std::lock_guard<std::mutex> lk(data_mtx);
         events_processed++;
         return;
@@ -276,9 +277,9 @@ void AppState::processEvent(fdec::EventData &event,
         auto &roc = event.rocs[r];
         if (!roc.present) continue;
 
-        // crate lookup (needed by cluster + LMS consumers)
+        // crate lookup (needed by cluster + LMS + Alpha consumers)
         int crate = -1;
-        if (do_cluster || do_lms) {
+        if (do_cluster || do_lms || do_alpha) {
             auto cit = roc_to_crate.find(roc.tag);
             if (cit != roc_to_crate.end()) crate = cit->second;
         }
@@ -359,7 +360,19 @@ void AppState::processEvent(fdec::EventData &event,
                             auto &hist = lms_history[mod->index];
                             if (static_cast<int>(hist.size()) < lms_max_history)
                                 hist.push_back({lms_time, val});
+                            // Always track the latest reading, even after history saturates,
+                            // so the LMS/Alpha ref correction stays current.
+                            latest_lms_integral[mod->index] = val;
                         }
+                    }
+                }
+
+                // ── Alpha consumer (Am-241 reference) ──
+                if (do_alpha && crate >= 0) {
+                    const auto *mod = hycal.module_by_daq(crate, s, c);
+                    if (mod) {
+                        float val = is_adc1881m ? (float)cd.samples[0] : peak_in_window;
+                        if (val > 0) latest_alpha_integral[mod->index] = val;
                     }
                 }
             }
@@ -981,6 +994,8 @@ void AppState::clearLms()
 {
     std::lock_guard<std::mutex> lk(lms_mtx);
     lms_history.clear();
+    latest_lms_integral.clear();
+    latest_alpha_integral.clear();
     lms_events = 0;
     lms_first_ts = 0;
     sync_unix = 0;

@@ -61,7 +61,10 @@
         "warn_threshold": 0.1,
         "warn_min_mean": 100,
         "max_history": 5000,
-        "reference_channels": ["LMS1", "LMS2", "LMS3"]
+        "reference_channels": ["LMS1", "LMS2", "LMS3"],
+        "alpha": {
+            "accept_trigger_bits": ["Alpha"]
+        }
     },
     "epics": {
         "max_history": 5000,

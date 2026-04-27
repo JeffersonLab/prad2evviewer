@@ -139,49 +139,50 @@ json AppState::apiOccupancy() const
     return {{"occ", jocc}, {"occ_tcut", jtcut}, {"total", events_processed.load()}};
 }
 
-// Reference correction: builds time→value map and computes mean for correction factor.
-// Correction: corrected = signal * (ref_mean / ref_signal_at_time)
-// This removes LMS-own fluctuation while keeping values in original units.
+// Reference correction: scalar factor = Alpha_latest / LMS_latest for the chosen
+// ref channel.  Both readings are the most recent of their respective triggers
+// (Am-241 alpha source vs. LMS pulser).  Applied uniformly to all history
+// entries: corrected = signal * factor.  The Alpha source is stable, so this
+// removes the LMS pulser's own drift while leaving real channel-gain changes.
 struct RefCorrection {
-    std::map<double, float> ref_map;  // time → ref signal
-    float ref_mean = 0.f;             // mean of all ref signals
-    bool active = false;
+    float factor = 1.f;
+    float lms = 0.f;          // latest LMS integral on the ref module (for telemetry)
+    float alpha = 0.f;        // latest Alpha integral on the ref module
+    bool  active = false;
 };
 
 static RefCorrection buildRefCorrection(
-    const std::map<int, std::vector<LmsEntry>> &lms_history,
+    const std::map<int, float> &latest_lms,
+    const std::map<int, float> &latest_alpha,
     const std::vector<AppState::LmsRefChannel> &refs, int ref_index)
 {
     RefCorrection rc;
     if (ref_index < 0 || ref_index >= static_cast<int>(refs.size())) return rc;
     int ri = refs[ref_index].module_index;
     if (ri < 0) return rc;
-    auto it = lms_history.find(ri);
-    if (it == lms_history.end() || it->second.empty()) return rc;
-
-    double sum = 0;
-    for (auto &e : it->second) {
-        rc.ref_map[e.time_sec] = e.integral;
-        sum += e.integral;
-    }
-    rc.ref_mean = static_cast<float>(sum / it->second.size());
-    rc.active = (rc.ref_mean > 0);
+    auto lit = latest_lms.find(ri);
+    auto ait = latest_alpha.find(ri);
+    if (lit == latest_lms.end() || ait == latest_alpha.end()) return rc;
+    if (lit->second <= 0 || ait->second <= 0) return rc;
+    rc.lms    = lit->second;
+    rc.alpha  = ait->second;
+    rc.factor = rc.alpha / rc.lms;
+    rc.active = true;
     return rc;
 }
 
-// Apply correction: returns signal * (ref_mean / ref_at_time), or -1 if ref missing.
-static float applyRefCorrection(float val, double time_sec, const RefCorrection &rc)
+// Apply correction: returns signal * factor (uniform across history).
+static float applyRefCorrection(float val, const RefCorrection &rc)
 {
     if (!rc.active) return val;
-    auto it = rc.ref_map.find(time_sec);
-    if (it == rc.ref_map.end() || it->second <= 0) return -1.f;
-    return val * (rc.ref_mean / it->second);
+    return val * rc.factor;
 }
 
 json AppState::apiLmsSummary(int ref_index) const
 {
     std::lock_guard<std::mutex> lk(lms_mtx);
-    auto rc = buildRefCorrection(lms_history, lms_ref_channels, ref_index);
+    auto rc = buildRefCorrection(latest_lms_integral, latest_alpha_integral,
+                                  lms_ref_channels, ref_index);
 
     json mods = json::object();
     for (auto &[idx, hist] : lms_history) {
@@ -189,8 +190,7 @@ json AppState::apiLmsSummary(int ref_index) const
         double sum = 0, sum2 = 0;
         int count = 0;
         for (auto &e : hist) {
-            float v = applyRefCorrection(e.integral, e.time_sec, rc);
-            if (v < 0) continue;
+            float v = applyRefCorrection(e.integral, rc);
             sum += v; sum2 += v * v;
             count++;
         }
@@ -211,7 +211,9 @@ json AppState::apiLmsSummary(int ref_index) const
     return {{"modules", mods}, {"events", lms_events.load()},
             {"trigger", lms_trigger.toJson()},
             {"ref_index", ref_index},
-            {"ref_mean", rc.ref_mean},
+            {"ref_factor", rc.factor},
+            {"ref_lms", rc.lms},
+            {"ref_alpha", rc.alpha},
             {"sync_unix", sync_unix}, {"sync_rel_sec", sync_rel_sec}};
 }
 
@@ -222,13 +224,13 @@ json AppState::apiLmsModule(int mod_idx, int ref_index) const
     if (it == lms_history.end() || it->second.empty())
         return {{"time", json::array()}, {"integral", json::array()}, {"events", 0}};
 
-    auto rc = buildRefCorrection(lms_history, lms_ref_channels, ref_index);
+    auto rc = buildRefCorrection(latest_lms_integral, latest_alpha_integral,
+                                  lms_ref_channels, ref_index);
 
     auto &hist = it->second;
     json t_arr = json::array(), v_arr = json::array();
     for (auto &e : hist) {
-        float v = applyRefCorrection(e.integral, e.time_sec, rc);
-        if (v < 0) continue;
+        float v = applyRefCorrection(e.integral, rc);
         t_arr.push_back(std::round(e.time_sec * 100) / 100);
         v_arr.push_back(std::round(v * 10) / 10);
     }
@@ -237,6 +239,9 @@ json AppState::apiLmsModule(int mod_idx, int ref_index) const
     return {{"name", name}, {"time", t_arr}, {"integral", v_arr},
             {"events", (int)t_arr.size()},
             {"ref_index", ref_index},
+            {"ref_factor", rc.factor},
+            {"ref_lms", rc.lms},
+            {"ref_alpha", rc.alpha},
             {"sync_unix", sync_unix}, {"sync_rel_sec", sync_rel_sec}};
 }
 

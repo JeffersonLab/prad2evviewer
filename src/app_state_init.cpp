@@ -306,9 +306,14 @@ void AppState::init(const std::string &db_dir,
                     lms_ref_channels.push_back({n, mod ? mod->index : -1});
                 }
             }
+            // Alpha-source trigger lives under lms_monitor.alpha because
+            // Alpha events are always fed to the same LMS ref channels.
+            if (lm.contains("alpha"))
+                alpha_trigger.parse(lm["alpha"], trigger_bits_def);
             std::cerr << "LMS       : " << lms_trigger
                       << " warn=" << lms_warn_thresh
-                      << " refs=" << lms_ref_channels.size() << "\n";
+                      << " refs=" << lms_ref_channels.size()
+                      << " alpha=" << alpha_trigger << "\n";
         }
 
         if (rcfg.contains("color_ranges")) {

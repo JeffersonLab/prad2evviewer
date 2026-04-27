@@ -133,6 +133,7 @@ struct AppState {
 
     // LMS config
     TriggerFilter lms_trigger;
+    TriggerFilter alpha_trigger;          // Am-241 alpha-source trigger (LMS ref channels)
     float    lms_warn_thresh  = 0.1f;
     float    lms_warn_min_mean = 100.f;  // warn if mean below this
     int      lms_max_history  = 5000;
@@ -143,6 +144,13 @@ struct AppState {
         int module_index = -1;
     };
     std::vector<LmsRefChannel> lms_ref_channels;
+
+    // Latest per-channel integrals for ref correction (LMS_signal / Alpha_signal).
+    // Updated unconditionally regardless of lms_max_history saturation, so the
+    // correction factor always reflects the most recent readings.  Only the ref
+    // module entries are read by the correction code; others are bookkeeping.
+    std::map<int, float> latest_lms_integral;     // module_index → latest LMS-trigger integral
+    std::map<int, float> latest_alpha_integral;   // module_index → latest Alpha-trigger integral
 
     // online refresh rates (ms), served to frontend
     int refresh_event_ms = 200;
