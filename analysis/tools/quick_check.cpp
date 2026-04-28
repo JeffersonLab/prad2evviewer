@@ -174,7 +174,7 @@ int main(int argc, char *argv[])
     TH1F *h_tot = new TH1F("total_energy",
         "Total energy per event;E (MeV);Counts", 1000, 0, 4000);
     TH2F *h2_energy_theta_ep_ee = new TH2F("energy_vs_theta",
-        "Energy vs Theta(1 cluster & 2cluster);Theta (deg);Energy (MeV)", 160, 0, 8, 4000, 0, 4000);
+        "Energy vs Theta(1 cluster);Theta (deg);Energy (MeV)", 160, 0, 8, 4000, 0, 4000);
 
     MollerData hycal_mollers;
 
@@ -209,10 +209,10 @@ int main(int argc, char *argv[])
             h_2cl->Fill(ev.cl_energy[0]);
             h_2cl->Fill(ev.cl_energy[1]);
 
-            h2_energy_theta_ep_ee->Fill(std::atan(std::sqrt(ev.cl_x[0]*ev.cl_x[0] + ev.cl_y[0]*ev.cl_y[0]) / ev.cl_z[0]) * 180.f / M_PI,
-                                      ev.cl_energy[0]);
-            h2_energy_theta_ep_ee->Fill(std::atan(std::sqrt(ev.cl_x[1]*ev.cl_x[1] + ev.cl_y[1]*ev.cl_y[1]) / ev.cl_z[1]) * 180.f / M_PI,
-                                      ev.cl_energy[1]);
+            //h2_energy_theta_ep_ee->Fill(std::atan(std::sqrt(ev.cl_x[0]*ev.cl_x[0] + ev.cl_y[0]*ev.cl_y[0]) / ev.cl_z[0]) * 180.f / M_PI,
+             //                         ev.cl_energy[0]);
+            //h2_energy_theta_ep_ee->Fill(std::atan(std::sqrt(ev.cl_x[1]*ev.cl_x[1] + ev.cl_y[1]*ev.cl_y[1]) / ev.cl_z[1]) * 180.f / M_PI,
+              //                        ev.cl_energy[1]);
 
             float Epair = ev.cl_energy[0] + ev.cl_energy[1];
             float sigma = Ebeam * 0.025f / std::sqrt(Ebeam / 1000.f);
