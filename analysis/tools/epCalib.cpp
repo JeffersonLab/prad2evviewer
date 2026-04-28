@@ -335,7 +335,7 @@ int main(int argc, char *argv[])
                     std::vector<fdec::ClusterHit> hits;
                     clusterer.ReconstructHits(hits);
 
-                    if (hits.size() == 1) {
+                    if (hits.size() == 1 && hits[0].nblocks > 5) {
                         int midx = res->hycal.id_to_index(hits[0].center_id);
                         if (midx >= 0 && midx < (int)res->module_hists.size())
                             res->module_hists[midx]->Fill(hits[0].energy);
