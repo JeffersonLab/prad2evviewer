@@ -313,8 +313,8 @@ int main(int argc, char *argv[])
                         for(int p = 0; p < ev.npeaks[j]; ++p){
                             if(ev.peak_time[j][p] > gRunConfig.hc_time_win_lo &&
                                 ev.peak_time[j][p] < gRunConfig.hc_time_win_hi) {
-                                if(ev.peak_height[j][p] > bestHeight) {
-                                    bestHeight = ev.peak_height[j][p];
+                                if(ev.peak_integral[j][p] > bestHeight) {
+                                    bestHeight = ev.peak_integral[j][p];
                                     bestIdx = p;
                                 }
                             }
