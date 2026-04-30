@@ -289,9 +289,12 @@ function renderWaveformDaq(mod, d, samples, x, tMax){
         });
 
         // NSB/NSA brackets (just below the peak, light shaded blocks).
+        // Inputs nsb/nsa are in ns; floor to the 4-ns sample grid.
         const yBracket = Math.max(0.05*p.vp, 5);
-        const tNsbLo = (p.cross - nsb) * NS_PER_SAMPLE;
-        const tNsaHi = (p.cross + nsa) * NS_PER_SAMPLE;
+        const nsbNs = Math.floor(nsb / NS_PER_SAMPLE) * NS_PER_SAMPLE;
+        const nsaNs = Math.floor(nsa / NS_PER_SAMPLE) * NS_PER_SAMPLE;
+        const tNsbLo = tCrossNs - nsbNs;
+        const tNsaHi = tCrossNs + nsaNs;
         // NSB span (orange)
         shapes.push({type:'line', x0:tNsbLo, x1:tCrossNs,
             y0:yBracket, y1:yBracket,
@@ -300,11 +303,6 @@ function renderWaveformDaq(mod, d, samples, x, tMax){
         shapes.push({type:'line', x0:tCrossNs, x1:tNsaHi,
             y0:yBracket, y1:yBracket,
             line:{color:'#22b8cf', width:1.5}});
-        // Labels in ns, floored to the nearest sample (NSB and NSA are
-        // integer-sample firmware register values; one sample = 4 ns at
-        // 250 MHz).
-        const nsbNs = Math.floor(nsb) * NS_PER_SAMPLE;
-        const nsaNs = Math.floor(nsa) * NS_PER_SAMPLE;
         annotations.push({x:(tNsbLo+tCrossNs)/2, y:yBracket,
             yanchor:'bottom', yshift:2,
             text:`NSB=${nsbNs} ns`, font:{color:'#ffa94d', size:9},
