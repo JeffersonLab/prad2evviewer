@@ -23,6 +23,7 @@ struct ReconEventData;
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <map>
 #include <unordered_map>
 #include <unordered_set>
@@ -111,7 +112,7 @@ struct AppState {
     // GEM system
     gem::GemSystem gem_sys;
     gem::GemCluster gem_clusterer;
-    bool gem_enabled = false;       // true if gem_map.json loaded successfully
+    bool gem_enabled = false;       // true if gem_daq_map.json loaded successfully
 
     // GEM per-detector lab-frame transform (same type as HyCal)
     std::vector<DetectorTransform> gem_transforms;  // indexed by detector id
@@ -120,12 +121,6 @@ struct AppState {
     static constexpr int GEM_OCC_NX = 50;
     static constexpr int GEM_OCC_NY = 30;
     std::vector<Histogram2D> gem_occupancy;  // one per detector
-
-    // GEM accumulated histograms
-    int   gem_ncl_min=0, gem_ncl_max=50, gem_ncl_step=1;
-    float gem_theta_min=0.f, gem_theta_max=10.f, gem_theta_step=0.2f;
-    Histogram gem_nclusters_hist;
-    Histogram gem_theta_hist;
 
     std::unordered_map<int, int> roc_to_crate;  // ROC tag → crate index
     nlohmann::json crate_roc_json;              // crate→ROC tag JSON
@@ -204,10 +199,34 @@ struct AppState {
     float hxy_x_min=-600.f, hxy_x_max=600.f, hxy_x_step=5.f;  // mm
     float hxy_y_min=-600.f, hxy_y_max=600.f, hxy_y_step=5.f;  // mm
 
-    // GEM↔HyCal matching: per-detector residuals filled when ep candidate fires
+    // GEM↔HyCal matching: per-detector residuals filled when ep candidate fires.
+    // The cut is parametric: cut = match_nsigma * sqrt(sigma_HC² + sigma_GEM²),
+    // where sigma_HC = hycal.PositionResolution(E) and sigma_GEM = gem_pos_res[d]
+    // (both projected to the residual plane).  See reconstruction_config.json:matching.
     bool  gem_match_require_ep = true;    // gate on hxy_* selection (clean track)
-    float gem_match_window_mm  = 10.f;    // only fill if sqrt(dx²+dy²) < this (mm)
+    float gem_match_nsigma     = 3.f;     // residual cut in σ_total
     float gem_resid_min = -50.f, gem_resid_max = 50.f, gem_resid_step = 0.5f;  // mm
+
+    // Per-detector GEM position resolution (mm), parsed from
+    // reconstruction_config.json:matching:gem_pos_res.  HyCal's energy-
+    // dependent resolution lives on HyCalSystem (PositionResolution(E)).
+    std::vector<float> gem_pos_res;
+
+    // GEM tracking-efficiency monitor (HyCal-anchored straight-line fits).
+    //
+    // A "good track" is one where the fit through HyCal + ≥3 GEM hits (each
+    // within match_nsigma · σ_total of the seed line) passes the χ² gate.  Each
+    // good track increments the shared denominator gem_eff_den.  Per-detector
+    // numerator gem_eff_num[R] increments for every detector R whose hit is
+    // included in that fit (i.e. R was matched within the window).  See
+    // runGemEfficiency().
+    float gem_eff_min_cluster_energy = 100.f;
+    float gem_eff_match_nsigma       = 3.f;
+    float gem_eff_max_chi2           = 10.f;
+    int   gem_eff_max_hits_per_det   = 50;
+    int   gem_eff_min_denom          = 20;
+    float gem_eff_healthy            = 90.f;
+    float gem_eff_warning            = 70.f;
 
     // EPICS config
     int   epics_max_history = 5000;
@@ -296,6 +315,36 @@ struct AppState {
     std::vector<Histogram> gem_dy_hist;
     int                    gem_match_events = 0;
     std::vector<int>       gem_match_hits;  // per-det count of in-window hits
+
+    // GEM efficiency counters: per-detector numerator, single shared
+    // denominator (incremented once per good track).  See class-level comment
+    // above for the definition of a good track.
+    std::vector<int> gem_eff_num;
+    int              gem_eff_den = 0;
+    static constexpr int GEM_EFF_MAX_DETS = 4;
+    // Snapshot of the last good track for the "last good event" panel.
+    // Stores the single fit + per-detector status (used in fit, prediction,
+    // residual) so the frontend can draw the track and per-detector markers.
+    struct GemEffSnapshot {
+        bool  valid    = false;
+        int   event_id = -1;
+        // HyCal cluster lab-frame xyz — anchor of the fit.
+        float hycal_x = 0.f, hycal_y = 0.f, hycal_z = 0.f;
+        // Lab-frame fit line: x(z) = ax + bx·z, y(z) = ay + by·z
+        float chi2_per_dof = -1.f;
+        float ax = 0.f, bx = 0.f, ay = 0.f, by = 0.f;
+        struct Det {
+            bool  used_in_fit = false;       // matched within match_window of seed line
+            bool  hit_present = false;       // hit_lab_* is valid
+            float hit_lab_x = 0.f, hit_lab_y = 0.f, hit_lab_z = 0.f;
+            bool  inside = false;            // predicted point inside active area
+            float predicted_lab_x = 0.f, predicted_lab_y = 0.f, predicted_lab_z = 0.f;
+            float predicted_local_x = 0.f, predicted_local_y = 0.f;
+            float resid_dx = 0.f, resid_dy = 0.f; // hit_local - predicted_local (only if used_in_fit)
+        };
+        Det dets[GEM_EFF_MAX_DETS];
+    };
+    GemEffSnapshot gem_eff_snapshot;
     int         moller_events = 0;
     int       cluster_events_processed = 0;
 
@@ -327,11 +376,14 @@ struct AppState {
 
     // ---- Initialization (call once at startup) -----------------------------
 
-    // Load all configs from db_dir. daq_config_file may be empty (uses daq_config.json from db_dir).
-    // config_file: main config (config.json or -c override). Empty = auto-find.
+    // Load all configs from db_dir.  Empty filename ⇒ auto-find in db_dir:
+    //   daq_config_file   → daq_config.json   (DAQ + raw decoding)
+    //   monitor_config_file → monitor_config.json (GUI / online server)
+    //   recon_config_file → reconstruction_config.json (runinfo + clustering)
     void init(const std::string &db_dir,
               const std::string &daq_config_file,
-              const std::string &config_file = "");
+              const std::string &monitor_config_file = "",
+              const std::string &recon_config_file = "");
 
     // ---- Per-event processing ----------------------------------------------
 
@@ -387,6 +439,19 @@ struct AppState {
     void processEpics(const std::string &text, int32_t event_number, uint64_t timestamp);
     void clearEpics();        // locks epics_mtx
 
+    // ---- GEM tracking efficiency monitor (called per HyCal cluster) --------
+    // Pass A: GEM0 seed → tests {1,2,3}.  Pass B: GEM1 seed → tests {0}.
+    // hits_by_det[d] = lab-frame (x,y,z) of every reconstructed GEM-d hit
+    // available for this event (capped internally to gem_eff_max_hits_per_det).
+    // Updates gem_eff_num/den, residual histograms, and gem_eff_snapshot.
+    using LabHit = std::array<float, 3>;
+    void runGemEfficiency(int event_id,
+                          float hcx, float hcy, float hcz, float hc_energy,
+                          const std::vector<std::vector<LabHit>> &hits_by_det);
+    void clearGemEfficiency();   // counters + snapshot (data_mtx already held)
+    void initGemEfficiency();    // size num/den/residuals (called from init())
+    nlohmann::json gemEffSnapshotJson() const;  // assumes data_mtx held
+
     // ---- DSC2 scaler processing --------------------------------------------
     // Parse a DSC2 bank from sync/physics events and update measured_livetime
     // atomically.  Bank/slot/source/channel come from daq_cfg.dsc_scaler.
@@ -410,6 +475,7 @@ struct AppState {
     nlohmann::json apiMoller() const;
     nlohmann::json apiHycalXY() const;
     nlohmann::json apiGemResiduals() const;
+    nlohmann::json apiGemEfficiency() const;
     nlohmann::json apiEpicsChannels() const;
     nlohmann::json apiEpicsChannel(const std::string &name) const;
     nlohmann::json apiEpicsBatch(const std::vector<std::string> &names) const;
@@ -417,7 +483,6 @@ struct AppState {
     nlohmann::json apiGemHits() const;
     nlohmann::json apiGemConfig() const;
     nlohmann::json apiGemOccupancy() const;
-    nlohmann::json apiGemHist() const;
     // Per-event APV waveform dump (for the GEM APV monitor tab).
     // Caller must have just populated gem_sys with this event (e.g. via
     // processGemEvent or accumulate); this method only reads.  Raw ADC

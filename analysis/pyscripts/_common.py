@@ -71,10 +71,10 @@ def resolve_db_path(p: str) -> str:
 
 
 def discover_runinfo_path() -> Optional[str]:
-    """Read database/config.json (under PRAD2_DATABASE_DIR or ./database) and
-    return the resolved runinfo path; None if missing/malformed."""
+    """Read database/reconstruction_config.json (under PRAD2_DATABASE_DIR or
+    ./database) and return the resolved runinfo path; None if missing/malformed."""
     db = os.environ.get("PRAD2_DATABASE_DIR", "database")
-    cfg_path = Path(db) / "config.json"
+    cfg_path = Path(db) / "reconstruction_config.json"
     try:
         with open(cfg_path, "r", encoding="utf-8") as f:
             j = json.load(f)
@@ -84,6 +84,40 @@ def discover_runinfo_path() -> Optional[str]:
     if not isinstance(ri, str):
         return None
     return resolve_db_path(ri)
+
+
+def load_matching_config() -> tuple[tuple[float, float, float], list[float]]:
+    """Read the 'matching' section from
+    database/reconstruction_config.json and return ((A, B, C), gem_pos_res).
+    Missing keys / file fall back to (2.6, 0, 0) and [0.1]*4 — the legacy
+    inline values, so existing analysis behavior is preserved."""
+    A, B, C = 2.6, 0.0, 0.0
+    gem = [0.1, 0.1, 0.1, 0.1]
+    db = os.environ.get("PRAD2_DATABASE_DIR", "database")
+    try:
+        with open(Path(db) / "reconstruction_config.json", "r", encoding="utf-8") as f:
+            j = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return (A, B, C), gem
+    m = j.get("matching")
+    if not isinstance(m, dict):
+        return (A, B, C), gem
+    h = m.get("hycal_pos_res")
+    if isinstance(h, list) and len(h) >= 3:
+        A, B, C = float(h[0]), float(h[1]), float(h[2])
+    g = m.get("gem_pos_res")
+    if isinstance(g, list) and g:
+        gem = [float(v) for v in g]
+    return (A, B, C), gem
+
+
+def hycal_pos_resolution(A: float, B: float, C: float, energy_mev: float) -> float:
+    """sigma(E) at the HyCal face (mm), mirroring HyCalSystem::PositionResolution."""
+    import math
+    E_GeV = energy_mev / 1000.0 if energy_mev > 0 else 1e-6
+    a = A / math.sqrt(E_GeV)
+    b = B / E_GeV
+    return math.sqrt(a * a + b * b + C * C)
 
 
 def discover_split_files(any_path: str) -> list[str]:
@@ -341,7 +375,7 @@ def setup_pipeline(*,
     # ---- runinfo ---------------------------------------------------------
     ri_path = discover_runinfo_path()
     if not ri_path:
-        raise SystemExit("[ERROR] no runinfo pointer in database/config.json"
+        raise SystemExit("[ERROR] no runinfo pointer in database/reconstruction_config.json"
                          " — cannot resolve calibration / geometry.")
     eff_run = run_num
     if eff_run <= 0:
@@ -357,7 +391,7 @@ def setup_pipeline(*,
 
     # ---- HyCal -----------------------------------------------------------
     hc_map = hc_map_file or resolve_db_path("hycal_modules.json")
-    daq_map = resolve_db_path("daq_map.json")
+    daq_map = resolve_db_path("hycal_daq_map.json")
     p.hycal = det.HyCalSystem()
     p.hycal.init(hc_map, daq_map)
 
@@ -374,7 +408,7 @@ def setup_pipeline(*,
     p.wave_ana = dec.WaveAnalyzer(dec.WaveConfig())
 
     # ---- GEM -------------------------------------------------------------
-    gem_map = gem_map_file or resolve_db_path("gem_map.json")
+    gem_map = gem_map_file or resolve_db_path("gem_daq_map.json")
     p.gem_sys = det.GemSystem()
     p.gem_sys.init(gem_map)
     _print(f"[setup] GEM map    : {gem_map}  "
@@ -483,7 +517,7 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--daq-config",    default="",
                     help='DAQ config (default "" = installed default).')
     ap.add_argument("--gem-map-file",  default="",
-                    help='GEM map (default "" = database/gem_map.json).')
+                    help='GEM map (default "" = database/gem_daq_map.json).')
     ap.add_argument("--hc-map-file",   default="",
                     help='HyCal modules map (default "" = database/hycal_modules.json).')
     ap.add_argument("--csv", action="store_true",

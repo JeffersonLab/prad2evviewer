@@ -38,7 +38,7 @@ prad2ana_replay_rawdata_m <evio_dir> [-f max_files] [-n max_events] [-p] [-j num
 
 **replay_recon** — HyCal reconstruction replay with clustering and per-module energy histograms.
 ```bash
-prad2ana_replay_recon <input.evio> [-o output.root] [-c config.json] [-D daq_config.json] [-n N]
+prad2ana_replay_recon <input.evio> [-o output.root] [-D daq_config.json] [-n N]
 ```
 
 **replay_recon_m** — Multi-file, multi-threaded version of `replay_recon`. Supports GEM pedestal and zero-suppression options.
@@ -130,15 +130,16 @@ Per event (after the trigger cut):
 - **Best-match rule** (HyCal cluster as baseline): per (HC cluster, GEM detector) pair, keep at most ONE row — the GEM hit with the smallest 2D residual that's still inside the window. A given GEM hit can win against multiple HC clusters (no GEM-side exclusivity). The Python counterpart uses the same rule.
 - For each match, look up the X & Y constituent `StripCluster` on the corresponding plane and copy every strip's full 6-sample waveform
 
-Matching geometry:
+Matching geometry (driven by `reconstruction_config.json:matching`):
 ```
-σ_hc(face) = 2.6 / sqrt(E / 1 GeV)     [mm at HyCal face]
+σ_hc(face) = sqrt((A/sqrt(E_GeV))² + (B/E_GeV)² + C²)   [mm at HyCal face]
+             A,B,C = matching.hycal_pos_res
 σ_hc@gem   = σ_hc(face) · (z_gem / z_hc)
-σ_gem      = 0.1 mm
+σ_gem      = matching.gem_pos_res[det_id]               [mm, per detector]
 σ_total    = sqrt(σ_hc@gem² + σ_gem²)
-match if  |residual| < N · σ_total     [N defaults to 3, configurable]
+match if  |residual| < N · σ_total                      [N defaults to 3, configurable]
 ```
-The actual residual + `σ_total` are stored per match so downstream cuts can be tuned without re-running.
+The actual residual + `σ_total` are stored per match so downstream cuts can be tuned without re-running. The C++ formula lives on `HyCalSystem::PositionResolution(E)` (set via `SetPositionResolutionParams(A, B, C)`); the loader helper is `script_helpers.h::load_matching_config(...)`. Python counterpart: `_common.load_matching_config()` + `_common.hycal_pos_resolution(...)`.
 
 Tree layout (`match`, one entry per physics event):
 
@@ -153,7 +154,7 @@ Tree layout (`match`, one entry per physics event):
 
 `m_xcl_first` + `m_xcl_nstrips` slice the strip arrays per matched X cluster (and `m_ycl_*` for Y); `s_match_idx` is the back-pointer hit→match.
 
-Pedestals, common-mode files, and HyCal calibration are auto-discovered from `database/config.json` → `runinfo` (the same path `app_state_init.cpp` uses on the live monitor), so the analysis tree's reconstruction matches what the monitor sees. Pass an explicit path to override.
+Pedestals, common-mode files, and HyCal calibration are auto-discovered from `database/reconstruction_config.json` → `runinfo` (the same path `app_state_init.cpp` uses on the live monitor), so the analysis tree's reconstruction matches what the monitor sees. Pass an explicit path to override.
 
 ```bash
 # full-run replay — glob discovers every split, warns on gaps:
@@ -248,7 +249,7 @@ Two-phase study of T10R↔E49…E58 tagger pairs vs HyCal PbWO4 sums. Phase 1 ca
 
 Scans a run's EVIO files (`prad_{run}.evio.00000`–`99999`), selects only **LMS** (bit 24) and **Alpha** (bit 25) trigger events via `trigger_bits`, and normalizes HyCal LMS signals using the Alpha source as a gain reference.
 
-Uses the project's decoder (`EvChannel`, `WaveAnalyzer`, `DaqConfig`) — no manual FADC parsing needed. Channel identity (HyCal module vs LMS ref) is read from `daq_map.json`.
+Uses the project's decoder (`EvChannel`, `WaveAnalyzer`, `DaqConfig`) — no manual FADC parsing needed. Channel identity (HyCal module vs LMS ref) is read from `hycal_daq_map.json`.
 
 | Trigger | What fires | Purpose |
 |---------|-----------|---------|
@@ -266,7 +267,7 @@ LMS events before the first Alpha event in the run are skipped. Each LMS event u
 root -l rootlogon.C 'lms_alpha_normalize.C+("/path/to/data", 1234)'
 
 # with explicit config overrides:
-root -l rootlogon.C 'lms_alpha_normalize.C+("/path/to/data", 1234, "daq_config.json", "daq_map.json")'
+root -l rootlogon.C 'lms_alpha_normalize.C+("/path/to/data", 1234, "daq_config.json", "hycal_daq_map.json")'
 ```
 
 **Output:** `lms_alpha_run{N}.root` (per-module normalized LMS, reference time-series TGraphs) and a 6-panel summary PNG.

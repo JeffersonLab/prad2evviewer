@@ -1,5 +1,8 @@
 {
-    "runinfo": "runinfo/2p1_general.json",
+    "// Monitor / GUI config — online server, display histograms, diagnostics.": "",
+    "// Sister files: daq_config.json (DAQ + raw decoding), reconstruction_config.json": "",
+    "// (cluster/hit reconstruction + runinfo).  Loaded by prad2_server -c.": "",
+
     "online": {
         "et_host": "clondaq2",
         "et_port": 11111,
@@ -13,10 +16,6 @@
             "lms": 2000
         }
     },
-    "gem_histograms": {
-        "nclusters": {"min": 0, "max": 50, "step": 1},
-        "theta": {"min": 0.0, "max": 10.0, "step": 0.2}
-    },
     "waveform": {
         "accept_trigger_bits": [],
         "reject_trigger_bits": ["Pulser"],
@@ -29,17 +28,12 @@
             "min_secondary_peak_ratio": 0.3
         }
     },
-    "clustering": {
-        "accept_trigger_bits": ["SSP0", "SSP1", "SSP2", "SSP3", "MasterOR"],
+    "hycal_hist": {
+        "// Trigger filter + histogram binning for the HyCal cluster monitor.": "",
+        "// Reconstruction knobs (min_*_energy, split_iter, ...) live in": "",
+        "// reconstruction_config.json under 'hycal'.": "",
+        "accept_trigger_bits": ["SSP0", "SSP1", "SSP2", "SSP3"],
         "reject_trigger_bits": [],
-        "min_module_energy": 1.0,
-        "min_center_energy": 10.0,
-        "min_cluster_energy": 50.0,
-        "min_cluster_size": 1,
-        "corner_conn": false,
-        "split_iter": 6,
-        "least_split": 0.01,
-        "log_weight_thres": 3.6,
         "energy_hist": {
             "min": 0,
             "max": 3000,
@@ -119,11 +113,25 @@
                 "x_min": -600.0, "x_max": 600.0, "x_step": 5.0,
                 "y_min": -600.0, "y_max": 600.0, "y_step": 5.0
             }
-        },
-        "gem_hycal_match": {
+        }
+    },
+    "gem": {
+        "// Both gates use the parametric sigma from reconstruction_config.json:matching": "",
+        "// (HyCal: PositionResolution(E); GEM: gem_pos_res[d]).  match_nsigma is": "",
+        "// the multiplier on sqrt(sigma_HC^2 + sigma_GEM^2) at the residual plane.": "",
+        "hycal_match": {
             "require_ep_candidate": true,
-            "window_mm": 10.0,
+            "match_nsigma": 3.0,
             "residual_hist": {"min": -50.0, "max": 50.0, "step": 0.5}
+        },
+        "efficiency": {
+            "min_cluster_energy":     100.0,
+            "match_nsigma":           3.0,
+            "max_chi2_per_dof":       10.0,
+            "max_hits_per_detector":  50,
+            "min_denom_for_eff":      20,
+            "healthy":                90,
+            "warning":                70
         }
     },
     "elog": {

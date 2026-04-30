@@ -2,8 +2,10 @@
 #include "data_source.h"
 #include "load_daq_config.h"
 
+#include <array>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <cmath>
 #include <cstdlib>
 
@@ -17,6 +19,88 @@ static json histToJson(const Histogram &h, float mn, float mx, float st)
     return {{"bins", h.bins}, {"underflow", h.underflow}, {"overflow", h.overflow},
             {"min", mn}, {"max", mx}, {"step", st}};
 }
+
+//=============================================================================
+// GEM efficiency monitor — internal helpers
+//=============================================================================
+namespace {
+
+struct Line3D {
+    float ax = 0.f, bx = 0.f;        // x(z) = ax + bx·z
+    float ay = 0.f, by = 0.f;        // y(z) = ay + by·z
+    float chi2_per_dof = 0.f;
+};
+
+// Two-point seed line in lab frame.  Caller guarantees z1 != z2 (HyCal vs GEM).
+Line3D seedLine(float x1, float y1, float z1, float x2, float y2, float z2)
+{
+    Line3D L{};
+    float dz = z2 - z1;
+    if (std::abs(dz) < 1e-6f) { L.ax = x1; L.ay = y1; return L; }
+    L.bx = (x2 - x1) / dz;  L.ax = x1 - L.bx * z1;
+    L.by = (y2 - y1) / dz;  L.ay = y1 - L.by * z1;
+    return L;
+}
+
+// Independent weighted LSQ fits in (z, x) and (z, y) — 4-parameter line.
+// chi2/dof reflects both axes: dof = 2N - 4 (N points × 2 measurements).
+bool fitWeightedLine(int N,
+                     const float *z, const float *x, const float *y, const float *w,
+                     Line3D &out)
+{
+    if (N < 2) return false;
+    double Sw=0, Sz=0, Szz=0, Sx=0, Sxz=0, Sy=0, Syz=0;
+    for (int i = 0; i < N; ++i) {
+        double wi = w[i];
+        Sw  += wi;
+        Sz  += wi * z[i];
+        Szz += wi * z[i] * z[i];
+        Sx  += wi * x[i];
+        Sxz += wi * x[i] * z[i];
+        Sy  += wi * y[i];
+        Syz += wi * y[i] * z[i];
+    }
+    double Delta = Sw * Szz - Sz * Sz;
+    if (std::abs(Delta) < 1e-9) return false;
+    double bx = (Sw * Sxz - Sz * Sx) / Delta;
+    double ax = (Sx - bx * Sz) / Sw;
+    double by = (Sw * Syz - Sz * Sy) / Delta;
+    double ay = (Sy - by * Sz) / Sw;
+    out.ax = (float)ax; out.bx = (float)bx;
+    out.ay = (float)ay; out.by = (float)by;
+    int dof = 2 * N - 4;
+    if (dof > 0) {
+        double chi2 = 0;
+        for (int i = 0; i < N; ++i) {
+            double dxp = (ax + bx * z[i]) - x[i];
+            double dyp = (ay + by * z[i]) - y[i];
+            chi2 += w[i] * (dxp*dxp + dyp*dyp);
+        }
+        out.chi2_per_dof = (float)(chi2 / dof);
+    } else {
+        out.chi2_per_dof = 0.f;
+    }
+    return true;
+}
+
+// Project a lab-frame line onto a detector's local plane (z_local = 0) using
+// the labToLocal-then-1D-interpolate trick.
+void projectLineToLocal(const DetectorTransform &xform, const Line3D &L,
+                        float &px, float &py)
+{
+    float ax1 = L.ax,                 ay1 = L.ay,                 z1 = 0.f;
+    float ax2 = L.ax + L.bx * 1000.f, ay2 = L.ay + L.by * 1000.f, z2 = 1000.f;
+    float l1x, l1y, l1z, l2x, l2y, l2z;
+    xform.labToLocal(ax1, ay1, z1, l1x, l1y, l1z);
+    xform.labToLocal(ax2, ay2, z2, l2x, l2y, l2z);
+    float dz = l2z - l1z;
+    if (std::abs(dz) < 1e-6f) { px = l1x; py = l1y; return; }
+    float s = -l1z / dz;
+    px = l1x + s * (l2x - l1x);
+    py = l1y + s * (l2y - l1y);
+}
+
+}  // anonymous namespace
 
 //=============================================================================
 // Per-event processing
@@ -459,20 +543,31 @@ void AppState::processEvent(fdec::EventData &event,
             }
             // GEM↔HyCal matching residuals.  Reference is the FIRST cluster's
             // HyCal-local xy — for ep candidates that's the only cluster, for
-            // multi-cluster events it's the leading reconstructed hit.
+            // multi-cluster events it's the leading reconstructed hit.  The
+            // residual lives at the HyCal plane, so σ_GEM is projected through
+            // the target onto that plane: σ_total² = σ_HC(E)² + (σ_GEM·z_hc/z_gem)².
             if (gem_enabled && (ep_cand || !gem_match_require_ep) && !reco_hits.empty()) {
                 const float ref_x = reco_hits[0].x, ref_y = reco_hits[0].y;
+                const float sigma_hc = hycal.PositionResolution(reco_hits[0].energy);
+                const float z_hc = cinfo[0].lz;
                 const int n_dets = std::min<int>(gem_sys.GetNDetectors(),
                                                  (int)gem_dx_hist.size());
                 for (int d = 0; d < n_dets; ++d) {
                     auto &xform = gem_transforms[d];
+                    const float z_gem  = (xform.z != 0.f) ? xform.z : 1.f;
+                    const float s_gem  = (d < (int)gem_pos_res.size())
+                                            ? gem_pos_res[d] : 0.1f;
+                    const float s_gem_at_hc = s_gem * std::abs(z_hc / z_gem);
+                    const float s_total = std::sqrt(sigma_hc*sigma_hc
+                                                  + s_gem_at_hc*s_gem_at_hc);
+                    const float cut = gem_match_nsigma * s_total;
                     for (auto &h : gem_sys.GetHits(d)) {
                         float lx, ly, lz;
                         xform.toLab(h.x, h.y, lx, ly, lz);
                         float px, py;
                         projectToHyCalLocal(lx, ly, lz, px, py);
                         float dxr = px - ref_x, dyr = py - ref_y;
-                        if (std::sqrt(dxr*dxr + dyr*dyr) < gem_match_window_mm) {
+                        if (std::sqrt(dxr*dxr + dyr*dyr) < cut) {
                             gem_dx_hist[d].fill(dxr, gem_resid_min, gem_resid_step);
                             gem_dy_hist[d].fill(dyr, gem_resid_min, gem_resid_step);
                             gem_match_hits[d]++;
@@ -480,6 +575,29 @@ void AppState::processEvent(fdec::EventData &event,
                     }
                 }
                 gem_match_events++;
+            }
+            // GEM tracking efficiency — per HyCal cluster, no target assumption.
+            // Builds per-detector lab-frame hit lists once and runs Pass A / B
+            // for each cluster passing min_cluster_energy.
+            if (gem_enabled && !reco_hits.empty()) {
+                const int n_gem = std::min<int>(gem_sys.GetNDetectors(),
+                                                (int)gem_transforms.size());
+                std::vector<std::vector<LabHit>> hits_by_det(n_gem);
+                for (int d = 0; d < n_gem; ++d) {
+                    auto &xform = gem_transforms[d];
+                    for (auto &h : gem_sys.GetHits(d)) {
+                        float lx, ly, lz;
+                        xform.toLab(h.x, h.y, lx, ly, lz);
+                        hits_by_det[d].push_back({lx, ly, lz});
+                    }
+                }
+                for (size_t i = 0; i < reco_hits.size(); ++i) {
+                    if (reco_hits[i].energy < gem_eff_min_cluster_energy) continue;
+                    runGemEfficiency((int)event.info.event_number,
+                                     cinfo[i].lx, cinfo[i].ly, cinfo[i].lz,
+                                     reco_hits[i].energy,
+                                     hits_by_det);
+                }
             }
         }
     }
@@ -568,8 +686,12 @@ void AppState::processReconEvent(const ReconEventData &recon)
         }
         // GEM↔HyCal matching residuals (ROOT recon path uses recon.gem_hits,
         // which carry detector-local x,y just like the live gem_sys hits).
+        // Same parametric cut as the live path:
+        //   σ_total² = σ_HC(E)² + (σ_GEM·z_hc/z_gem)²,  cut = nsigma · σ_total.
         if (gem_enabled && (ep_cand || !gem_match_require_ep) && !recon.clusters.empty()) {
             const float ref_x = recon.clusters[0].x, ref_y = recon.clusters[0].y;
+            const float sigma_hc = hycal.PositionResolution(recon.clusters[0].energy);
+            const float z_hc = cinfo[0].lz;
             const int n_dets = (int)gem_dx_hist.size();
             for (auto &gh : recon.gem_hits) {
                 if (gh.det_id < 0 || gh.det_id >= n_dets) continue;
@@ -580,13 +702,40 @@ void AppState::processReconEvent(const ReconEventData &recon)
                 float px, py;
                 projectToHyCalLocal(lx, ly, lz, px, py);
                 float dxr = px - ref_x, dyr = py - ref_y;
-                if (std::sqrt(dxr*dxr + dyr*dyr) < gem_match_window_mm) {
+                const float z_gem = (xform.z != 0.f) ? xform.z : 1.f;
+                const float s_gem = (gh.det_id < (int)gem_pos_res.size())
+                                        ? gem_pos_res[gh.det_id] : 0.1f;
+                const float s_gem_at_hc = s_gem * std::abs(z_hc / z_gem);
+                const float s_total = std::sqrt(sigma_hc*sigma_hc
+                                              + s_gem_at_hc*s_gem_at_hc);
+                const float cut = gem_match_nsigma * s_total;
+                if (std::sqrt(dxr*dxr + dyr*dyr) < cut) {
                     gem_dx_hist[gh.det_id].fill(dxr, gem_resid_min, gem_resid_step);
                     gem_dy_hist[gh.det_id].fill(dyr, gem_resid_min, gem_resid_step);
                     gem_match_hits[gh.det_id]++;
                 }
             }
             gem_match_events++;
+        }
+        // GEM tracking efficiency (recon path mirrors the live-data path).
+        if (gem_enabled && !recon.clusters.empty()) {
+            const int n_gem = std::min<int>(gem_sys.GetNDetectors(),
+                                            (int)gem_transforms.size());
+            std::vector<std::vector<LabHit>> hits_by_det(n_gem);
+            for (auto &gh : recon.gem_hits) {
+                if (gh.det_id < 0 || gh.det_id >= n_gem) continue;
+                auto &xform = gem_transforms[gh.det_id];
+                float lx, ly, lz;
+                xform.toLab(gh.x, gh.y, lx, ly, lz);
+                hits_by_det[gh.det_id].push_back({lx, ly, lz});
+            }
+            for (size_t i = 0; i < recon.clusters.size(); ++i) {
+                if (recon.clusters[i].energy < gem_eff_min_cluster_energy) continue;
+                runGemEfficiency(recon.event_num,
+                                 cinfo[i].lx, cinfo[i].ly, cinfo[i].lz,
+                                 recon.clusters[i].energy,
+                                 hits_by_det);
+            }
         }
     }
 }
@@ -629,9 +778,10 @@ void AppState::processGemEvent(const ssp::SspEventData &ssp_evt)
     if (!gem_enabled || ssp_evt.nmpds == 0) return;
     prepareGemForView(ssp_evt);
 
-    // accumulate occupancy + histograms in a single pass
+    // Strip-level diagnostic: fill per-detector occupancy in raw local coords
+    // so bin edges line up with the readout grid.  No target assumption is
+    // made here — lab-frame plots live in the matching/efficiency views.
     std::lock_guard<std::mutex> lk(data_mtx);
-    int total_clusters = 0;
     const int n_dets = std::min<int>(gem_sys.GetNDetectors(),
                                      (int)gem_transforms.size());
     for (int d = 0; d < n_dets; ++d) {
@@ -640,31 +790,9 @@ void AppState::processGemEvent(const ssp::SspEventData &ssp_evt)
         float ySize = det.planes[1].size;
         float xStep = xSize / GEM_OCC_NX;
         float yStep = ySize / GEM_OCC_NY;
-        auto &xform = gem_transforms[d];
-        auto &hits = gem_sys.GetHits(d);
-        total_clusters += static_cast<int>(hits.size());
-        for (auto &h : hits) {
-            // Occupancy is a strip-level diagnostic — fill with raw local
-            // detector coords so bin edges line up with the readout grid.
-            // Lab-frame orientation lives in the matching plot, not here.
+        for (auto &h : gem_sys.GetHits(d))
             gem_occupancy[d].fill(h.x, h.y, -xSize/2, xStep, -ySize/2, yStep);
-            // theta from the target vertex — same convention as the HyCal
-            // cluster theta a few hundred lines up (subtract target_*).
-            float lx, ly, lz;
-            xform.toLab(h.x, h.y, lx, ly, lz);
-            float dx = lx - target_x, dy = ly - target_y, dz = lz - target_z;
-            float r = std::sqrt(dx*dx + dy*dy);
-            // dz must be > 0 for a forward-going particle; clamp to avoid
-            // atan2(r, ≤0) pushing every fill into overflow when the GEM
-            // z is mis-configured.
-            if (dz <= 0.f) continue;
-            float theta = std::atan2(r, dz) * (180.f / 3.14159265f);
-            gem_theta_hist.fill(theta, gem_theta_min, gem_theta_step);
-        }
     }
-    gem_nclusters_hist.fill(static_cast<float>(total_clusters),
-                            static_cast<float>(gem_ncl_min),
-                            static_cast<float>(gem_ncl_step));
 }
 
 //=============================================================================
@@ -754,8 +882,8 @@ nlohmann::json AppState::apiGemConfig() const
             {"y_size", det.planes[1].size}
         };
         auto &t = gem_transforms[d];
-        lj["position"] = {t.x, t.y, t.z};
-        lj["tilting"]  = {t.rx, t.ry, t.rz};
+        lj["position"] = json::array({t.x, t.y, t.z});
+        lj["tilting"]  = json::array({t.rx, t.ry, t.rz});
         layers.push_back(lj);
     }
     result["layers"] = layers;
@@ -787,15 +915,6 @@ nlohmann::json AppState::apiGemOccupancy() const
     result["detectors"] = dets;
     result["total"] = events_processed.load();
     return result;
-}
-
-nlohmann::json AppState::apiGemHist() const
-{
-    std::lock_guard<std::mutex> lk(data_mtx);
-    return {
-        {"nclusters", histToJson(gem_nclusters_hist, (float)gem_ncl_min, (float)gem_ncl_max, (float)gem_ncl_step)},
-        {"theta",     histToJson(gem_theta_hist, gem_theta_min, gem_theta_max, gem_theta_step)}
-    };
 }
 
 nlohmann::json AppState::apiGemApv(const ssp::SspEventData &ssp_evt, int evnum) const
@@ -955,6 +1074,255 @@ void AppState::setGemZsSigma(float v)
 }
 
 //=============================================================================
+// GEM efficiency monitor — main entry, init, clear, snapshot serialization
+//=============================================================================
+
+void AppState::initGemEfficiency()
+{
+    int n_gem = gem_enabled ? (int)gem_transforms.size() : 0;
+    gem_eff_num.assign(n_gem, 0);
+    gem_eff_den = 0;
+    gem_eff_snapshot = GemEffSnapshot{};
+}
+
+void AppState::clearGemEfficiency()
+{
+    for (auto &n : gem_eff_num) n = 0;
+    gem_eff_den = 0;
+    gem_eff_snapshot = GemEffSnapshot{};
+}
+
+void AppState::runGemEfficiency(int event_id,
+                                float hcx, float hcy, float hcz, float hc_energy,
+                                const std::vector<std::vector<LabHit>> &hits_by_det)
+{
+    if (!gem_enabled) return;
+    int n_dets = std::min((int)hits_by_det.size(),
+                  std::min((int)gem_transforms.size(), gem_sys.GetNDetectors()));
+    n_dets = std::min(n_dets, GEM_EFF_MAX_DETS);
+    if (n_dets < 3) return;
+
+    // Detector resolutions (mm) — σ_HC(E) at HyCal face, σ_GEM[d] at GEM plane.
+    // The fit is in lab frame so weights are 1/σ² in mm⁻².  findClosest below
+    // gates each detector at match_nsigma · σ_total at the GEM plane:
+    //   σ_HC@gem = σ_HC · |z_gem / z_hc|,  σ_total = sqrt(σ_HC@gem² + σ_GEM²).
+    const float sigma_hc = hycal.PositionResolution(hc_energy);
+    const float w_h      = 1.f / (sigma_hc * sigma_hc);
+    auto sigmaGem = [&](int d) -> float {
+        return (d >= 0 && d < (int)gem_pos_res.size()) ? gem_pos_res[d] : 0.1f;
+    };
+
+    // Find closest GEM-d hit (in detector-local coords) within
+    // match_nsigma · σ_total of a predicted local point.  -1 if none in window.
+    auto findClosest = [&](int d, float pred_lx, float pred_ly,
+                           int &out_idx,
+                           float &out_lab_x, float &out_lab_y, float &out_lab_z) {
+        out_idx = -1;
+        if (d < 0 || d >= n_dets) return;
+        const auto &hits = hits_by_det[d];
+        int max_n = std::min((int)hits.size(), gem_eff_max_hits_per_det);
+        if (max_n == 0) return;
+        const auto &xform = gem_transforms[d];
+        const float z_gem        = (xform.z != 0.f) ? xform.z : 1.f;
+        const float z_hc_safe    = (hcz != 0.f) ? hcz : 1.f;
+        const float s_hc_at_gem  = sigma_hc * std::abs(z_gem / z_hc_safe);
+        const float s_gem        = sigmaGem(d);
+        const float s_total      = std::sqrt(s_hc_at_gem*s_hc_at_gem
+                                            + s_gem*s_gem);
+        const float cut          = gem_eff_match_nsigma * s_total;
+        float best_d2 = cut * cut;
+        for (int i = 0; i < max_n; ++i) {
+            const auto &h = hits[i];
+            float lx, ly, lz;
+            xform.labToLocal(h[0], h[1], h[2], lx, ly, lz);
+            float dx = lx - pred_lx, dy = ly - pred_ly;
+            float d2 = dx*dx + dy*dy;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                out_idx = i;
+                out_lab_x = h[0]; out_lab_y = h[1]; out_lab_z = h[2];
+            }
+        }
+    };
+
+    auto inside = [&](int d, float lx, float ly) -> bool {
+        if (d < 0 || d >= gem_sys.GetNDetectors()) return false;
+        const auto &det = gem_sys.GetDetectors()[d];
+        float xmax = det.planes[0].size * 0.5f;
+        float ymax = det.planes[1].size * 0.5f;
+        return std::abs(lx) <= xmax && std::abs(ly) <= ymax;
+    };
+
+    // One try: seed line through (HyCal, GEM-S hit_idx).  Gathers all GEMs
+    // with a hit within match_window of the seed line, then fits the line
+    // through HyCal + matched GEMs.  Requires ≥3 matched GEMs (good track).
+    // Updates `best` if this fit has the lowest χ²/dof so far.
+    struct Best {
+        bool   valid = false;
+        float  chi2_per_dof = std::numeric_limits<float>::infinity();
+        Line3D fit;
+        bool   used[GEM_EFF_MAX_DETS]    = {false,false,false,false};
+        float  used_lx[GEM_EFF_MAX_DETS] = {0,0,0,0};
+        float  used_ly[GEM_EFF_MAX_DETS] = {0,0,0,0};
+        float  used_lz[GEM_EFF_MAX_DETS] = {0,0,0,0};
+    };
+    Best best;
+
+    auto trySeed = [&](int S, int seed_idx) {
+        if (S < 0 || S >= n_dets) return;
+        const auto &hits_s = hits_by_det[S];
+        if (seed_idx < 0 || seed_idx >= (int)hits_s.size()) return;
+        const auto &g0 = hits_s[seed_idx];
+
+        Line3D seed = seedLine(hcx, hcy, hcz, g0[0], g0[1], g0[2]);
+
+        // Match candidates on every detector — including S itself, which is
+        // matched by construction (its seed hit is the candidate).
+        bool  matched[GEM_EFF_MAX_DETS] = {false,false,false,false};
+        float cand_lx[GEM_EFF_MAX_DETS] = {0,0,0,0};
+        float cand_ly[GEM_EFF_MAX_DETS] = {0,0,0,0};
+        float cand_lz[GEM_EFF_MAX_DETS] = {0,0,0,0};
+        matched[S] = true;
+        cand_lx[S] = g0[0]; cand_ly[S] = g0[1]; cand_lz[S] = g0[2];
+        for (int d = 0; d < n_dets; ++d) {
+            if (d == S) continue;
+            float pred_lx, pred_ly;
+            projectLineToLocal(gem_transforms[d], seed, pred_lx, pred_ly);
+            int idx; float lab_x, lab_y, lab_z;
+            findClosest(d, pred_lx, pred_ly, idx, lab_x, lab_y, lab_z);
+            if (idx >= 0) {
+                matched[d] = true;
+                cand_lx[d] = lab_x; cand_ly[d] = lab_y; cand_lz[d] = lab_z;
+            }
+        }
+
+        int nmatch = 0;
+        for (int d = 0; d < n_dets; ++d) if (matched[d]) nmatch++;
+        if (nmatch < 3) return;     // need ≥3 GEMs for a "good track"
+
+        // Fit: HyCal + every matched GEM.
+        constexpr int CAP = GEM_EFF_MAX_DETS + 1;
+        float zarr[CAP], xarr[CAP], yarr[CAP], warr[CAP];
+        int N = 0;
+        zarr[N] = hcz; xarr[N] = hcx; yarr[N] = hcy; warr[N] = w_h; ++N;
+        for (int d = 0; d < n_dets; ++d) {
+            if (!matched[d]) continue;
+            zarr[N] = cand_lz[d]; xarr[N] = cand_lx[d]; yarr[N] = cand_ly[d];
+            const float s = sigmaGem(d);
+            warr[N] = 1.f / (s * s); ++N;
+        }
+
+        Line3D fit;
+        if (!fitWeightedLine(N, zarr, xarr, yarr, warr, fit)) return;
+        if (fit.chi2_per_dof > gem_eff_max_chi2) return;
+        if (fit.chi2_per_dof >= best.chi2_per_dof) return;
+
+        best.valid = true;
+        best.chi2_per_dof = fit.chi2_per_dof;
+        best.fit = fit;
+        for (int d = 0; d < GEM_EFF_MAX_DETS; ++d) {
+            best.used[d] = matched[d];
+            if (matched[d]) {
+                best.used_lx[d] = cand_lx[d];
+                best.used_ly[d] = cand_ly[d];
+                best.used_lz[d] = cand_lz[d];
+            }
+        }
+    };
+
+    // Try GEM0 seeds — covers the bulk of cases (any track with a GEM0 hit).
+    if (n_dets >= 1 && !hits_by_det[0].empty()) {
+        int max_seeds = std::min((int)hits_by_det[0].size(), gem_eff_max_hits_per_det);
+        for (int s = 0; s < max_seeds; ++s) trySeed(0, s);
+    }
+    // Try GEM1 seeds — covers the GEM0-missing case (and refines fits when
+    // GEM0's seed line is noisy).  Lowest χ²/dof across both passes wins.
+    if (n_dets >= 2 && !hits_by_det[1].empty()) {
+        int max_seeds = std::min((int)hits_by_det[1].size(), gem_eff_max_hits_per_det);
+        for (int s = 0; s < max_seeds; ++s) trySeed(1, s);
+    }
+
+    if (!best.valid) return;
+
+    // Good track found.  Increment shared denominator and per-detector
+    // numerators (one per detector that contributed to the fit).
+    gem_eff_den++;
+    for (int R = 0; R < n_dets; ++R) {
+        if (best.used[R]) gem_eff_num[R]++;
+    }
+
+    // Snapshot — overwrite previous "last good".
+    GemEffSnapshot &snap = gem_eff_snapshot;
+    snap = GemEffSnapshot{};
+    snap.valid = true;
+    snap.event_id = event_id;
+    snap.hycal_x = hcx; snap.hycal_y = hcy; snap.hycal_z = hcz;
+    snap.chi2_per_dof = best.chi2_per_dof;
+    snap.ax = best.fit.ax; snap.bx = best.fit.bx;
+    snap.ay = best.fit.ay; snap.by = best.fit.by;
+
+    for (int R = 0; R < GEM_EFF_MAX_DETS; ++R) {
+        auto &dx = snap.dets[R];
+        dx = {};
+        if (R >= n_dets) continue;
+        dx.used_in_fit = best.used[R];
+        dx.hit_present = best.used[R];
+        if (best.used[R]) {
+            dx.hit_lab_x = best.used_lx[R];
+            dx.hit_lab_y = best.used_ly[R];
+            dx.hit_lab_z = best.used_lz[R];
+        }
+        // Predict on R from the fit.
+        float pred_lx, pred_ly;
+        projectLineToLocal(gem_transforms[R], best.fit, pred_lx, pred_ly);
+        dx.predicted_local_x = pred_lx;
+        dx.predicted_local_y = pred_ly;
+        float plab_x, plab_y, plab_z;
+        gem_transforms[R].toLab(pred_lx, pred_ly, plab_x, plab_y, plab_z);
+        dx.predicted_lab_x = plab_x;
+        dx.predicted_lab_y = plab_y;
+        dx.predicted_lab_z = plab_z;
+        dx.inside = inside(R, pred_lx, pred_ly);
+        if (best.used[R]) {
+            float hl_x, hl_y, hl_z;
+            gem_transforms[R].labToLocal(best.used_lx[R], best.used_ly[R], best.used_lz[R],
+                                          hl_x, hl_y, hl_z);
+            dx.resid_dx = hl_x - pred_lx;
+            dx.resid_dy = hl_y - pred_ly;
+        }
+    }
+}
+
+nlohmann::json AppState::gemEffSnapshotJson() const
+{
+    using nlohmann::json;
+    const auto &s = gem_eff_snapshot;
+    if (!s.valid) return json(nullptr);
+    json dets = json::array();
+    for (int R = 0; R < GEM_EFF_MAX_DETS; ++R) {
+        const auto &d = s.dets[R];
+        json e = {
+            {"id", R},
+            {"used_in_fit", d.used_in_fit},
+            {"hit_present", d.hit_present},
+            {"inside",      d.inside},
+            {"predicted_lab",   {d.predicted_lab_x, d.predicted_lab_y, d.predicted_lab_z}},
+            {"predicted_local", {d.predicted_local_x, d.predicted_local_y}},
+            {"resid",           {d.resid_dx, d.resid_dy}},
+        };
+        if (d.hit_present) e["hit_lab"] = json::array({d.hit_lab_x, d.hit_lab_y, d.hit_lab_z});
+        dets.push_back(e);
+    }
+    return json{
+        {"event_id",     s.event_id},
+        {"hycal_lab",    json::array({s.hycal_x, s.hycal_y, s.hycal_z})},
+        {"chi2_per_dof", s.chi2_per_dof},
+        {"fit",          {{"ax", s.ax}, {"bx", s.bx}, {"ay", s.ay}, {"by", s.by}}},
+        {"dets",         dets},
+    };
+}
+
+//=============================================================================
 // Clearing
 //=============================================================================
 
@@ -981,10 +1349,9 @@ void AppState::clearHistograms()
     for (auto &h : gem_dy_hist) h.clear();
     for (auto &n : gem_match_hits) n = 0;
     gem_match_events = 0;
+    clearGemEfficiency();
     cluster_events_processed = 0;
     for (auto &h : gem_occupancy) h.clear();
-    gem_nclusters_hist.clear();
-    gem_theta_hist.clear();
 }
 
 void AppState::clearLms()
