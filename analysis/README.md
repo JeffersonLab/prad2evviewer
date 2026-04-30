@@ -26,26 +26,37 @@ The library is what makes ACLiC scripts work in install mode — without it, `an
 > name collisions in a shared bindir.  The tool names below refer to the
 > built binary — e.g. `prad2ana_replay_rawdata`.
 
-**replay_rawdata** — Single EVIO file to ROOT tree with per-channel waveform data.
-```bash
-prad2ana_replay_rawdata <input.evio> [-o output.root] [-n max_events] [-p]
-```
+Both replay tools are multi-threaded — point them at one or more EVIO
+files (or a directory of segments) and tune parallelism with `-j`.  Output
+goes to `<output_dir>/<input_stem>_raw.root` (rawdata) or `_recon.root`
+(recon), one ROOT file per input EVIO segment.
 
-**replay_rawdata_m** — Multi-file, multi-threaded version of `replay_rawdata`. Processes all EVIO segments in a directory.
+**replay_rawdata** — EVIO → per-channel waveform tree (`events`).
 ```bash
-prad2ana_replay_rawdata_m <evio_dir> [-f max_files] [-n max_events] [-p] [-j num_threads] [-D daq_config.json] [-o merged.root]
+prad2ana_replay_rawdata <evio_or_dir> [more...] -o <output_dir> \
+    [-f max_files] [-n max_events] [-j num_threads] \
+    [-c daq_config.json] [-d hycal_daq_map.json] [-p]
 ```
+- `-p` adds peak branches: `hycal.peak_*` (soft-analyzer) **and**
+  `hycal.daq_peak_*` (firmware Mode 1/2/3 emulation).  Without `-p`, only
+  raw samples + module info are written; the soft analyzer is skipped
+  entirely on the per-channel hot path.
+- See [REPLAYED_DATA.md](REPLAYED_DATA.md) for the full branch list.
 
-**replay_recon** — HyCal reconstruction replay with clustering and per-module energy histograms.
+**replay_recon** — EVIO → reconstructed tree (`recon`): HyCal clustering,
+GEM hits, HyCal↔GEM straight-line matching.
 ```bash
-prad2ana_replay_recon <input.evio> [-o output.root] [-D daq_config.json] [-n N]
+prad2ana_replay_recon <evio_or_dir> [more...] -o <output_dir> \
+    [-f max_files] [-n max_events] [-j num_threads] \
+    [-c daq_config.json] [-d hycal_daq_map.json] \
+    [-g gem_pedestal.json] [-z zerosup_threshold] [-p]
 ```
-
-**replay_recon_m** — Multi-file, multi-threaded version of `replay_recon`. Supports GEM pedestal and zero-suppression options.
-```bash
-prad2ana_replay_recon_m <evio_dir> [-f max_files] [-n max_events] [-p] [-j num_threads] [-D daq_config.json] [-g gem_pedestal.json] [-z zerosup_threshold] [-o merged.root]
-```
-- `-p`  read PRad-I data format (no GEM)
+- `-p` here selects **PRad-I data format** (no GEM, ADC1881M Fastbus
+  pedestals).  Different semantics from the `-p` on `replay_rawdata` —
+  this is a legacy compatibility flag.
+- `-g` overrides the GEM pedestal file from `runinfo`; `-z` overrides
+  the zero-suppression sigma threshold.
+- See [REPLAYED_DATA.md](REPLAYED_DATA.md) for the full branch list.
 
 ### Calibration
 

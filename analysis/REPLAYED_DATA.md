@@ -1,9 +1,17 @@
-# Replayed Raw Data — `events` tree
+# Replayed Data Trees
 
-ROOT tree written by `prad2ana_replay_rawdata`.  Per-event scalars and
-per-channel arrays sized by `hycal.nch` / `gem.nch`.  The `hycal.*` arrays
-cover **all** FADC250 channels (HyCal + Veto + LMS) — distinguish via
-`hycal.module_type`:
+Two ROOT trees are produced by the replay tools:
+
+| Tool | Tree name | Contents |
+|---|---|---|
+| `prad2ana_replay_rawdata` | `events` | Raw FADC250 waveforms + GEM strip data + optional per-channel peak analysis |
+| `prad2ana_replay_recon`   | `recon`  | HyCal clusters + GEM hits (lab frame) + HyCal↔GEM matches |
+
+# `events` tree (raw)
+
+Written by `prad2ana_replay_rawdata`.  Per-event scalars and per-channel
+arrays sized by `hycal.nch` / `gem.nch`.  The `hycal.*` arrays cover **all**
+FADC250 channels (HyCal + Veto + LMS) — distinguish via `hycal.module_type`:
 
 | Value | Type | Source |
 |---|---|---|
@@ -88,7 +96,108 @@ for the algorithm spec.
 | `gem.strip`       | `uint8[nch]`      | Strip number on the APV |
 | `gem.ssp_samples` | `int16[nch][6]`   | 6 SSP time samples per strip |
 
-## Run example
+# `recon` tree (reconstructed)
+
+Written by `prad2ana_replay_recon`.  HyCal clustering, GEM hit
+reconstruction, and per-cluster HyCal↔GEM matching.  All positions are in
+the lab frame (target-centered, beam-aligned, mm).  Trigger filter applied
+upstream — only physics events reach the tree.
+
+### Event header
+
+| Branch | Type | Meaning |
+|---|---|---|
+| `event_num`    | `int`            | Event number |
+| `trigger_type` | `uint8`          | Main trigger type |
+| `trigger_bits` | `uint32`         | FP trigger bits (32-bit bitmask) |
+| `timestamp`    | `int64`          | 48-bit TI timestamp (250 MHz ticks) |
+| `total_energy` | `float`          | Σ HyCal cluster energy (MeV) |
+| `ssp_raw`      | `vector<uint32>` | Raw 0xE10C SSP trigger bank words |
+
+### HyCal clusters
+
+`n_clusters` ≤ 100.  Lab frame (target-centered, beam-aligned, mm).
+
+| Branch | Type | Meaning |
+|---|---|---|
+| `n_clusters` | `int`                | Number of reconstructed clusters |
+| `cl_x`       | `float[n_clusters]`  | Cluster x at HyCal face + shower depth |
+| `cl_y`       | `float[n_clusters]`  | Cluster y |
+| `cl_z`       | `float[n_clusters]`  | `hycal_z` + shower-depth correction |
+| `cl_energy`  | `float[n_clusters]`  | Cluster energy (MeV) |
+| `cl_nblocks` | `uint8[n_clusters]`  | Modules summed into the cluster |
+| `cl_center`  | `uint16[n_clusters]` | Center module ID (same numbering as `hycal.module_id`) |
+| `cl_flag`    | `uint32[n_clusters]` | HyCal cluster flags (bit field) |
+
+### Per-cluster HyCal↔GEM match (all 4 GEMs)
+
+For each HyCal cluster, the closest GEM hit on each of the 4 detectors
+within the matching window is recorded (or `0`/`NaN` if none).  Use this
+when you want a fixed-shape `[n_clusters][4]` view.
+
+| Branch | Type | Meaning |
+|---|---|---|
+| `matchFlag` | `uint32[n_clusters]`    | Per-cluster match flags (which GEMs matched) |
+| `matchGEMx` | `float[n_clusters][4]`  | Matched GEM x (det 0..3) |
+| `matchGEMy` | `float[n_clusters][4]`  | Matched GEM y |
+| `matchGEMz` | `float[n_clusters][4]`  | Matched GEM z |
+
+### Quick-access matched pairs (clusters with ≥2 GEMs matched)
+
+`match_num` ≤ 100. Convenient `[match_num][2]` view for analyses that only
+care about clusters confirmed on at least two GEM planes.
+
+| Branch | Type | Meaning |
+|---|---|---|
+| `match_num` | `int`                  | Number of clusters with ≥2 GEMs matched |
+| `mHit_E`    | `float[match_num]`     | HyCal cluster energy (MeV) |
+| `mHit_x`    | `float[match_num]`     | HyCal cluster x |
+| `mHit_y`    | `float[match_num]`     | HyCal cluster y |
+| `mHit_z`    | `float[match_num]`     | HyCal cluster z |
+| `mHit_gx`   | `float[match_num][2]`  | First 2 matched GEM x |
+| `mHit_gy`   | `float[match_num][2]`  | First 2 matched GEM y |
+| `mHit_gz`   | `float[match_num][2]`  | First 2 matched GEM z |
+| `mHit_gid`  | `float[match_num][2]`  | det_id (0..3) of those 2 GEM hits |
+
+### GEM reconstructed hits
+
+`n_gem_hits` ≤ 400.  All hits across all 4 detectors, lab frame.
+
+| Branch | Type | Meaning |
+|---|---|---|
+| `n_gem_hits`   | `int`                  | Total GEM hits across all detectors |
+| `det_id`       | `uint8[n_gem_hits]`    | GEM detector ID (0..3) |
+| `gem_x`        | `float[n_gem_hits]`    | Hit x (lab) |
+| `gem_y`        | `float[n_gem_hits]`    | Hit y |
+| `gem_z`        | `float[n_gem_hits]`    | Hit z (per-detector plane) |
+| `gem_x_charge` | `float[n_gem_hits]`    | Total ADC of the X cluster |
+| `gem_y_charge` | `float[n_gem_hits]`    | Total ADC of the Y cluster |
+| `gem_x_peak`   | `float[n_gem_hits]`    | Max-strip ADC, X plane |
+| `gem_y_peak`   | `float[n_gem_hits]`    | Max-strip ADC, Y plane |
+| `gem_x_size`   | `uint8[n_gem_hits]`    | Strips in X cluster |
+| `gem_y_size`   | `uint8[n_gem_hits]`    | Strips in Y cluster |
+| `gem_x_mTbin`  | `uint8[n_gem_hits]`    | Time-sample bin of max-ADC strip, X |
+| `gem_y_mTbin`  | `uint8[n_gem_hits]`    | Time-sample bin of max-ADC strip, Y |
+
+### Veto + LMS (peak summaries)
+
+Lightweight tag of the best soft peak per Veto / LMS channel — full
+waveforms live in the `events` tree, not here.
+
+| Branch | Type | Meaning |
+|---|---|---|
+| `veto_nch`          | `int`              | Number of Veto channels with data |
+| `veto_id`           | `uint8[veto_nch]`  | 0..3 (V1..V4) |
+| `veto_npeaks`       | `int[veto_nch]`    | Soft peaks found |
+| `veto_peak_time`    | `float[veto_nch][8]` | Peak time (ns) |
+| `veto_peak_integral`| `float[veto_nch][8]` | Peak integral |
+| `lms_nch`           | `int`              | Number of LMS channels with data |
+| `lms_id`            | `uint8[lms_nch]`   | 0=Pin, 1..3 = LMS1..3 |
+| `lms_npeaks`        | `int[lms_nch]`     | Soft peaks found |
+| `lms_peak_time`     | `float[lms_nch][8]` | Peak time (ns) |
+| `lms_peak_integral` | `float[lms_nch][8]` | Peak integral |
+
+# Run example
 
 ```bash
 ssh clasrun@clonfarm11
