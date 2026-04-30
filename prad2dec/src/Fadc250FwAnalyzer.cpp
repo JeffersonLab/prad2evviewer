@@ -96,8 +96,10 @@ void Fadc250FwAnalyzer::Analyze(const uint16_t *raw, int n, float PED,
     const float Vmin = Vnoise;
 
     const float TET = cfg.TET;
-    const int   nsb = cfg.NSB;
-    const int   nsa = cfg.NSA;
+    // NSB/NSA in the config are in ns; floor to whole samples for window
+    // indexing (cross ± nsb/nsa are sample indices in the raw waveform).
+    const int   nsb = static_cast<int>(cfg.NSB / cfg.CLK_NS);
+    const int   nsa = static_cast<int>(cfg.NSA / cfg.CLK_NS);
     const int   nsat = cfg.NSAT < 1 ? 1 : cfg.NSAT;
     const int   max_pulses = std::min(cfg.MAX_PULSES, MAX_PEAKS);
     const float clk_per_64 = cfg.CLK_NS / 64.0f;  // ns per fine-time LSB

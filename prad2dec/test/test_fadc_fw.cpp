@@ -78,7 +78,7 @@ DaqWaveResult run(const std::vector<uint16_t> &raw, float PED,
 // ---------------------------------------------------------------------------
 // T1 — Single trapezoid pulse, integer Vpeak, no truncation.
 //
-// Hand trace (PED=100, TET=50, NSB=4, NSA=10):
+// Hand trace (PED=100, TET=50, NSB=16ns=4samples, NSA=40ns=10samples):
 //   raw      = [100,100,100,100, 110,130,170,250,200,130,110,
 //               100,100,100,100,100,100,100,100,100]
 //   pedsub s = [  0,  0,  0,  0,  10, 30, 70,150,100, 30, 10,
@@ -104,7 +104,7 @@ void test_T1_single_pulse()
         100,100,100,100, 110,130,170,250,200,130,110,
         100,100,100,100,100,100,100,100,100
     };
-    evc::DaqConfig::Fadc250FwConfig cfg;   // TET=50, NSB=4, NSA=10, MAX_PULSES=4
+    evc::DaqConfig::Fadc250FwConfig cfg;   // TET=50, NSB=16ns=4s, NSA=40ns=10s, MAX_PULSES=4
 
     auto r = run(raw, 100.0f, cfg);
 
@@ -203,7 +203,7 @@ void test_T3_two_pulses()
 // ---------------------------------------------------------------------------
 // T4 — NSA truncation at end of window.
 //
-// n=14, pulse with cross=8, NSA=10 → cross+NSA=18 > 13 → truncated to 13.
+// n=14, pulse with cross=8, NSA=40ns=10s → cross+NSA_s=18 > 13 → truncated to 13.
 //   pedsub s = [0,0,0,0,0,0,0,0, 70,150,100,30,10,0]
 //   i_peak = 9, Vpeak = 150.  cross = 8.
 //   Va = 75.  Bracket: s[8]=70 < 75, s[9]=150 ≥ 75 → k=9.  coarse=8, fine=4.
@@ -217,7 +217,7 @@ void test_T4_nsa_truncated()
     std::vector<uint16_t> raw = {
         100,100,100,100,100,100,100,100, 170,250,200,130,110,100
     };
-    evc::DaqConfig::Fadc250FwConfig cfg;   // NSA=10, NSB=4
+    evc::DaqConfig::Fadc250FwConfig cfg;   // NSA=40ns=10s, NSB=16ns=4s
 
     auto r = run(raw, 100.0f, cfg);
 
@@ -243,7 +243,7 @@ void test_T4_nsa_truncated()
 // ---------------------------------------------------------------------------
 // T5 — NSB truncation at start of window.
 //
-// NSB = 6, pulse with cross at sample 4.  cross-NSB = -2 → clamp to 0.
+// NSB = 24ns = 6 samples, pulse with cross at sample 4.  cross-NSB_s = -2 → clamp to 0.
 //   pedsub s = [0,0,0,0, 70,150,100,30,10,0,0,…]
 //   i_peak = 5, Vpeak = 150.  cross = 4.
 //   Va = 75.  Bracket: s[4]=70<75, s[5]=150≥75 → k=5.  coarse=4, fine=4.
@@ -259,8 +259,8 @@ void test_T5_nsb_truncated()
         100,100,100,100,100
     };
     evc::DaqConfig::Fadc250FwConfig cfg;
-    cfg.NSB = 6;
-    cfg.NSA = 10;
+    cfg.NSB = 24;   // ns → 6 samples
+    cfg.NSA = 40;   // ns → 10 samples
 
     auto r = run(raw, 100.0f, cfg);
 
@@ -301,8 +301,8 @@ void test_T6_boundary_peak()
         100,100,100,100, 110,130,170,200,230,260
     };
     evc::DaqConfig::Fadc250FwConfig cfg;
-    cfg.NSB = 4;
-    cfg.NSA = 4;
+    cfg.NSB = 16;   // ns → 4 samples
+    cfg.NSA = 16;   // ns → 4 samples
 
     auto r = run(raw, 100.0f, cfg);
 

@@ -114,8 +114,11 @@ struct DaqConfig
     // (faV3HallDSetProcMode in CODA RoLs):
     //   TET        — Trigger Energy Threshold (ADC counts above per-channel
     //                pedestal; firmware register 0x000B..0x001A, 12-bit).
-    //   NSB        — Samples before threshold crossing (register 0x0009).
-    //   NSA        — Samples after  threshold crossing (register 0x000A).
+    //   NSB        — Window before threshold crossing, in ns.  Floored to
+    //                whole samples (CLK_NS) for the integration window.
+    //                Firmware register 0x0009 stores the sample count.
+    //   NSA        — Window after threshold crossing, in ns.  Same flooring
+    //                as NSB; firmware register 0x000A stores the sample count.
     //   MAX_PULSES — Max pulses per channel per window (NPEAK in firmware
     //                terminology / NP in faV3 API; CONFIG 1 bits 6-5, 1..4).
     //   NSAT       — Number of *consecutive* samples above TET required for
@@ -133,8 +136,8 @@ struct DaqConfig
     // in daq_config.json to match the actual run.
     struct Fadc250FwConfig {
         float TET        = 50.0f;
-        int   NSB        = 4;
-        int   NSA        = 10;
+        int   NSB        = 16;    // ns (= 4 samples at 250 MHz)
+        int   NSA        = 40;    // ns (= 10 samples at 250 MHz)
         int   MAX_PULSES = 4;
         int   NSAT       = 1;     // 1 = legacy Mode 3 (single-sample TC)
         int   NPED       = 4;     // matches manual's "Read four samples"
