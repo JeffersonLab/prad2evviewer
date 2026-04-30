@@ -69,18 +69,21 @@ struct RawEventData {
     uint32_t trigger_bits      = 0;   // FP trigger bits (multi-bit, from TI master d[5])
     long long  timestamp    = 0;
 
-    // FADC250 per-channel data (HyCal + Veto + LMS, distinguished by module_type)
+    // FADC250 per-channel data (HyCal + Veto + LMS, distinguished by module_type).
+    // nsamples is uint8 because PTW max ≤ MAX_SAMPLES = 200 (firmware register
+    // 0x0007); npeaks (below) is uint8 because MAX_PEAKS = 8.  Both fit
+    // comfortably in 8 bits and shave ~9 KB/event vs int.
     int          nch = 0;
     uint16_t     module_id[kMaxChannels]   = {};
     uint8_t      module_type[kMaxChannels] = {};   // ModuleType enum value
-    int          nsamples[kMaxChannels]    = {};
+    uint8_t      nsamples[kMaxChannels]    = {};
     uint16_t     samples[kMaxChannels][fdec::MAX_SAMPLES] = {};
-    float        ped_mean[kMaxChannels]    = {};
-    float        ped_rms[kMaxChannels]     = {};
     float        gain_factor[kMaxChannels] = {};   // 1.0 for non-HyCal types
 
     // Optional soft-analyzer peak data (gated on -p flag in replay_rawdata)
-    int     npeaks[kMaxChannels] = {};
+    float   ped_mean[kMaxChannels]                       = {};
+    float   ped_rms[kMaxChannels]                        = {};
+    uint8_t npeaks[kMaxChannels]                         = {};
     float   peak_height[kMaxChannels][fdec::MAX_PEAKS]   = {};
     float   peak_time[kMaxChannels][fdec::MAX_PEAKS]     = {};
     float   peak_integral[kMaxChannels][fdec::MAX_PEAKS] = {};
@@ -98,7 +101,7 @@ struct RawEventData {
     //   daq_peak_fine    — sub-sample fine bits, 0..63 (62.5 ps LSB)
     //   daq_peak_quality — bitmask: Q_PEAK_AT_BOUNDARY|Q_NSB_TRUNCATED|
     //                      Q_NSA_TRUNCATED|Q_VA_OUT_OF_RANGE (see Fadc250Data.h)
-    int     daq_npeaks[kMaxChannels] = {};
+    uint8_t daq_npeaks[kMaxChannels] = {};
     float   daq_peak_vp[kMaxChannels][fdec::MAX_PEAKS]       = {};
     float   daq_peak_integral[kMaxChannels][fdec::MAX_PEAKS] = {};
     float   daq_peak_time[kMaxChannels][fdec::MAX_PEAKS]     = {};

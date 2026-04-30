@@ -170,20 +170,23 @@ void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
     tree->Branch("hycal.nch",         &ev.nch,         "hycal.nch/I");
     tree->Branch("hycal.module_id",   ev.module_id,    "hycal.module_id[hycal.nch]/s");
     tree->Branch("hycal.module_type", ev.module_type,  "hycal.module_type[hycal.nch]/b");
-    tree->Branch("hycal.nsamples",    ev.nsamples,     "hycal.nsamples[hycal.nch]/I");
+    tree->Branch("hycal.nsamples",    ev.nsamples,     "hycal.nsamples[hycal.nch]/b");
     tree->Branch("hycal.samples",     ev.samples,      Form("hycal.samples[hycal.nch][%d]/s", fdec::MAX_SAMPLES));
-    tree->Branch("hycal.ped_mean",    ev.ped_mean,     "hycal.ped_mean[hycal.nch]/F");
-    tree->Branch("hycal.ped_rms",     ev.ped_rms,      "hycal.ped_rms[hycal.nch]/F");
     tree->Branch("hycal.gain_factor", ev.gain_factor,  "hycal.gain_factor[hycal.nch]/F");
     if (write_peaks) {
-        tree->Branch("hycal.npeaks",       &ev.npeaks,       "hycal.npeaks[hycal.nch]/I");
+        // ped_mean / ped_rms are products of the soft analyzer — only
+        // meaningful when the analyzer ran, so they live under -p alongside
+        // the per-peak arrays.
+        tree->Branch("hycal.ped_mean",     ev.ped_mean,      "hycal.ped_mean[hycal.nch]/F");
+        tree->Branch("hycal.ped_rms",      ev.ped_rms,       "hycal.ped_rms[hycal.nch]/F");
+        tree->Branch("hycal.npeaks",       ev.npeaks,        "hycal.npeaks[hycal.nch]/b");
         tree->Branch("hycal.peak_height",  ev.peak_height,  Form("hycal.peak_height[hycal.nch][%d]/F", fdec::MAX_PEAKS));
         tree->Branch("hycal.peak_time",    ev.peak_time,    Form("hycal.peak_time[hycal.nch][%d]/F", fdec::MAX_PEAKS));
         tree->Branch("hycal.peak_integral",ev.peak_integral, Form("hycal.peak_integral[hycal.nch][%d]/F", fdec::MAX_PEAKS));
         // Firmware-mode (FADC250 Modes 1/2/3) emulation peaks — see
         // Fadc250FwAnalyzer.  daq_peak_quality is a bitmask of Q_* flags
         // (peak-at-boundary, NSB/NSA truncation, Va out-of-range).
-        tree->Branch("hycal.daq_npeaks",       &ev.daq_npeaks,        "hycal.daq_npeaks[hycal.nch]/I");
+        tree->Branch("hycal.daq_npeaks",       ev.daq_npeaks,         "hycal.daq_npeaks[hycal.nch]/b");
         tree->Branch("hycal.daq_peak_vp",       ev.daq_peak_vp,       Form("hycal.daq_peak_vp[hycal.nch][%d]/F",        fdec::MAX_PEAKS));
         tree->Branch("hycal.daq_peak_integral", ev.daq_peak_integral, Form("hycal.daq_peak_integral[hycal.nch][%d]/F",  fdec::MAX_PEAKS));
         tree->Branch("hycal.daq_peak_time",     ev.daq_peak_time,     Form("hycal.daq_peak_time[hycal.nch][%d]/F",      fdec::MAX_PEAKS));
@@ -375,16 +378,13 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
 
                         ev->module_id[nch]   = static_cast<uint16_t>(mod_id);
                         ev->module_type[nch] = static_cast<uint8_t>(mod_type);
-                        ev->nsamples[nch]    = cd.nsamples;
+                        ev->nsamples[nch]    = static_cast<uint8_t>(cd.nsamples);
                         for (int i = 0; i < cd.nsamples && i < fdec::MAX_SAMPLES; ++i)
                             ev->samples[nch][i] = cd.samples[i];
 
-                        ana.Analyze(cd.samples, cd.nsamples, wres);
-                        ev->ped_mean[nch] = wres.ped.mean;
-                        ev->ped_rms[nch]  = wres.ped.rms;
-
                         // Gain correction is HyCal-only (PbGlass / PbWO4) —
-                        // SCINT / LMS get unity factor.
+                        // SCINT / LMS get unity factor.  Comes from a lookup
+                        // table, no analyzer needed.
                         if (mod_type == prad2::MOD_PbWO4) {
                             ev->gain_factor[nch] = gain_correction.w[mod_id - 1000].avg;
                         } else if (mod_type == prad2::MOD_PbGlass) {
@@ -394,14 +394,21 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                         }
 
                         if (write_peaks) {
-                            ev->npeaks[nch] = wres.npeaks;
+                            // Soft analyzer drives both peaks AND the
+                            // pedestal estimate that the firmware analyzer
+                            // consumes — only run it when its output is
+                            // being written.
+                            ana.Analyze(cd.samples, cd.nsamples, wres);
+                            ev->ped_mean[nch] = wres.ped.mean;
+                            ev->ped_rms[nch]  = wres.ped.rms;
+                            ev->npeaks[nch]   = static_cast<uint8_t>(wres.npeaks);
                             for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
                                 ev->peak_height[nch][p]   = wres.peaks[p].height;
                                 ev->peak_time[nch][p]     = wres.peaks[p].time;
                                 ev->peak_integral[nch][p] = wres.peaks[p].integral;
                             }
                             fw_ana.Analyze(cd.samples, cd.nsamples, wres.ped.mean, dwres);
-                            ev->daq_npeaks[nch] = dwres.npeaks;
+                            ev->daq_npeaks[nch] = static_cast<uint8_t>(dwres.npeaks);
                             for (int p = 0; p < dwres.npeaks && p < fdec::MAX_PEAKS; ++p) {
                                 const auto &dp = dwres.peaks[p];
                                 ev->daq_peak_vp[nch][p]       = dp.vpeak;

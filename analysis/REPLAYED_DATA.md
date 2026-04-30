@@ -36,20 +36,22 @@ LMS = 3100 (Pin) / 3101..3103.
 | `hycal.nch`         | `int`            | Number of FADC250 channels in event |
 | `hycal.module_id`   | `uint16[nch]`    | See ranges above |
 | `hycal.module_type` | `uint8[nch]`     | Category enum (legend above) |
-| `hycal.nsamples`    | `int[nch]`       | Samples per channel (≤ 200) |
+| `hycal.nsamples`    | `uint8[nch]`     | Samples per channel (≤ 200) |
 | `hycal.samples`     | `uint16[nch][200]` | Raw 12-bit ADC samples |
-| `hycal.ped_mean`    | `float[nch]`     | Soft-analyzer pedestal mean |
-| `hycal.ped_rms`     | `float[nch]`     | Soft-analyzer pedestal RMS |
 | `hycal.gain_factor` | `float[nch]`     | Gain correction (1.0 for SCINT/LMS) |
 
-### Soft-analyzer peaks — only with `-p`
+### Soft-analyzer outputs — only with `-p`
 
 Local-maxima search with iterative-outlier-rejection pedestal
 (`fdec::WaveAnalyzer`).  Up to `MAX_PEAKS = 8` peaks per channel.
+Without `-p`, the soft analyzer is skipped entirely (the pedestal estimate
+that the firmware analyzer uses is also gated on `-p`).
 
 | Branch | Type | Meaning |
 |---|---|---|
-| `hycal.npeaks`         | `int[nch]`        | Soft peaks found |
+| `hycal.ped_mean`       | `float[nch]`      | Soft-analyzer pedestal mean |
+| `hycal.ped_rms`        | `float[nch]`      | Soft-analyzer pedestal RMS |
+| `hycal.npeaks`         | `uint8[nch]`      | Soft peaks found |
 | `hycal.peak_height`    | `float[nch][8]`   | Peak height above pedestal |
 | `hycal.peak_time`      | `float[nch][8]`   | Peak time (ns) |
 | `hycal.peak_integral`  | `float[nch][8]`   | Peak integral |
@@ -65,7 +67,7 @@ for the algorithm spec.
 
 | Branch | Type | Meaning |
 |---|---|---|
-| `hycal.daq_npeaks`        | `int[nch]`      | Firmware pulses (≤ NPEAK) |
+| `hycal.daq_npeaks`        | `uint8[nch]`    | Firmware pulses (≤ NPEAK) |
 | `hycal.daq_peak_vp`       | `float[nch][8]` | Vpeak (pedestal-subtracted) |
 | `hycal.daq_peak_integral` | `float[nch][8]` | Σ over [cross−NSB, cross+NSA] (Mode 2) |
 | `hycal.daq_peak_time`     | `float[nch][8]` | Mid-amplitude time, ns (62.5 ps LSB) |

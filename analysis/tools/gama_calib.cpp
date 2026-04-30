@@ -44,8 +44,6 @@ void SetReadBranches(TTree *tree, EventVars &ev, bool write_peaks)
     tree->SetBranchAddress("hycal.module_id", ev.module_id);
     tree->SetBranchAddress("hycal.nsamples", ev.nsamples);
     tree->SetBranchAddress("hycal.samples", ev.samples);
-    tree->SetBranchAddress("hycal.ped_mean", ev.ped_mean);
-    tree->SetBranchAddress("hycal.ped_rms", ev.ped_rms);
     if (write_peaks) {
         tree->SetBranchAddress("hycal.npeaks", &ev.npeaks);
         tree->SetBranchAddress("hycal.peak_height", ev.peak_height);

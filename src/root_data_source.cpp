@@ -63,10 +63,11 @@ std::string RootRawDataSource::open(const std::string &path)
     tree_->SetBranchAddress("hycal.module_id",  ev_.module_id);
     tree_->SetBranchAddress("hycal.nsamples",   ev_.nsamples);
     tree_->SetBranchAddress("hycal.samples",    ev_.samples);
-    tree_->SetBranchAddress("hycal.ped_mean",   ev_.ped_mean);
-    tree_->SetBranchAddress("hycal.ped_rms",    ev_.ped_rms);
-
     has_peaks_ = (tree_->GetBranch("hycal.npeaks") != nullptr);
+    if (has_peaks_) {
+        tree_->SetBranchAddress("hycal.ped_mean",   ev_.ped_mean);
+        tree_->SetBranchAddress("hycal.ped_rms",    ev_.ped_rms);
+    }
     if (has_peaks_) {
         tree_->SetBranchAddress("hycal.npeaks",        ev_.npeaks);
         tree_->SetBranchAddress("hycal.peak_height",   ev_.peak_height);
