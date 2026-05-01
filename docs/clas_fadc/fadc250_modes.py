@@ -136,10 +136,10 @@ class FADC250Analyzer:
     """Firmware-faithful analyzer.  One instance per channel."""
 
     # Quality factor bits (manual: 2-bit field on Pulse Integral / Pulse Time).
-    Q_GOOD              = 0
-    Q_PEAK_AT_BOUNDARY  = 1   # peak is at the last sample (pulse may extend past window)
-    Q_NSB_TRUNCATED     = 2   # NSB ran into start of window
-    Q_NSA_TRUNCATED     = 3   # NSA ran past end of window
+    Q_DAQ_GOOD              = 0
+    Q_DAQ_PEAK_AT_BOUNDARY  = 1   # peak is at the last sample (pulse may extend past window)
+    Q_DAQ_NSB_TRUNCATED     = 2   # NSB ran into start of window
+    Q_DAQ_NSA_TRUNCATED     = 3   # NSA ran past end of window
 
     def __init__(self, config: FADC250Config):
         config.validate()
@@ -280,9 +280,9 @@ class FADC250Analyzer:
             T_units = coarse * 64 + fine
             T_ns    = T_units * (cfg.CLK_NS / 64.0)   # 4 ns / 64 = 62.5 ps
 
-            quality = self.Q_GOOD
+            quality = self.Q_DAQ_GOOD
             if i_peak >= N - 1:
-                quality = self.Q_PEAK_AT_BOUNDARY
+                quality = self.Q_DAQ_PEAK_AT_BOUNDARY
 
             pulses.append(PulseTDC(
                 pulse_number = pulse_idx,

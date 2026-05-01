@@ -23,42 +23,98 @@ void WaveAnalyzer::smooth(const uint16_t *raw, int n, float *buf) const
     }
 }
 
-// --- iterative pedestal with outlier rejection (your CalcPedestal idea) -----
-void WaveAnalyzer::findPedestal(const float *buf, int n, Pedestal &ped) const
+// --- iterative pedestal with median/MAD bootstrap + outlier rejection -------
+//
+// Median + MAD (×1.4826) seed is robust against ≤50% contamination — a
+// previous-event tail or early ringing in the leading window biases the
+// simple-mean seed badly, which then loosens the σ-clip band and the
+// iteration can converge on a contaminated baseline.  Median-seeded σ-clip
+// recovers the right baseline immediately and matches the simple-mean
+// behaviour on clean baselines.
+void WaveAnalyzer::findPedestal(const float *buf, int start, int nped,
+                                Pedestal &ped) const
 {
-    int nped = std::min(cfg.ped_nsamples, n);
-    if (nped <= 0) { ped = {0, 0}; return; }
+    ped = {};
+    if (nped <= 0) return;
 
-    // copy pedestal samples to scratch (on stack, max 200 samples)
+    // Copy the window plus original sample indices (needed for slope below,
+    // since the survivor set after σ-clip is a subset of the window).
     float scratch[MAX_SAMPLES];
-    for (int i = 0; i < nped; ++i) scratch[i] = buf[i];
+    int   orig_idx[MAX_SAMPLES];
+    for (int i = 0; i < nped; ++i) {
+        scratch[i]  = buf[start + i];
+        orig_idx[i] = start + i;
+    }
+    int active = nped;
 
-    // compute initial mean + rms
-    auto calc = [](const float *s, int m, float &mean, float &rms) {
-        float sum = 0, sum2 = 0;
-        for (int i = 0; i < m; ++i) { sum += s[i]; sum2 += s[i] * s[i]; }
-        mean = sum / m;
-        float var = sum2 / m - mean * mean;
-        rms = (var > 0) ? std::sqrt(var) : 0;
-    };
+    // ── Median + MAD bootstrap.
+    float sorted[MAX_SAMPLES];
+    for (int i = 0; i < nped; ++i) sorted[i] = scratch[i];
+    std::sort(sorted, sorted + nped);
+    float mean = (nped % 2 == 1)
+               ? sorted[nped / 2]
+               : 0.5f * (sorted[nped / 2 - 1] + sorted[nped / 2]);
+    for (int i = 0; i < nped; ++i) sorted[i] = std::abs(scratch[i] - mean);
+    std::sort(sorted, sorted + nped);
+    const float mad = (nped % 2 == 1)
+                    ? sorted[nped / 2]
+                    : 0.5f * (sorted[nped / 2 - 1] + sorted[nped / 2]);
+    float rms = mad * 1.4826f;        // MAD → σ for normally-distributed noise
 
-    float mean, rms;
-    calc(scratch, nped, mean, rms);
-
-    // iterative outlier rejection: remove samples > 1σ from mean
+    // ── Iterative σ-clip from the robust seed.  scratch / orig_idx track
+    // surviving samples in lock-step so we can compute slope on the actual
+    // survivor set (not on samples that pass the final band post-hoc).
+    bool converged = false;
     for (int iter = 0; iter < cfg.ped_max_iter; ++iter) {
+        const float band = std::max(rms, cfg.ped_flatness);
         int count = 0;
-        for (int i = 0; i < nped; ++i) {
-            if (std::abs(scratch[i] - mean) < std::max(rms, cfg.ped_flatness))
-                scratch[count++] = scratch[i];
+        for (int i = 0; i < active; ++i) {
+            if (std::abs(scratch[i] - mean) < band) {
+                scratch[count]  = scratch[i];
+                orig_idx[count] = orig_idx[i];
+                ++count;
+            }
         }
-        if (count == nped || count < 5) break;
-        nped = count;
-        calc(scratch, nped, mean, rms);
+        if (count == active) { converged = true; break; }
+        if (count < 5) {
+            ped.quality |= Q_PED_TOO_FEW_SAMPLES;
+            active = count;
+            break;     // keep prior mean/rms — too few survivors to refit
+        }
+        active = count;
+        float sum = 0, sum2 = 0;
+        for (int i = 0; i < active; ++i) { sum += scratch[i]; sum2 += scratch[i] * scratch[i]; }
+        mean = sum / active;
+        const float var = sum2 / active - mean * mean;
+        rms = (var > 0) ? std::sqrt(var) : 0;
+    }
+    if (!converged && !(ped.quality & Q_PED_TOO_FEW_SAMPLES))
+        ped.quality |= Q_PED_NOT_CONVERGED;
+    if (rms < cfg.ped_flatness)
+        ped.quality |= Q_PED_FLOOR_ACTIVE;
+
+    // ── Linear least-squares slope on the survivors (ADC/sample).  Catches
+    // baseline drift / pulse-tail contamination that the σ-clip alone can
+    // hide (e.g. a slow tail tilts every sample similarly so none of them
+    // register as outliers).
+    float slope = 0.0f;
+    if (active >= 2) {
+        double sx = 0, sy = 0;
+        for (int i = 0; i < active; ++i) { sx += orig_idx[i]; sy += scratch[i]; }
+        const double xbar = sx / active, ybar = sy / active;
+        double sxy = 0, sxx = 0;
+        for (int i = 0; i < active; ++i) {
+            const double dx = orig_idx[i] - xbar;
+            sxy += dx * (scratch[i] - ybar);
+            sxx += dx * dx;
+        }
+        if (sxx > 0) slope = static_cast<float>(sxy / sxx);
     }
 
-    ped.mean = mean;
-    ped.rms  = rms;
+    ped.mean  = mean;
+    ped.rms   = rms;
+    ped.nused = static_cast<uint8_t>(active < 255 ? active : 255);
+    ped.slope = slope;
 }
 
 // --- local-maxima peak search (your SearchMaxima approach, zero-alloc) ------
@@ -194,8 +250,65 @@ void WaveAnalyzer::Analyze(const uint16_t *samples, int nsamples, WaveResult &re
     float buf[MAX_SAMPLES];
     smooth(samples, nsamples, buf);
 
-    findPedestal(buf, nsamples, result.ped);
+    auto window_overflow = [&](int wstart, int wlen) -> bool {
+        const uint16_t ovr = cfg.overflow;
+        for (int i = wstart; i < wstart + wlen; ++i)
+            if (samples[i] >= ovr) return true;
+        return false;
+    };
 
-    float thr = std::max(cfg.threshold * result.ped.rms, cfg.min_threshold);
+    const int nped_window = std::min(cfg.ped_nsamples, nsamples);
+
+    // ── Leading-window pedestal estimate.
+    Pedestal P_lead;
+    findPedestal(buf, 0, nped_window, P_lead);
+    if (window_overflow(0, nped_window))
+        P_lead.quality |= Q_PED_OVERFLOW;
+
+    // ── Adaptive: if the leading window looks suspicious (didn't converge,
+    // lost > 50% of samples to rejection, or hit overflow), try the
+    // trailing window — only if the two don't overlap.  Pick whichever
+    // has the lower RMS (with nused as tiebreaker); flag the choice with
+    // Q_PED_TRAILING_WINDOW.
+    Pedestal P_use         = P_lead;
+    int      ped_win_start = 0;
+    const bool lead_suspicious =
+        (P_lead.quality & (Q_PED_NOT_CONVERGED |
+                           Q_PED_TOO_FEW_SAMPLES |
+                           Q_PED_OVERFLOW))
+        || (P_lead.nused * 2 < nped_window);
+
+    if (lead_suspicious && nsamples >= 2 * nped_window) {
+        const int trail_start = nsamples - nped_window;
+        Pedestal P_trail;
+        findPedestal(buf, trail_start, nped_window, P_trail);
+        if (window_overflow(trail_start, nped_window))
+            P_trail.quality |= Q_PED_OVERFLOW;
+        const bool trail_better =
+            (P_trail.rms < P_lead.rms) ||
+            (P_trail.rms == P_lead.rms && P_trail.nused > P_lead.nused);
+        if (trail_better) {
+            P_use         = P_trail;
+            P_use.quality |= Q_PED_TRAILING_WINDOW;
+            ped_win_start = trail_start;
+        }
+    }
+    result.ped = P_use;
+
+    // ── Peak finding uses the chosen pedestal.
+    const float thr = std::max(cfg.threshold * result.ped.rms, cfg.min_threshold);
     findPeaks(samples, buf, nsamples, result.ped.mean, result.ped.rms, thr, result);
+
+    // ── Post-hoc: was a real pulse inside the pedestal window we used?
+    // Diagnostic for downstream filters — doesn't influence the estimate
+    // (the median+MAD seed already absorbs single-pulse contamination on
+    // most channels), but lets analyses optionally cut on clean events.
+    const int ped_win_end = ped_win_start + nped_window;
+    for (int p = 0; p < result.npeaks; ++p) {
+        const int pos = result.peaks[p].pos;
+        if (pos >= ped_win_start && pos < ped_win_end) {
+            result.ped.quality |= Q_PED_PULSE_IN_WINDOW;
+            break;
+        }
+    }
 }

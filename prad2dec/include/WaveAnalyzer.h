@@ -24,7 +24,7 @@ struct WaveResult {
     Pedestal ped;
     int      npeaks;
     Peak     peaks[MAX_PEAKS];
-    void clear() { ped = {0, 0}; npeaks = 0; }
+    void clear() { ped = {}; npeaks = 0; }
 };
 
 struct WaveConfig {
@@ -54,8 +54,13 @@ private:
     // smooth into pre-allocated buffer (stack array from caller)
     void smooth(const uint16_t *raw, int n, float *buf) const;
 
-    // iterative pedestal with outlier rejection
-    void findPedestal(const float *buf, int n, Pedestal &ped) const;
+    // Estimate pedestal mean/rms/slope/nused on samples [start, start+nped)
+    // of the smoothed buffer.  Median+MAD bootstrap then iterative σ-clip;
+    // sets Q_PED_NOT_CONVERGED / Q_PED_FLOOR_ACTIVE / Q_PED_TOO_FEW_SAMPLES
+    // per the converged state.  Q_PED_OVERFLOW / Q_PED_PULSE_IN_WINDOW /
+    // Q_PED_TRAILING_WINDOW are set by Analyze() (they need raw samples
+    // and the peak-finding result).
+    void findPedestal(const float *buf, int start, int nped, Pedestal &ped) const;
 
     // local-maxima search on smoothed data, fill peaks
     void findPeaks(const uint16_t *raw, const float *buf, int n,

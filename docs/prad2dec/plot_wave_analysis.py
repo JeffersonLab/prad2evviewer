@@ -144,7 +144,7 @@ def firmware_analyze(s, *, TET=10.0, NSB_ns=8, NSA_ns=128, NPED=3,
         while k <= i_peak and s[k] < Va:
             k += 1
         if k > i_peak:
-            quality = 0x08    # Q_VA_OUT_OF_RANGE
+            quality = 0x08    # Q_DAQ_VA_OUT_OF_RANGE
             coarse = i_peak
             fine = 0
             Vba = Vaa = float(s[i_peak])
@@ -166,12 +166,12 @@ def firmware_analyze(s, *, TET=10.0, NSB_ns=8, NSA_ns=128, NPED=3,
         whi = cross + nsa_s
         if wlo < 0:
             wlo = 0
-            quality |= 0x02    # Q_NSB_TRUNCATED
+            quality |= 0x02    # Q_DAQ_NSB_TRUNCATED
         if whi >= n:
             whi = n - 1
-            quality |= 0x04    # Q_NSA_TRUNCATED
+            quality |= 0x04    # Q_DAQ_NSA_TRUNCATED
         if i_peak >= n - 1:
-            quality |= 0x01    # Q_PEAK_AT_BOUNDARY
+            quality |= 0x01    # Q_DAQ_PEAK_AT_BOUNDARY
 
         integral = float(np.sum(sp[wlo:whi + 1]))
 

@@ -136,8 +136,18 @@ struct Peak {
     bool  overflow;
 };
 
+// Per-channel pedestal estimate from WaveAnalyzer.
+//   mean / rms  — final values after iterative outlier rejection
+//   nused       — samples that survived the rejection (≤ ped_nsamples)
+//   quality     — Q_PED_* bitmask (see below)
+//   slope       — least-squares slope across the surviving samples
+//                 (ADC/sample) — catches baseline drift / pulse-tail
+//                 contamination that the iterative cut alone hides.
 struct Pedestal {
-    float mean, rms;
+    float   mean, rms;
+    uint8_t nused;
+    uint8_t quality;
+    float   slope;
 };
 
 // --- firmware-faithful (Mode 1/2/3) analysis result -------------------------
@@ -145,17 +155,39 @@ struct Pedestal {
 // Quality bitmask — uint8_t so we have headroom past the firmware's 2-bit
 // field.  Multiple flags can compose: e.g. peak at boundary AND NSA truncated.
 //
-// Q_GOOD              = 0       no flags
-// Q_PEAK_AT_BOUNDARY  = 1 << 0  peak landed on the last sample
-// Q_NSB_TRUNCATED     = 1 << 1  cross - NSB clipped at 0
-// Q_NSA_TRUNCATED     = 1 << 2  cross + NSA clipped at N-1
-// Q_VA_OUT_OF_RANGE   = 1 << 3  Va not bracketed by samples on the leading edge
+// Q_DAQ_GOOD              = 0       no flags
+// Q_DAQ_PEAK_AT_BOUNDARY  = 1 << 0  peak landed on the last sample
+// Q_DAQ_NSB_TRUNCATED     = 1 << 1  cross - NSB clipped at 0
+// Q_DAQ_NSA_TRUNCATED     = 1 << 2  cross + NSA clipped at N-1
+// Q_DAQ_VA_OUT_OF_RANGE   = 1 << 3  Va not bracketed by samples on the leading edge
 //                                (very fast rise, or numerical edge case)
-constexpr uint8_t Q_GOOD             = 0;
-constexpr uint8_t Q_PEAK_AT_BOUNDARY = 1u << 0;
-constexpr uint8_t Q_NSB_TRUNCATED    = 1u << 1;
-constexpr uint8_t Q_NSA_TRUNCATED    = 1u << 2;
-constexpr uint8_t Q_VA_OUT_OF_RANGE  = 1u << 3;
+constexpr uint8_t Q_DAQ_GOOD             = 0;
+constexpr uint8_t Q_DAQ_PEAK_AT_BOUNDARY = 1u << 0;
+constexpr uint8_t Q_DAQ_NSB_TRUNCATED    = 1u << 1;
+constexpr uint8_t Q_DAQ_NSA_TRUNCATED    = 1u << 2;
+constexpr uint8_t Q_DAQ_VA_OUT_OF_RANGE  = 1u << 3;
+
+// Pedestal-fit quality bitmask — set by WaveAnalyzer.  Q_PED_GOOD (0)
+// means the iterative outlier rejection converged on the leading
+// window, the floor was inactive, and no pulse contamination was
+// detected.  The TRAILING_WINDOW bit is informational, not a problem
+// flag — it just records that adaptive logic preferred the trailing
+// samples over the leading ones.
+//
+// Q_PED_GOOD             = 0       no flags
+// Q_PED_NOT_CONVERGED    = 1 << 0  ped_max_iter hit, kept-mask still moving
+// Q_PED_FLOOR_ACTIVE     = 1 << 1  rms < ped_flatness — floor was the active band
+// Q_PED_TOO_FEW_SAMPLES  = 1 << 2  < 5 samples survived (rejection aborted)
+// Q_PED_PULSE_IN_WINDOW  = 1 << 3  a peak landed at pos < ped_nsamples
+// Q_PED_OVERFLOW         = 1 << 4  any raw sample in the window hit cfg.overflow
+// Q_PED_TRAILING_WINDOW  = 1 << 5  estimate came from trailing samples (adaptive)
+constexpr uint8_t Q_PED_GOOD             = 0;
+constexpr uint8_t Q_PED_NOT_CONVERGED    = 1u << 0;
+constexpr uint8_t Q_PED_FLOOR_ACTIVE     = 1u << 1;
+constexpr uint8_t Q_PED_TOO_FEW_SAMPLES  = 1u << 2;
+constexpr uint8_t Q_PED_PULSE_IN_WINDOW  = 1u << 3;
+constexpr uint8_t Q_PED_OVERFLOW         = 1u << 4;
+constexpr uint8_t Q_PED_TRAILING_WINDOW  = 1u << 5;
 
 // One firmware-mode pulse (Mode 1 + Mode 2 + Mode 3 combined).
 // All ADC values are pedestal-subtracted (s' = max(0, s - PED)).
@@ -173,7 +205,7 @@ struct DaqPeak {
     float    integral;        // Σ s' over [cross-NSB, cross+NSA] (Mode 2)
     int      window_lo;       // clamped Mode 1 window start (inclusive)
     int      window_hi;       // clamped Mode 1 window end   (inclusive)
-    uint8_t  quality;         // bitmask of Q_* flags above
+    uint8_t  quality;         // bitmask of Q_DAQ_* flags above
 };
 
 struct DaqWaveResult {

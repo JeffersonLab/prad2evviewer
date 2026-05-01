@@ -80,9 +80,16 @@ struct RawEventData {
     uint16_t     samples[kMaxChannels][fdec::MAX_SAMPLES] = {};
     float        gain_factor[kMaxChannels] = {};   // 1.0 for non-HyCal types
 
-    // Optional soft-analyzer peak data (gated on -p flag in replay_rawdata)
+    // Optional soft-analyzer peak data (gated on -p flag in replay_rawdata).
+    //
+    // Pedestal-quality fields (ped_nused / ped_quality / ped_slope) are
+    // produced by WaveAnalyzer alongside ped_mean / ped_rms — see the
+    // Q_PED_* bitmask in Fadc250Data.h for ped_quality semantics.
     float   ped_mean[kMaxChannels]                       = {};
     float   ped_rms[kMaxChannels]                        = {};
+    uint8_t ped_nused[kMaxChannels]                      = {};
+    uint8_t ped_quality[kMaxChannels]                    = {};
+    float   ped_slope[kMaxChannels]                      = {};
     uint8_t npeaks[kMaxChannels]                         = {};
     float   peak_height[kMaxChannels][fdec::MAX_PEAKS]   = {};
     float   peak_time[kMaxChannels][fdec::MAX_PEAKS]     = {};
@@ -99,8 +106,8 @@ struct RawEventData {
     //                      whenever the leading edge spans multiple samples)
     //   daq_peak_coarse  — 4-ns clock index of Vba (10-bit firmware field)
     //   daq_peak_fine    — sub-sample fine bits, 0..63 (62.5 ps LSB)
-    //   daq_peak_quality — bitmask: Q_PEAK_AT_BOUNDARY|Q_NSB_TRUNCATED|
-    //                      Q_NSA_TRUNCATED|Q_VA_OUT_OF_RANGE (see Fadc250Data.h)
+    //   daq_peak_quality — bitmask: Q_DAQ_PEAK_AT_BOUNDARY|Q_DAQ_NSB_TRUNCATED|
+    //                      Q_DAQ_NSA_TRUNCATED|Q_DAQ_VA_OUT_OF_RANGE (see Fadc250Data.h)
     uint8_t daq_npeaks[kMaxChannels] = {};
     float   daq_peak_vp[kMaxChannels][fdec::MAX_PEAKS]       = {};
     float   daq_peak_integral[kMaxChannels][fdec::MAX_PEAKS] = {};

@@ -329,7 +329,7 @@ The shaded band in the right panel is exactly this sum.
 
 [[File:WA_fig2_firmware_analysis.png|center|1100px|Firmware TDC bracket (left) and Mode-2 integration window with NSB/NSA (right)]]
 
-'''8. Quality bitmask.''' <code>0x00</code> = <code>Q_GOOD</code>. Set bits would indicate:
+'''8. Quality bitmask.''' <code>0x00</code> = <code>Q_DAQ_GOOD</code>. Set bits would indicate:
 
 {| class="wikitable"
 ! bit
@@ -337,19 +337,19 @@ The shaded band in the right panel is exactly this sum.
 ! condition
 |-
 | <code>1 << 0</code>
-| <code>Q_PEAK_AT_BOUNDARY</code>
+| <code>Q_DAQ_PEAK_AT_BOUNDARY</code>
 | peak landed on the last sample
 |-
 | <code>1 << 1</code>
-| <code>Q_NSB_TRUNCATED</code>
+| <code>Q_DAQ_NSB_TRUNCATED</code>
 | <code>cross − NSB_s < 0</code>, window clipped
 |-
 | <code>1 << 2</code>
-| <code>Q_NSA_TRUNCATED</code>
+| <code>Q_DAQ_NSA_TRUNCATED</code>
 | <code>cross + NSA_s ≥ N</code>, window clipped
 |-
 | <code>1 << 3</code>
-| <code>Q_VA_OUT_OF_RANGE</code>
+| <code>Q_DAQ_VA_OUT_OF_RANGE</code>
 | <code>Va</code> not bracketed on the rising edge (numerical edge case)
 |}
 

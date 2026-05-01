@@ -65,14 +65,32 @@ shown are the defaults.
 `buf[i] = (raw[i−1]·w + raw[i] + raw[i+1]·w) / (1 + 2w)` with
 `w = 1 − 1/(res+1)`. With `res = 1` smoothing is disabled.
 
-**2. Iterative pedestal.** First `ped_nsamples = 30` samples of the
-*smoothed* trace. Iterate up to `ped_max_iter = 3` times:
+**2. Iterative pedestal (median/MAD bootstrap).** First `ped_nsamples = 30`
+samples of the *smoothed* trace.
 
-- compute `mean`, `rms`
-- drop samples deviating more than `max(rms, ped_flatness)` from the mean
-- re-compute
+- Seed `mean` with the **median** and `rms` with **MAD × 1.4826** of the
+  window (robust against ≤50 % contamination — a previous-event tail or
+  early ringing biases a simple-mean seed badly, loosens the σ-clip band,
+  and the iteration can converge on a contaminated baseline).
+- Iterate up to `ped_max_iter = 3` times: drop samples deviating more
+  than `max(rms, ped_flatness)` from the mean, then re-compute mean/rms
+  on the survivors.
+- Track `nused` (surviving sample count) and a `Q_PED_*` quality bitmask
+  (see [§ Pedestal quality](#pedestal-quality) below).
+- Compute a least-squares `slope` (ADC/sample) on the survivors — catches
+  baseline drift that the σ-clip alone hides.
 
-For our trace: `mean = 145.61`, `rms = 0.45` after convergence.
+For our trace: `mean = 145.61`, `rms = 0.45`, `nused = 26`, `slope ≈ 0`,
+`quality = Q_PED_GOOD` after convergence.
+
+**2b. Adaptive window.** If the leading window looks suspicious
+(`Q_PED_NOT_CONVERGED`, `Q_PED_TOO_FEW_SAMPLES`, `Q_PED_OVERFLOW`, or
+`nused < ped_nsamples / 2`) and the waveform is long enough that the
+last `ped_nsamples` samples don't overlap the leading window
+(`nsamples ≥ 2 · ped_nsamples`), the analyzer also estimates the
+pedestal on the trailing samples and uses whichever has the lower RMS
+(with `nused` as the tiebreaker).  When the trailing estimate wins,
+`Q_PED_TRAILING_WINDOW` is set.
 
 **3. Threshold.** `thr = max(threshold·rms, min_threshold)` =
 `max(5·0.45, 3.0) = 3.0`. The hard floor `min_threshold` keeps the
@@ -105,6 +123,39 @@ For our trace:
 | `peak.integral` | 9600 (ADC·sample, pedsub) |
 
 ![waveform](figs/fig3_soft_analysis.png)
+
+### Pedestal quality
+
+The analyzer reports four scalars per channel that together describe how
+trustworthy the pedestal estimate is — written to the `events` tree as
+`hycal.ped_{mean,rms,nused,quality,slope}` (see
+[`docs/REPLAYED_DATA.md`](../REPLAYED_DATA.md)):
+
+| Field | Type | Use |
+|---|---|---|
+| `ped_mean`    | `float` | Pedestal mean after rejection |
+| `ped_rms`     | `float` | RMS after rejection |
+| `ped_nused`   | `uint8` | # samples that survived (compare to `ped_nsamples = 30`) |
+| `ped_slope`   | `float` | LSQ drift (ADC/sample) on the survivors — non-zero suggests baseline tilt or pulse-tail contamination |
+| `ped_quality` | `uint8` | `Q_PED_*` bitmask, see below |
+
+Quality flags (defined in `prad2dec/include/Fadc250Data.h`):
+
+| Bit | Flag | Set when |
+|---|---|---|
+| `0`     | `Q_PED_GOOD`             | clean estimate, no flags |
+| `1<<0`  | `Q_PED_NOT_CONVERGED`    | `ped_max_iter` exhausted, kept-mask still moving |
+| `1<<1`  | `Q_PED_FLOOR_ACTIVE`     | `rms < ped_flatness` — `ped_flatness` was the active band (typical for very quiet channels; informational) |
+| `1<<2`  | `Q_PED_TOO_FEW_SAMPLES`  | < 5 samples survived rejection (rejection aborted) |
+| `1<<3`  | `Q_PED_PULSE_IN_WINDOW`  | `findPeaks` returned a peak with `pos` inside the pedestal window we used |
+| `1<<4`  | `Q_PED_OVERFLOW`         | a raw window sample hit `cfg.overflow` (4095) |
+| `1<<5`  | `Q_PED_TRAILING_WINDOW`  | adaptive logic chose the trailing window over the leading one (informational, not a problem flag) |
+
+A clean-event filter is `ped_quality == 0`.  For analyses that care
+about the pedestal stability rather than the peak heights, cutting on
+`Q_PED_NOT_CONVERGED | Q_PED_TOO_FEW_SAMPLES | Q_PED_PULSE_IN_WINDOW`
+removes the events where the iterative cut couldn't settle on a clean
+baseline.
 
 ### Parameter sensitivity
 
@@ -271,14 +322,14 @@ The shaded band in `fig2` (right panel) is exactly this sum.
 
 ![firmware](figs/fig2_firmware_analysis.png)
 
-**8. Quality bitmask.** `0x00` = `Q_GOOD`. Set bits would indicate:
+**8. Quality bitmask.** `0x00` = `Q_DAQ_GOOD`. Set bits would indicate:
 
 | bit | flag | condition |
 |---|---|---|
-| `1 << 0` | `Q_PEAK_AT_BOUNDARY` | peak landed on the last sample |
-| `1 << 1` | `Q_NSB_TRUNCATED`   | `cross − NSB_s < 0`, window clipped |
-| `1 << 2` | `Q_NSA_TRUNCATED`   | `cross + NSA_s ≥ N`, window clipped |
-| `1 << 3` | `Q_VA_OUT_OF_RANGE` | `Va` not bracketed on the rising edge (numerical edge case) |
+| `1 << 0` | `Q_DAQ_PEAK_AT_BOUNDARY` | peak landed on the last sample |
+| `1 << 1` | `Q_DAQ_NSB_TRUNCATED`   | `cross − NSB_s < 0`, window clipped |
+| `1 << 2` | `Q_DAQ_NSA_TRUNCATED`   | `cross + NSA_s ≥ N`, window clipped |
+| `1 << 3` | `Q_DAQ_VA_OUT_OF_RANGE` | `Va` not bracketed on the rising edge (numerical edge case) |
 
 ## Side-by-side comparison
 

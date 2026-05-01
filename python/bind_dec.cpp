@@ -202,10 +202,18 @@ void bind_fadc(py::module_ &m)
         .def_readwrite("overflow", &fdec::Peak::overflow);
 
     py::class_<fdec::Pedestal>(m, "Pedestal",
-        "Per-channel pedestal (mean + RMS).")
+        "Per-channel pedestal estimate from WaveAnalyzer.\n\n"
+        "Fields:\n"
+        "  mean / rms — final values after iterative outlier rejection\n"
+        "  nused      — samples that survived rejection (≤ ped_nsamples)\n"
+        "  quality    — Q_PED_* bitmask (see module-level Q_PED_* attrs)\n"
+        "  slope      — least-squares slope across the survivors (ADC/sample)")
         .def(py::init<>())
-        .def_readwrite("mean", &fdec::Pedestal::mean)
-        .def_readwrite("rms",  &fdec::Pedestal::rms);
+        .def_readwrite("mean",    &fdec::Pedestal::mean)
+        .def_readwrite("rms",     &fdec::Pedestal::rms)
+        .def_readwrite("nused",   &fdec::Pedestal::nused)
+        .def_readwrite("quality", &fdec::Pedestal::quality)
+        .def_readwrite("slope",   &fdec::Pedestal::slope);
 
     py::class_<fdec::WaveConfig>(m, "WaveConfig",
         "Knobs for WaveAnalyzer (smoothing, thresholds, pedestal window, ...).")
@@ -251,12 +259,22 @@ void bind_fadc(py::module_ &m)
 
     // ----- Firmware-faithful (Mode 1/2/3) analyzer -----------------------
     // Quality bitmask constants — exposed at module scope so callers can
-    // test pulse.quality & dec.Q_PEAK_AT_BOUNDARY etc.
-    m.attr("Q_GOOD")             = py::int_(fdec::Q_GOOD);
-    m.attr("Q_PEAK_AT_BOUNDARY") = py::int_(fdec::Q_PEAK_AT_BOUNDARY);
-    m.attr("Q_NSB_TRUNCATED")    = py::int_(fdec::Q_NSB_TRUNCATED);
-    m.attr("Q_NSA_TRUNCATED")    = py::int_(fdec::Q_NSA_TRUNCATED);
-    m.attr("Q_VA_OUT_OF_RANGE")  = py::int_(fdec::Q_VA_OUT_OF_RANGE);
+    // test pulse.quality & dec.Q_DAQ_PEAK_AT_BOUNDARY etc.
+    m.attr("Q_DAQ_GOOD")             = py::int_(fdec::Q_DAQ_GOOD);
+    m.attr("Q_DAQ_PEAK_AT_BOUNDARY") = py::int_(fdec::Q_DAQ_PEAK_AT_BOUNDARY);
+    m.attr("Q_DAQ_NSB_TRUNCATED")    = py::int_(fdec::Q_DAQ_NSB_TRUNCATED);
+    m.attr("Q_DAQ_NSA_TRUNCATED")    = py::int_(fdec::Q_DAQ_NSA_TRUNCATED);
+    m.attr("Q_DAQ_VA_OUT_OF_RANGE")  = py::int_(fdec::Q_DAQ_VA_OUT_OF_RANGE);
+
+    // Pedestal-fit quality bitmask — exposed so callers can filter on
+    // Pedestal.quality (e.g. dec.Q_PED_PULSE_IN_WINDOW).
+    m.attr("Q_PED_GOOD")             = py::int_(fdec::Q_PED_GOOD);
+    m.attr("Q_PED_NOT_CONVERGED")    = py::int_(fdec::Q_PED_NOT_CONVERGED);
+    m.attr("Q_PED_FLOOR_ACTIVE")     = py::int_(fdec::Q_PED_FLOOR_ACTIVE);
+    m.attr("Q_PED_TOO_FEW_SAMPLES")  = py::int_(fdec::Q_PED_TOO_FEW_SAMPLES);
+    m.attr("Q_PED_PULSE_IN_WINDOW")  = py::int_(fdec::Q_PED_PULSE_IN_WINDOW);
+    m.attr("Q_PED_OVERFLOW")         = py::int_(fdec::Q_PED_OVERFLOW);
+    m.attr("Q_PED_TRAILING_WINDOW")  = py::int_(fdec::Q_PED_TRAILING_WINDOW);
 
     py::class_<fdec::DaqPeak>(m, "DaqPeak",
         "One firmware-mode pulse (Mode 1 + Mode 2 + Mode 3 result).")

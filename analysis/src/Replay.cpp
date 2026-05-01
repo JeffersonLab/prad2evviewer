@@ -295,8 +295,11 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                             // consumes — only run it when its output is
                             // being written.
                             ana.Analyze(cd.samples, cd.nsamples, wres);
-                            ev->ped_mean[nch] = wres.ped.mean;
-                            ev->ped_rms[nch]  = wres.ped.rms;
+                            ev->ped_mean[nch]    = wres.ped.mean;
+                            ev->ped_rms[nch]     = wres.ped.rms;
+                            ev->ped_nused[nch]   = wres.ped.nused;
+                            ev->ped_quality[nch] = wres.ped.quality;
+                            ev->ped_slope[nch]   = wres.ped.slope;
                             ev->npeaks[nch]   = static_cast<uint8_t>(wres.npeaks);
                             for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
                                 ev->peak_height[nch][p]   = wres.peaks[p].height;

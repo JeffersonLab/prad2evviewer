@@ -69,10 +69,16 @@ inline void SetRawWriteBranches(TTree *tree, RawEventData &ev, bool with_peaks)
     tree->Branch("hycal.gain_factor", ev.gain_factor,  "hycal.gain_factor[hycal.nch]/F");
 
     if (with_peaks) {
-        // ped_mean / ped_rms are products of the soft analyzer — only
-        // meaningful when the analyzer ran.
+        // ped_mean / ped_rms / ped_nused / ped_quality / ped_slope are
+        // products of the soft analyzer — only meaningful when the
+        // analyzer ran.  ped_quality is a Q_PED_* bitmask
+        // (NOT_CONVERGED / FLOOR_ACTIVE / TOO_FEW_SAMPLES /
+        // PULSE_IN_WINDOW / OVERFLOW / TRAILING_WINDOW; see Fadc250Data.h).
         tree->Branch("hycal.ped_mean",      ev.ped_mean,       "hycal.ped_mean[hycal.nch]/F");
         tree->Branch("hycal.ped_rms",       ev.ped_rms,        "hycal.ped_rms[hycal.nch]/F");
+        tree->Branch("hycal.ped_nused",     ev.ped_nused,      "hycal.ped_nused[hycal.nch]/b");
+        tree->Branch("hycal.ped_quality",   ev.ped_quality,    "hycal.ped_quality[hycal.nch]/b");
+        tree->Branch("hycal.ped_slope",     ev.ped_slope,      "hycal.ped_slope[hycal.nch]/F");
         tree->Branch("hycal.npeaks",        ev.npeaks,         "hycal.npeaks[hycal.nch]/b");
         tree->Branch("hycal.peak_height",   ev.peak_height,
                      Form("hycal.peak_height[hycal.nch][%d]/F",   fdec::MAX_PEAKS));
@@ -144,6 +150,11 @@ inline RawReadStatus SetRawReadBranches(TTree *tree, RawEventData &ev)
     if (s.has_peaks) {
         bind("hycal.ped_mean",      ev.ped_mean);
         bind("hycal.ped_rms",       ev.ped_rms);
+        // ped_nused / ped_quality / ped_slope are post-Mar-2026 additions —
+        // bind() silently no-ops on older files that pre-date them.
+        bind("hycal.ped_nused",     ev.ped_nused);
+        bind("hycal.ped_quality",   ev.ped_quality);
+        bind("hycal.ped_slope",     ev.ped_slope);
         bind("hycal.npeaks",        ev.npeaks);
         bind("hycal.peak_height",   ev.peak_height);
         bind("hycal.peak_time",     ev.peak_time);

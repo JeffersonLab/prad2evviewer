@@ -174,11 +174,11 @@ bitmask so flags can compose:
 
 | Constant | Bit | Meaning |
 |---|---|---|
-| `Q_GOOD` | 0 | no flags set |
-| `Q_PEAK_AT_BOUNDARY` | 1 << 0 | `i_peak == N − 1` (pulse may extend past window) |
-| `Q_NSB_TRUNCATED` | 1 << 1 | `cross − NSB < 0` |
-| `Q_NSA_TRUNCATED` | 1 << 2 | `cross + NSA ≥ N` |
-| `Q_VA_OUT_OF_RANGE` | 1 << 3 | Va not bracketed by leading-edge samples (very fast rise) |
+| `Q_DAQ_GOOD` | 0 | no flags set |
+| `Q_DAQ_PEAK_AT_BOUNDARY` | 1 << 0 | `i_peak == N − 1` (pulse may extend past window) |
+| `Q_DAQ_NSB_TRUNCATED` | 1 << 1 | `cross − NSB < 0` |
+| `Q_DAQ_NSA_TRUNCATED` | 1 << 2 | `cross + NSA ≥ N` |
+| `Q_DAQ_VA_OUT_OF_RANGE` | 1 << 3 | Va not bracketed by leading-edge samples (very fast rise) |
 
 ## 8. Mode-execution order (manual ~1148, FIRMWARE block diagram)
 
@@ -235,8 +235,8 @@ Manual step 6: *"Read until Vram < Vmin. End of first pulse."*  With
 
 If `cross + NSA ≥ N`, Mode 1 returns a shorter array and Mode 2 sums fewer
 samples.  The manual's 2-bit quality field covers this case in firmware; in
-software we set `Q_NSA_TRUNCATED` (and similarly `Q_NSB_TRUNCATED` /
-`Q_PEAK_AT_BOUNDARY`).
+software we set `Q_DAQ_NSA_TRUNCATED` (and similarly `Q_DAQ_NSB_TRUNCATED` /
+`Q_DAQ_PEAK_AT_BOUNDARY`).
 
 ### 9.4 Time offset between truth and reported `T_ns`
 

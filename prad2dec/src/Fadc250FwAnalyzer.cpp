@@ -190,13 +190,13 @@ void Fadc250FwAnalyzer::Analyze(const uint16_t *raw, int n, float PED,
 
         float Vba, Vaa;
         int   coarse;
-        uint8_t quality = Q_GOOD;
+        uint8_t quality = Q_DAQ_GOOD;
 
         if (k <= i_start) {
             // Va sits at or below the very first pulse sample (rise faster
             // than one sample period — Va was crossed between s[i_start-1]
             // and s[i_start]).  Bracket the transition into the pulse.
-            quality |= Q_VA_OUT_OF_RANGE;
+            quality |= Q_DAQ_VA_OUT_OF_RANGE;
             if (i_start - 1 >= 0) {
                 Vba    = s[i_start - 1];
                 Vaa    = s[i_start];
@@ -209,7 +209,7 @@ void Fadc250FwAnalyzer::Analyze(const uint16_t *raw, int n, float PED,
         } else if (k > i_peak) {
             // Va above the peak — should not happen with Va = (Vmin+Vp)/2,
             // but guard anyway.
-            quality |= Q_VA_OUT_OF_RANGE;
+            quality |= Q_DAQ_VA_OUT_OF_RANGE;
             Vba    = s[i_peak];
             Vaa    = s[i_peak];
             coarse = i_peak;
@@ -250,9 +250,9 @@ void Fadc250FwAnalyzer::Analyze(const uint16_t *raw, int n, float PED,
         // integrals.
         int wlo = cross - nsb;
         int whi = cross + nsa;
-        if (wlo < 0)      { wlo = 0;       quality |= Q_NSB_TRUNCATED; }
-        if (whi >= n)     { whi = n - 1;   quality |= Q_NSA_TRUNCATED; }
-        if (i_peak >= n - 1) quality |= Q_PEAK_AT_BOUNDARY;
+        if (wlo < 0)      { wlo = 0;       quality |= Q_DAQ_NSB_TRUNCATED; }
+        if (whi >= n)     { whi = n - 1;   quality |= Q_DAQ_NSA_TRUNCATED; }
+        if (i_peak >= n - 1) quality |= Q_DAQ_PEAK_AT_BOUNDARY;
 
         // Mode 2 — Σ s' over the (clamped) window.
         float integral = 0.0f;

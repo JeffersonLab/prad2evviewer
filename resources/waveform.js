@@ -12,19 +12,19 @@ let wfRequestId = 0;  // sequence guard for async waveform fetches
 const NS_PER_SAMPLE = 4;  // FADC250: 250 MHz → 4 ns/sample
 
 // Firmware quality bitmask (must match prad2dec/include/Fadc250Data.h).
-const Q_GOOD             = 0;
-const Q_PEAK_AT_BOUNDARY = 1 << 0;
-const Q_NSB_TRUNCATED    = 1 << 1;
-const Q_NSA_TRUNCATED    = 1 << 2;
-const Q_VA_OUT_OF_RANGE  = 1 << 3;
+const Q_DAQ_GOOD             = 0;
+const Q_DAQ_PEAK_AT_BOUNDARY = 1 << 0;
+const Q_DAQ_NSB_TRUNCATED    = 1 << 1;
+const Q_DAQ_NSA_TRUNCATED    = 1 << 2;
+const Q_DAQ_VA_OUT_OF_RANGE  = 1 << 3;
 
 function qualityLabel(q){
     if(!q) return 'OK';
     const flags=[];
-    if(q & Q_PEAK_AT_BOUNDARY) flags.push('peakBnd');
-    if(q & Q_NSB_TRUNCATED)    flags.push('NSBtrunc');
-    if(q & Q_NSA_TRUNCATED)    flags.push('NSAtrunc');
-    if(q & Q_VA_OUT_OF_RANGE)  flags.push('VaOOR');
+    if(q & Q_DAQ_PEAK_AT_BOUNDARY) flags.push('peakBnd');
+    if(q & Q_DAQ_NSB_TRUNCATED)    flags.push('NSBtrunc');
+    if(q & Q_DAQ_NSA_TRUNCATED)    flags.push('NSAtrunc');
+    if(q & Q_DAQ_VA_OUT_OF_RANGE)  flags.push('VaOOR');
     return flags.join('+');
 }
 

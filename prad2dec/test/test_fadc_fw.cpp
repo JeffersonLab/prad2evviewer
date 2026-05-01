@@ -125,7 +125,7 @@ void test_T1_single_pulse()
         EXPECT_NEAR(p.integral, 400.0f, 1e-4f);
         EXPECT_EQ(p.window_lo, 2);
         EXPECT_EQ(p.window_hi, 16);
-        EXPECT_EQ(p.quality, Q_GOOD);
+        EXPECT_EQ(p.quality, Q_DAQ_GOOD);
     }
 }
 
@@ -196,7 +196,7 @@ void test_T3_two_pulses()
         EXPECT_NEAR(p1.integral, 415.0f, 1e-4f);
         EXPECT_EQ(p1.window_lo, 23);
         EXPECT_EQ(p1.window_hi, 37);
-        EXPECT_EQ(p1.quality, Q_GOOD);
+        EXPECT_EQ(p1.quality, Q_DAQ_GOOD);
     }
 }
 
@@ -234,9 +234,9 @@ void test_T4_nsa_truncated()
         EXPECT_NEAR(p.integral, 360.0f, 1e-4f);
         // Quality should at least set NSA-truncated.  Boundary flag also
         // legal (peak at sample 9, n=14 — i_peak ≠ n-1 here, so just NSA).
-        EXPECT_EQ((int)(p.quality & Q_NSA_TRUNCATED), (int)Q_NSA_TRUNCATED);
-        EXPECT_EQ((int)(p.quality & Q_NSB_TRUNCATED), 0);
-        EXPECT_EQ((int)(p.quality & Q_PEAK_AT_BOUNDARY), 0);
+        EXPECT_EQ((int)(p.quality & Q_DAQ_NSA_TRUNCATED), (int)Q_DAQ_NSA_TRUNCATED);
+        EXPECT_EQ((int)(p.quality & Q_DAQ_NSB_TRUNCATED), 0);
+        EXPECT_EQ((int)(p.quality & Q_DAQ_PEAK_AT_BOUNDARY), 0);
     }
 }
 
@@ -275,8 +275,8 @@ void test_T5_nsb_truncated()
         EXPECT_EQ(p.window_lo, 0);
         EXPECT_EQ(p.window_hi, 14);
         EXPECT_NEAR(p.integral, 360.0f, 1e-4f);
-        EXPECT_EQ((int)(p.quality & Q_NSB_TRUNCATED), (int)Q_NSB_TRUNCATED);
-        EXPECT_EQ((int)(p.quality & Q_NSA_TRUNCATED), 0);
+        EXPECT_EQ((int)(p.quality & Q_DAQ_NSB_TRUNCATED), (int)Q_DAQ_NSB_TRUNCATED);
+        EXPECT_EQ((int)(p.quality & Q_DAQ_NSA_TRUNCATED), 0);
     }
 }
 
@@ -284,7 +284,7 @@ void test_T5_nsb_truncated()
 // T6 — Boundary peak (i_peak == n-1).
 //
 // Monotonically rising waveform — peak walks to last sample.  Quality
-// gets Q_PEAK_AT_BOUNDARY ∪ Q_NSA_TRUNCATED.
+// gets Q_DAQ_PEAK_AT_BOUNDARY ∪ Q_DAQ_NSA_TRUNCATED.
 //
 //   pedsub s = [0,0,0,0, 10,30,70,100,130,160]   (n=10)
 //   i_peak = 9, Vpeak = 160.  cross: s[6]=70 first > 50 → cross = 6.
@@ -319,8 +319,8 @@ void test_T6_boundary_peak()
         EXPECT_EQ(p.window_lo, 2);
         EXPECT_EQ(p.window_hi, 9);
         EXPECT_NEAR(p.integral, 500.0f, 1e-4f);
-        EXPECT_EQ((int)(p.quality & Q_PEAK_AT_BOUNDARY), (int)Q_PEAK_AT_BOUNDARY);
-        EXPECT_EQ((int)(p.quality & Q_NSA_TRUNCATED),    (int)Q_NSA_TRUNCATED);
+        EXPECT_EQ((int)(p.quality & Q_DAQ_PEAK_AT_BOUNDARY), (int)Q_DAQ_PEAK_AT_BOUNDARY);
+        EXPECT_EQ((int)(p.quality & Q_DAQ_NSA_TRUNCATED),    (int)Q_DAQ_NSA_TRUNCATED);
     }
 }
 

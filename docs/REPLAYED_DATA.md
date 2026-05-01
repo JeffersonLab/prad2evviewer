@@ -50,19 +50,38 @@ LMS = 3100 (Pin) / 3101..3103.
 
 ### Soft-analyzer outputs — only with `-p`
 
-Local-maxima search with iterative-outlier-rejection pedestal
-(`fdec::WaveAnalyzer`).  Up to `MAX_PEAKS = 8` peaks per channel.
+Local-maxima search with median/MAD-bootstrapped iterative-outlier-rejection
+pedestal (`fdec::WaveAnalyzer`).  Up to `MAX_PEAKS = 8` peaks per channel.
 Without `-p`, the soft analyzer is skipped entirely (the pedestal estimate
 that the firmware analyzer uses is also gated on `-p`).
 
 | Branch | Type | Meaning |
 |---|---|---|
-| `hycal.ped_mean`       | `float[nch]`      | Soft-analyzer pedestal mean |
-| `hycal.ped_rms`        | `float[nch]`      | Soft-analyzer pedestal RMS |
+| `hycal.ped_mean`       | `float[nch]`      | Pedestal mean (post-rejection) |
+| `hycal.ped_rms`        | `float[nch]`      | Pedestal RMS  (post-rejection) |
+| `hycal.ped_nused`      | `uint8[nch]`      | # samples surviving outlier rejection |
+| `hycal.ped_quality`    | `uint8[nch]`      | `Q_PED_*` bitmask (legend below) |
+| `hycal.ped_slope`      | `float[nch]`      | Linear drift across surviving samples (ADC/sample) |
 | `hycal.npeaks`         | `uint8[nch]`      | Soft peaks found |
 | `hycal.peak_height`    | `float[nch][8]`   | Peak height above pedestal |
 | `hycal.peak_time`      | `float[nch][8]`   | Peak time (ns) |
 | `hycal.peak_integral`  | `float[nch][8]`   | Peak integral |
+
+`hycal.ped_quality` bits (defined in `prad2dec/include/Fadc250Data.h`):
+
+| Bit | Flag | Meaning |
+|---|---|---|
+| `0`     | `Q_PED_GOOD`             | clean pedestal — no flags set |
+| `1<<0`  | `Q_PED_NOT_CONVERGED`    | `ped_max_iter` exhausted, kept-mask still moving |
+| `1<<1`  | `Q_PED_FLOOR_ACTIVE`     | `rms < ped_flatness` — `ped_flatness` was the active band (typical for very quiet channels; informational) |
+| `1<<2`  | `Q_PED_TOO_FEW_SAMPLES`  | < 5 samples survived rejection — estimate is unreliable |
+| `1<<3`  | `Q_PED_PULSE_IN_WINDOW`  | a peak landed inside the pedestal window we used |
+| `1<<4`  | `Q_PED_OVERFLOW`         | a raw sample in the window hit the 12-bit overflow (4095) |
+| `1<<5`  | `Q_PED_TRAILING_WINDOW`  | adaptive logic preferred trailing samples over the leading window (informational, not a problem flag) |
+
+A clean event filter is just `hycal.ped_quality == 0`; the
+`PULSE_IN_WINDOW` and `TRAILING_WINDOW` flags are useful diagnostics for
+events that fail it.
 
 ### Firmware (FADC250 Mode 1/2/3) peaks — only with `-p`
 
@@ -83,7 +102,7 @@ for the algorithm spec.
 | `hycal.daq_peak_pos`      | `int[nch][8]`   | Sample of Vpeak |
 | `hycal.daq_peak_coarse`   | `int[nch][8]`   | 4-ns clock index of Vba (10-bit) |
 | `hycal.daq_peak_fine`     | `int[nch][8]`   | Fine bits 0..63 (6-bit) |
-| `hycal.daq_peak_quality`  | `uint8[nch][8]` | Bitmask: `1` = peak@boundary, `2` = NSB-trunc, `4` = NSA-trunc, `8` = Va out-of-range |
+| `hycal.daq_peak_quality`  | `uint8[nch][8]` | `Q_DAQ_*` bitmask: `1` = peak@boundary, `2` = NSB-trunc, `4` = NSA-trunc, `8` = Va out-of-range |
 
 ### GEM strips — always written
 
