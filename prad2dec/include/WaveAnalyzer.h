@@ -50,11 +50,14 @@ public:
     // Analyze one channel. Fills result in-place, no heap allocation.
     void Analyze(const uint16_t *samples, int nsamples, WaveResult &result) const;
 
+    // Public so callers (and Python bindings) can access just the
+    // smoothed buffer for plotting / debugging without re-running the
+    // whole analyzer.  Stateless: writes only to `buf`.
+    void smooth(const uint16_t *raw, int n, float *buf) const;
+
     WaveConfig cfg;
 
 private:
-    // smooth into pre-allocated buffer (stack array from caller)
-    void smooth(const uint16_t *raw, int n, float *buf) const;
 
     // Estimate pedestal mean/rms/slope/nused on samples [start, start+nped)
     // of the smoothed buffer.  Median+MAD bootstrap then iterative σ-clip;

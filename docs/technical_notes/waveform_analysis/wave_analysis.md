@@ -43,6 +43,50 @@ Used for HyCal calibration / monitoring where we want a robust peak
 height and a generous integral that follows the actual pulse shape rather
 than a fixed firmware window.
 
+### Algorithm highlights
+
+The analyzer is tuned for noisy production data — the design choices
+below all address failure modes the simpler "mean ± σ pedestal + first
+local maximum" recipe runs into on real PbWO₄ traces:
+
+- **Median + MAD pedestal seed** *(step 2)* — a previous-event tail
+  or early ringing in the leading window biases a simple-mean seed and
+  loosens the σ-clip band; median + MAD·1.4826 stays correct under
+  ≤ 50 % contamination.  See [§ Robustness](#robustness-on-contaminated-pedestals).
+- **Adaptive pedestal window** *(step 2b)* — when the leading window
+  flags as contaminated, the analyzer also estimates on the trailing
+  samples and keeps whichever has lower RMS, flagging the choice with
+  `Q_PED_TRAILING_WINDOW`.
+- **Per-channel pedestal quality bitmask** *(step 2 + § Pedestal
+  quality)* — `Q_PED_*` flags (`NOT_CONVERGED`, `TOO_FEW_SAMPLES`,
+  `PULSE_IN_WINDOW`, `OVERFLOW`, …) let downstream analyses cut on
+  pedestal trustworthiness without re-running the analyzer.
+- **Pedestal-slope tracking** *(step 2)* — least-squares slope across
+  the surviving samples catches baseline drift and slow-tail
+  contamination that a tight σ-clip alone misses.
+- **Noise-scaled local-max tolerance** *(step 4)* — `trend()` uses
+  `max(0.1, 0.5·rms)` so quiet-channel wiggles don't fragment plateaus
+  into spurious mini-peaks.
+- **N-consecutive tail termination** *(step 5)* — integration only
+  ends after `tail_break_n = 2` consecutive sub-threshold samples; a
+  single noise dip in the tail is held in `pending` and committed on
+  recovery, instead of truncating the integral early.
+- **INCLUSIVE integration bounds** *(step 5)* — `peak.left/right` are
+  the outermost samples actually summed into `peak.integral`; the JS
+  viewer (`waveform.js:185`) was already assuming this, so the on-screen
+  shading and the integral now agree exactly.
+- **Sub-sample peak time** *(step 7)* — 3-point quadratic vertex
+  through `raw[pos±1]` lifts time resolution from the 4 ns sample
+  grid to ≪ 1 ns for clean peaks (independent observable from the
+  firmware mid-amplitude time).
+- **Pile-up flagging** *(step 8)* — `Q_PEAK_PILED` on both peaks of
+  any pair whose integration windows come within `peak_pileup_gap`
+  samples of each other.
+
+The pipeline section walks through each step on the clean example
+trace; the figures and numbers further down are reproduced by
+[`scripts/plot_wave_analysis.py`](scripts/plot_wave_analysis.py).
+
 ### Parameters
 
 All settings live in `fdec::WaveConfig` (see `WaveAnalyzer.h`); the values
@@ -192,6 +236,55 @@ about the pedestal stability rather than the peak heights, cutting on
 `Q_PED_NOT_CONVERGED | Q_PED_TOO_FEW_SAMPLES | Q_PED_PULSE_IN_WINDOW`
 removes the events where the iterative cut couldn't settle on a clean
 baseline.
+
+### Robustness on contaminated pedestals
+
+The example trace above has a clean baseline, so the algorithm
+improvements all converge on the same answer the simpler "mean ± σ"
+recipe would produce.  The figure below uses a synthetic 30-sample
+window where the first 14 samples carry a 2.5 ADC bias (a
+previous-event scintillation tail) on top of the same ±0.4 ADC noise:
+
+![robustness](plots/fig6_robustness.png)
+
+- The simple-mean seed lands between the two clusters and pulls the
+  σ-clip band along with it; the iteration either locks onto the
+  contaminated subset or rejects almost everything (sets
+  `Q_PED_TOO_FEW_SAMPLES`) and reports the biased seed value.
+- The median + MAD·1.4826 seed sits on the true baseline; the very
+  first σ-clip pass excludes the contaminated samples and the result
+  is the correct pedestal.
+
+The contamination level here was deliberately chosen in the regime
+where σ-clip is *most* fragile (close to the baseline, more than half
+the band).  Strong contamination (≫ 5·rms above) is rejected by both
+seeds — the median's advantage is on the marginal cases that bias the
+energy resolution silently.
+
+### Crowded windows and pile-up flagging
+
+The default 100-sample readout (400 ns) easily contains more than one
+PbWO₄ pulse — random-coincidence accidentals, after-pulses, or
+beam-related multi-hits.  The figure below synthesises three pulses at
+samples 20, 35, 50 (heights 800 / 600 / 350) and runs the actual
+analyzer:
+
+![crowded](plots/fig7_crowded.png)
+
+- The local-maxima search finds each pulse independently because each
+  one rises above its surrounding minima by more than `thr`.
+- The integration windows of adjacent pulses touch (the slow
+  scintillation tail of pulse N runs into the rise of pulse N+1).
+  Step 8 flags **both** peaks of any such pair with `Q_PEAK_PILED`.
+- Downstream analysis can either include all peaks (the integrals are
+  still correct under the tail-cutoff stopping rule) or cut on
+  `peak_quality == Q_PEAK_GOOD` for a clean-pulse subset.
+
+The pile-up flag is independent of the rejection check that drops a
+secondary peak when its smoothed height is below `min_peak_ratio` of
+the primary's — that gate is about whether a peak gets recorded at
+all; `Q_PEAK_PILED` is about whether a recorded peak sits next to
+another one.
 
 ### Parameter sensitivity
 
@@ -390,18 +483,28 @@ excluded.
 
 ## Reproducing the plots
 
-Both algorithms are re-implemented in
-[`scripts/plot_wave_analysis.py`](scripts/plot_wave_analysis.py)
-(NumPy + Matplotlib only).
+The figures and printed numbers in this note are produced by
+[`scripts/plot_wave_analysis.py`](scripts/plot_wave_analysis.py),
+which calls the *actual* C++ analyzers through the `prad2py` Python
+bindings — there is no separate Python re-implementation that can
+drift from the production code.  Build the project with the bindings
+enabled (CMake `-DBUILD_PYTHON=ON`) so `import prad2py` resolves, then
+run from this directory:
 
 ```bash
 cd docs/technical_notes/waveform_analysis
 python scripts/plot_wave_analysis.py
 ```
 
-Regenerates `plots/fig1_overview.png`, `plots/fig2_firmware_analysis.png`,
-`plots/fig3_soft_analysis.png`, `plots/fig4_soft_parameters.png`,
-`plots/fig5_smoothing.png` and prints the numeric results above.
+Regenerates the seven PNGs in `plots/` (overview, firmware analysis,
+soft analysis, parameter sensitivity, smoothing demo, robustness, and
+crowded-window pile-up) and prints the numeric results quoted above.
+
+The only Python re-implementation in the script is a small σ-clip
+helper used by the robustness figure to demonstrate the *old*
+simple-mean seed strategy — the binding only exposes the current
+median + MAD seed, so the side-by-side comparison can't be done
+through it.
 
 ## See also
 

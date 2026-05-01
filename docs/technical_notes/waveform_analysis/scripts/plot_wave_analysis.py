@@ -2,16 +2,24 @@
 """
 plot_wave_analysis.py — visualisations for the prad2dec waveform analyzers.
 
-Re-implements `fdec::WaveAnalyzer` (soft) and `fdec::Fadc250FwAnalyzer`
-(firmware Mode 1/2/3 emulation) in pure Python and runs both on the
-example waveform shipped in this directory.
+Calls the actual `fdec::WaveAnalyzer` and `fdec::Fadc250FwAnalyzer`
+through the prad2py Python bindings, so every figure and printed
+number tracks the C++ implementation exactly — no separate Python
+re-implementation that can drift from the production code.
 
-Outputs five PNGs into ../plots/ (relative to this script):
+Build the project with the python bindings enabled
+(`-DBUILD_PYTHON=ON` for CMake) so `import prad2py` resolves.
+
+Outputs seven PNGs into ../plots/ (relative to this script):
   plots/fig1_overview.png           — full waveform with key markers
   plots/fig2_firmware_analysis.png  — Vnoise / TET / Tcross / Va bracket / NSB / NSA
   plots/fig3_soft_analysis.png      — pedestal / smoothing / peak / integration
   plots/fig4_soft_parameters.png    — pedestal-iteration + int_tail_ratio sensitivity
   plots/fig5_smoothing.png          — smoothing on a low-S/N pulse
+  plots/fig6_robustness.png         — median+MAD vs. simple-mean pedestal
+                                      seed on a synthetic contaminated trace
+  plots/fig7_crowded.png            — three closely-spaced pulses, pile-up
+                                      flagging (Q_PEAK_PILED)
 
 Run:
   cd docs/technical_notes/waveform_analysis
@@ -21,6 +29,8 @@ Run:
 import numpy as np
 import matplotlib.pyplot as plt
 from pathlib import Path
+
+import prad2py.dec as dec     # actual C++ analyzers via pybind11
 
 # ---------------------------------------------------------------------------
 # Example waveform (100 samples × 4 ns/sample = 400 ns)
@@ -63,31 +73,30 @@ TIME_SMALL = np.arange(N_SMALL) * CLK_NS
 
 
 def triangular_smooth(s, smooth_order):
-    """Same triangular kernel as fdec::WaveAnalyzer::smooth (res = 1 → no-op)."""
-    n = len(s)
-    if smooth_order <= 1:
-        return s.astype(np.float64).copy()
-    buf = np.empty(n)
-    for i in range(n):
-        val = float(s[i]); wsum = 1.0
-        for j in range(1, smooth_order):
-            if j > i or i + j >= n:
-                continue
-            w = 1.0 - j / float(smooth_order + 1)
-            val += w * (float(s[i - j]) + float(s[i + j]))
-            wsum += 2.0 * w
-        buf[i] = val / wsum
-    return buf
+    """Calls fdec::WaveAnalyzer::smooth via the binding so the displayed
+    smoothed buffer is bit-identical to what the production peak finder
+    sees."""
+    cfg = dec.WaveConfig(); cfg.smooth_order = smooth_order
+    return np.asarray(
+        dec.WaveAnalyzer(cfg).smooth(np.ascontiguousarray(s, dtype=np.uint16)),
+        dtype=np.float64,
+    )
 
 # ---------------------------------------------------------------------------
-# Fadc250FwAnalyzer — firmware Mode 1/2/3 emulation (ns convention)
+# Fadc250FwAnalyzer — firmware Mode 1/2/3 emulation (binding adapter)
 # ---------------------------------------------------------------------------
 def firmware_analyze(s, *, TET=10.0, NSB_ns=8, NSA_ns=128, NPED=3,
                      MAXPED=1, NSAT=4, MAX_PULSES=4, CLK_NS=4.0):
-    """Returns dict with vnoise + first-pulse fields, mirroring DaqPeak."""
-    # --- Vnoise: mean of first NPED samples, optionally with online outlier
-    #     rejection if MAXPED>0 (sample dropped if pedsub > MAXPED)
+    """Run fdec::Fadc250FwAnalyzer through the binding on `s`.  The C++
+    works in pedsub coordinates internally; this adapter computes the
+    matching raw-ADC pedestal, passes it as `PED`, then converts the
+    DaqPeak's pedsub fields back to raw so the existing plotting code
+    (which renders on a raw-ADC y-axis) keeps working."""
     n = len(s)
+    s_u16 = np.ascontiguousarray(s, dtype=np.uint16)
+
+    # raw-ADC pedestal: MAXPED-filtered mean of raw[:NPED] — matches the
+    # online firmware's vnoise computation in raw coordinates.
     nped = min(NPED, n)
     vnoise_initial = float(np.mean(s[:nped]))
     if MAXPED > 0:
@@ -96,95 +105,36 @@ def firmware_analyze(s, *, TET=10.0, NSB_ns=8, NSA_ns=128, NPED=3,
     else:
         vnoise = vnoise_initial
 
-    # --- pedestal-subtracted samples
-    sp = np.maximum(0.0, s - vnoise)
+    cfg = dec.Fadc250FwConfig()
+    cfg.TET, cfg.NSB, cfg.NSA = TET, NSB_ns, NSA_ns
+    cfg.NPED, cfg.MAXPED, cfg.NSAT = NPED, MAXPED, NSAT
+    cfg.MAX_PULSES, cfg.CLK_NS = MAX_PULSES, CLK_NS
 
-    # --- NSB/NSA from ns to integer samples (floor)
-    nsb_s = int(NSB_ns / CLK_NS)
-    nsa_s = int(NSA_ns / CLK_NS)
+    _, peaks = dec.Fadc250FwAnalyzer(cfg).analyze_full(s_u16, vnoise)
+    if not peaks:
+        return None
+    pk = peaks[0]   # this demo only inspects the first pulse
 
-    # --- Walk for the first pulse
-    i = NPED
-    Vmin = vnoise
-    while i < n - 1:
-        # find pulse start (first sample > Vnoise)
-        while i < n and s[i] <= vnoise:
-            i += 1
-        if i >= n:
-            break
+    # DaqPeak.{vmin, vpeak, va} are pedsub; convert back to raw for plots.
+    Vpeak = pk.vpeak + vnoise
+    Va    = pk.va    + vnoise
+    # Bracket samples (Vba, Vaa) — read directly from raw at coarse / coarse+1.
+    k = pk.coarse + 1
+    Vba = float(s[pk.coarse]) if 0 <= pk.coarse < n else vnoise
+    Vaa = float(s[k]) if 0 <= k < n else vnoise
 
-        # walk to peak
-        i_peak = i
-        while i_peak + 1 < n and s[i_peak + 1] > s[i_peak]:
-            i_peak += 1
-        Vpeak = float(s[i_peak])
-
-        if (Vpeak - vnoise) <= TET:    # below threshold → keep searching
-            i = i_peak + 1
-            continue
-
-        # Tcross: first leading-edge sample whose pedsub value > TET
-        cross = i
-        while cross <= i_peak and (s[cross] - vnoise) <= TET:
-            cross += 1
-        if cross > i_peak:
-            i = i_peak + 1
-            continue
-
-        # NSAT consecutive samples above TET
-        ok = all((s[k] - vnoise) > TET for k in range(cross, min(cross + NSAT, n)))
-        if not ok:
-            i = i_peak + 1
-            continue
-
-        # Va — manual mid value
-        Va = Vmin + (Vpeak - Vmin) / 2.0
-
-        # bracket: smallest k with s[k] >= Va on leading edge
-        k = cross
-        while k <= i_peak and s[k] < Va:
-            k += 1
-        if k > i_peak:
-            quality = 0x08    # Q_DAQ_VA_OUT_OF_RANGE
-            coarse = i_peak
-            fine = 0
-            Vba = Vaa = float(s[i_peak])
-        else:
-            Vaa = float(s[k])
-            Vba = float(s[k - 1]) if k > 0 else Vmin
-            denom = (Vaa - Vba) if (Vaa > Vba) else 1.0
-            fine = int(round((Va - Vba) / denom * 64.0))
-            coarse = k - 1
-            if fine >= 64:
-                fine -= 64
-                coarse += 1
-            quality = 0x00
-
-        time_units = coarse * 64 + fine
-        time_ns = time_units * (CLK_NS / 64.0)
-
-        wlo = cross - nsb_s
-        whi = cross + nsa_s
-        if wlo < 0:
-            wlo = 0
-            quality |= 0x02    # Q_DAQ_NSB_TRUNCATED
-        if whi >= n:
-            whi = n - 1
-            quality |= 0x04    # Q_DAQ_NSA_TRUNCATED
-        if i_peak >= n - 1:
-            quality |= 0x01    # Q_DAQ_PEAK_AT_BOUNDARY
-
-        integral = float(np.sum(sp[wlo:whi + 1]))
-
-        return dict(
-            vnoise=vnoise, vnoise_initial=vnoise_initial,
-            sp=sp, nsb_samples=nsb_s, nsa_samples=nsa_s,
-            cross=cross, peak=i_peak, Vpeak=Vpeak,
-            Vmin=Vmin, Va=Va, Vba=Vba, Vaa=Vaa, k=k,
-            coarse=coarse, fine=fine, time_units=time_units, time_ns=time_ns,
-            window_lo=wlo, window_hi=whi, integral=integral, quality=quality,
-        )
-    return None
+    return dict(
+        vnoise=vnoise, vnoise_initial=vnoise_initial,
+        sp=np.maximum(0.0, s.astype(float) - vnoise),
+        nsb_samples=int(NSB_ns / CLK_NS),
+        nsa_samples=int(NSA_ns / CLK_NS),
+        cross=pk.cross_sample, peak=pk.peak_sample,
+        Vpeak=Vpeak, Vmin=vnoise, Va=Va, Vba=Vba, Vaa=Vaa, k=k,
+        coarse=pk.coarse, fine=pk.fine,
+        time_units=pk.time_units, time_ns=pk.time_ns,
+        window_lo=pk.window_lo, window_hi=pk.window_hi,
+        integral=pk.integral, quality=pk.quality,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -192,114 +142,49 @@ def firmware_analyze(s, *, TET=10.0, NSB_ns=8, NSA_ns=128, NPED=3,
 # ---------------------------------------------------------------------------
 def soft_analyze(s, *, smooth_order=2, threshold=5.0, min_threshold=3.0,
                  ped_nsamples=30, ped_flatness=1.0, ped_max_iter=3,
-                 int_tail_ratio=0.1, tail_break_n=2, clk_mhz=250.0):
+                 int_tail_ratio=0.1, tail_break_n=2, peak_pileup_gap=2,
+                 clk_mhz=250.0):
+    """Run fdec::WaveAnalyzer through the binding on `s` and pack the
+    first peak's fields into a dict that matches the existing plotting
+    code's expectations.  ``Pedestal`` and ``Peak`` quality bitmasks
+    come straight from the C++ struct (no Python re-implementation)."""
     n = len(s)
+    s_u16 = np.ascontiguousarray(s, dtype=np.uint16)
 
-    # triangular smoothing
-    if smooth_order <= 1:
-        buf = s.astype(np.float64).copy()
-    else:
-        buf = np.empty(n)
-        for i in range(n):
-            val = s[i]; wsum = 1.0
-            for j in range(1, smooth_order):
-                if j > i or i + j >= n:
-                    continue
-                w = 1.0 - j / float(smooth_order + 1)
-                val += w * (s[i - j] + s[i + j])
-                wsum += 2.0 * w
-            buf[i] = val / wsum
+    cfg = dec.WaveConfig()
+    cfg.smooth_order    = smooth_order
+    cfg.threshold       = threshold
+    cfg.min_threshold   = min_threshold
+    cfg.ped_nsamples    = ped_nsamples
+    cfg.ped_flatness    = ped_flatness
+    cfg.ped_max_iter    = ped_max_iter
+    cfg.int_tail_ratio  = int_tail_ratio
+    cfg.tail_break_n    = tail_break_n
+    cfg.peak_pileup_gap = peak_pileup_gap
+    cfg.clk_mhz         = clk_mhz
 
-    # ── pedestal: median+MAD seed → iterative σ-clip
-    nped = min(ped_nsamples, n)
-    sc = buf[:nped].copy()
-    mean = float(np.median(sc))
-    rms  = float(np.median(np.abs(sc - mean))) * 1.4826
-    for _ in range(ped_max_iter):
-        keep = np.abs(sc - mean) < max(rms, ped_flatness)
-        if keep.sum() == sc.size or keep.sum() < 5:
-            break
-        sc = sc[keep]
-        mean = float(np.mean(sc)); rms = float(np.std(sc))
-    nused = int(sc.size)
+    ana = dec.WaveAnalyzer(cfg)
+    ped, peaks = ana.analyze_full(s_u16)
+    buf = np.asarray(ana.smooth(s_u16), dtype=np.float64)
+    if not peaks:
+        return None
+    pk = peaks[0]
 
-    thr = max(threshold * rms, min_threshold)
+    ped_height  = float(buf[pk.pos]) - ped.mean
+    tail_cut    = ped_height * int_tail_ratio
+    thr         = max(threshold * ped.rms, min_threshold)
+    t_subsample = pk.time * clk_mhz / 1000.0 - pk.pos
 
-    # find first local maximum above threshold
-    for i in range(1, n - 1):
-        if buf[i] < buf[i - 1] or buf[i] < buf[i + 1]:
-            continue
-        # walk left/right
-        left = i; right = i
-        while left > 0 and buf[left] > buf[left - 1]:
-            left -= 1
-        while right < n - 1 and buf[right] >= buf[right + 1]:
-            right += 1
-        height_smooth = buf[i] - mean
-        if height_smooth < thr:
-            continue
-        # (the redundant `height_smooth < 3 * rms` check has been removed;
-        #  thr ≥ 5*rms in the default config already binds first.)
-
-        # raw position correction
-        raw_pos = i; raw_h = s[i] - mean
-        for j in range(1, smooth_order + 1):
-            if i - j >= 0 and (s[i - j] - mean) > raw_h:
-                raw_pos = i - j; raw_h = s[i - j] - mean
-            if i + j < n and (s[i + j] - mean) > raw_h:
-                raw_pos = i + j; raw_h = s[i + j] - mean
-
-        # ── integration: walk outward with N-consecutive tail termination,
-        # INCLUSIVE int_left/int_right (only updated on commit).
-        ped_height = buf[i] - mean
-        tail_cut = ped_height * int_tail_ratio
-        int_left = i; int_right = i
-        integ = ped_height
-        N_break = max(1, tail_break_n)
-
-        # leftward
-        below_run = 0; pending = 0.0
-        for j in range(i - 1, left - 1, -1):
-            v = buf[j] - mean
-            if v < tail_cut or v < rms:
-                below_run += 1; pending += v
-                if below_run >= N_break: break
-            else:
-                integ += pending + v
-                pending = 0.0; below_run = 0
-                int_left = j
-        # rightward
-        below_run = 0; pending = 0.0
-        for j in range(i + 1, right + 1):
-            v = buf[j] - mean
-            if v < tail_cut or v < rms:
-                below_run += 1; pending += v
-                if below_run >= N_break: break
-            else:
-                integ += pending + v
-                pending = 0.0; below_run = 0
-                int_right = j
-
-        # ── sub-sample peak time: 3-point quadratic vertex around raw_pos
-        t_subsample = 0.0
-        if 0 < raw_pos < n - 1:
-            h_minus = float(s[raw_pos - 1])
-            h_zero  = float(s[raw_pos])
-            h_plus  = float(s[raw_pos + 1])
-            denom = h_minus - 2.0 * h_zero + h_plus
-            if denom < -1e-3:
-                delta = 0.5 * (h_minus - h_plus) / denom
-                t_subsample = max(-1.0, min(1.0, delta))
-
-        return dict(
-            ped_mean=mean, ped_rms=rms, ped_nused=nused,
-            threshold=thr, buf=buf,
-            pos=raw_pos, height=float(raw_h), t_subsample=t_subsample,
-            int_left=int_left, int_right=int_right, integral=float(integ),
-            time_ns=(raw_pos + t_subsample) * 1e3 / clk_mhz,
-            tail_cut=tail_cut,
-        )
-    return None
+    return dict(
+        ped_mean=ped.mean, ped_rms=ped.rms,
+        ped_nused=ped.nused, ped_quality=ped.quality, ped_slope=ped.slope,
+        threshold=thr, buf=buf,
+        pos=pk.pos, height=float(pk.height),
+        int_left=pk.left, int_right=pk.right,
+        integral=float(pk.integral), time_ns=pk.time,
+        tail_cut=tail_cut, t_subsample=t_subsample,
+        peak_quality=pk.quality,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -671,5 +556,196 @@ print()
 print("Smoothing demo (small-signal waveform):")
 for r, n in maxima_counts:
     print(f"  smooth_order={r}: {n} local maxima > +2 ADC")
+
+
+# ---------------------------------------------------------------------------
+# Plot 6 — pedestal seed robustness (median+MAD vs simple-mean)
+#
+# Synthetic 30-sample window: a previous-event scintillation tail
+# contaminates samples 0..9 (exponential decay from ~14 ADC over the
+# baseline), then clean ±0.4 ADC noise around the true baseline of 146.
+# Both seeds feed the same iterative σ-clip; the median+MAD seed lands
+# on the true baseline, the simple-mean seed gets dragged high by the
+# contamination and locks the σ-clip band around the wrong value.
+# ---------------------------------------------------------------------------
+# The OLD code path (simple-mean seed) is intentionally kept as a small
+# Python σ-clip helper here — the production binding only exposes the
+# new median+MAD seed, so we can't recover the old behaviour through it.
+# This is the only re-implementation in this file; everything else
+# (including the NEW pedestal below) goes through prad2py.
+def _sigma_clip_with_seed(samples, mean, rms, max_iter=3, flatness=1.0):
+    sc = samples.copy()
+    for _ in range(max_iter):
+        keep = np.abs(sc - mean) < max(rms, flatness)
+        if keep.sum() == sc.size or keep.sum() < 5:
+            break
+        sc = sc[keep]
+        mean = float(np.mean(sc)); rms = float(np.std(sc))
+    return mean, rms, len(sc)
+
+
+np.random.seed(7)
+NPED_DEMO = 30
+TRUE_BASE = 146.0
+N_CONTAM  = 14   # < half the window so the median is still on the baseline
+CONTAM_OFFSET = 2.5  # ADC above baseline — close enough that σ-clip locks
+                     # onto the wrong group from a simple-mean seed
+demo = np.full(NPED_DEMO, TRUE_BASE) + np.random.normal(0, 0.4, NPED_DEMO)
+# Synthetic previous-event tail: a flat-ish 2.5-ADC bias on the first 14
+# samples, with light additional noise so the contaminated samples don't
+# all sit on a single line.
+for i in range(N_CONTAM):
+    demo[i] += CONTAM_OFFSET + np.random.normal(0, 0.15)
+
+# OLD seed: simple mean / std → Python σ-clip
+old_seed_mean = float(np.mean(demo)); old_seed_rms = float(np.std(demo))
+old_mean, old_rms, old_nused = _sigma_clip_with_seed(
+    demo, old_seed_mean, old_seed_rms)
+
+# NEW: drop the demo (rounded to uint16) into the actual binding and
+# read back the pedestal it computed.  ped_nsamples=len(demo) keeps the
+# adaptive trailing-window logic from kicking in.
+demo_u16 = np.ascontiguousarray(np.round(demo), dtype=np.uint16)
+ncfg = dec.WaveConfig(); ncfg.ped_nsamples = NPED_DEMO
+new_ped, _ = dec.WaveAnalyzer(ncfg).analyze_full(demo_u16)
+new_seed_mean = float(np.median(demo))      # for legend annotation only
+new_seed_rms  = float(np.median(np.abs(demo - new_seed_mean))) * 1.4826
+new_mean, new_rms, new_nused = new_ped.mean, new_ped.rms, new_ped.nused
+
+fig, ax = plt.subplots(figsize=(11, 4.6))
+xs = np.arange(NPED_DEMO)
+contam_mask = xs < N_CONTAM
+
+ax.plot(xs[~contam_mask], demo[~contam_mask], 'o', color='#1f77b4', ms=6,
+        label='clean baseline samples')
+ax.plot(xs[contam_mask], demo[contam_mask], 'X', color='#d62728', ms=10,
+        mew=1.5,
+        label='contaminated samples (synthetic previous-event tail)')
+
+ax.axhline(TRUE_BASE, color='#444', lw=1.2, ls=':',
+           label=f'true baseline = {TRUE_BASE:.1f}')
+ax.axhline(old_mean, color='#d62728', lw=1.4, ls='--',
+           label=(f'OLD seed (mean ± σ): converged μ = {old_mean:.2f}, '
+                  f'σ = {old_rms:.2f}, nused = {old_nused}/30  '
+                  f'(bias = {old_mean - TRUE_BASE:+.2f})'))
+ax.axhline(new_mean, color='#2ca02c', lw=1.8,
+           label=(f'NEW seed (median + MAD): converged μ = {new_mean:.2f}, '
+                  f'σ = {new_rms:.2f}, nused = {new_nused}/30  '
+                  f'(bias = {new_mean - TRUE_BASE:+.2f})'))
+
+# annotate the seed values for orientation
+ax.annotate(f'mean seed = {old_seed_mean:.2f}',
+            xy=(NPED_DEMO - 1, old_seed_mean),
+            xytext=(NPED_DEMO - 1.5, old_seed_mean + 1.2),
+            fontsize=8, color='#d62728', ha='right',
+            arrowprops=dict(arrowstyle='->', color='#d62728', lw=0.8))
+ax.annotate(f'median seed = {new_seed_mean:.2f}',
+            xy=(NPED_DEMO - 1, new_seed_mean),
+            xytext=(NPED_DEMO - 1.5, new_seed_mean - 1.2),
+            fontsize=8, color='#2ca02c', ha='right',
+            arrowprops=dict(arrowstyle='->', color='#2ca02c', lw=0.8))
+
+ax.set_xlabel('sample index')
+ax.set_ylabel('ADC counts')
+ax.set_title('Pedestal seed robustness — '
+             'a contaminated leading window biases the simple-mean seed,\n'
+             'while the median + MAD·1.4826 seed lands on the true baseline')
+ax.legend(loc='upper right', fontsize=8.5, framealpha=0.94)
+ax.grid(alpha=0.3)
+fig.tight_layout()
+fig.savefig(out_dir / 'fig6_robustness.png', dpi=130)
+plt.close(fig)
+
 print()
-print(f"Wrote 5 PNGs to {out_dir}")
+print("Pedestal seed robustness (synthetic contaminated window):")
+print(f"  OLD (mean+σ seed):     converged μ={old_mean:.2f}, σ={old_rms:.2f}, "
+      f"nused={old_nused}/30  bias={old_mean - TRUE_BASE:+.2f}")
+print(f"  NEW (median+MAD seed): converged μ={new_mean:.2f}, σ={new_rms:.2f}, "
+      f"nused={new_nused}/30  bias={new_mean - TRUE_BASE:+.2f}")
+
+
+# ---------------------------------------------------------------------------
+# Plot 7 — crowded window: 3 closely-spaced pulses, pile-up flagging
+#
+# Synthesises three PbWO₄-like pulses 15 samples (60 ns) and 15 samples
+# apart in an 80-sample window, then runs the actual binding.  Each
+# pulse rises in ~3 samples, decays with τ ≈ 12 samples — so adjacent
+# integration windows touch and trigger Q_PEAK_PILED on both peaks of
+# each pair.
+# ---------------------------------------------------------------------------
+def _pbwo_pulse(t0, height, n, rise_tau=2.5, decay_tau=12.0):
+    out = np.zeros(n)
+    rise_done = height * (1 - np.exp(-6 / rise_tau))
+    for i in range(n):
+        if i < t0:
+            continue
+        if i - t0 < 6:
+            out[i] = height * (1 - np.exp(-(i - t0) / rise_tau))
+        else:
+            out[i] = rise_done * np.exp(-(i - t0 - 6) / decay_tau)
+    return out
+
+
+np.random.seed(13)
+N_CROWD = 80
+CROWD_PED = 146.0
+crowd = (CROWD_PED + np.random.normal(0, 0.4, N_CROWD)
+         + _pbwo_pulse(20, 800.0, N_CROWD)
+         + _pbwo_pulse(35, 600.0, N_CROWD)
+         + _pbwo_pulse(50, 350.0, N_CROWD))
+crowd_u16   = np.round(crowd).astype(np.uint16)
+TIME_CROWD  = np.arange(N_CROWD) * CLK_NS
+
+crowd_cfg = dec.WaveConfig()
+crowd_ana = dec.WaveAnalyzer(crowd_cfg)
+crowd_ped, crowd_peaks = crowd_ana.analyze_full(crowd_u16)
+crowd_buf = np.asarray(crowd_ana.smooth(crowd_u16), dtype=np.float64)
+
+PEAK_COLORS = ['#d62728', '#2ca02c', '#9467bd', '#8c564b', '#e377c2']
+fig, ax = plt.subplots(figsize=(11, 4.6))
+ax.plot(TIME_CROWD, crowd, 'o', color='#1f77b4', ms=2.8, label='raw samples')
+ax.plot(TIME_CROWD, crowd_buf, color='#ff7f0e', lw=1.0, alpha=0.75,
+        label='smoothed (smooth_order = 2)')
+ax.axhline(crowd_ped.mean, color='#888', lw=0.8, ls='--',
+           label=f'pedestal = {crowd_ped.mean:.1f} ± {crowd_ped.rms:.2f}')
+
+n_piled = 0
+for i, pk in enumerate(crowd_peaks):
+    col = PEAK_COLORS[i % len(PEAK_COLORS)]
+    is_piled = bool(pk.quality & dec.Q_PEAK_PILED)
+    n_piled += int(is_piled)
+    xs_band = np.arange(pk.left, pk.right + 1)
+    ax.fill_between(xs_band * CLK_NS, crowd_ped.mean, crowd[xs_band],
+                    color=col, alpha=0.18,
+                    label=(f'peak {i}: t={pk.time:6.2f} ns,  h={pk.height:5.0f},'
+                           f'  Σ={pk.integral:6.0f},  '
+                           f'{"PILED" if is_piled else "isolated"}'))
+    ax.plot(pk.pos * CLK_NS, crowd[pk.pos], '*', color=col, ms=14,
+            mec='black', mew=0.6)
+    ax.annotate(f'{i}', xy=(pk.pos * CLK_NS, crowd[pk.pos]),
+                xytext=(pk.pos * CLK_NS, crowd[pk.pos] + 25),
+                fontsize=10, ha='center', color=col, fontweight='bold')
+
+ax.set_xlabel('time (ns)')
+ax.set_ylabel('ADC counts')
+ax.set_title(
+    f'Crowded window — three closely-spaced PbWO₄ pulses\n'
+    f'analyzer found {len(crowd_peaks)} peaks; '
+    f'{n_piled} flagged Q_PEAK_PILED (within '
+    f'peak_pileup_gap = {crowd_cfg.peak_pileup_gap} samples)')
+ax.legend(loc='upper right', fontsize=8.5, framealpha=0.94)
+ax.grid(alpha=0.3)
+fig.tight_layout()
+fig.savefig(out_dir / 'fig7_crowded.png', dpi=130)
+plt.close(fig)
+
+print()
+print(f"Crowded waveform — {len(crowd_peaks)} peaks found "
+      f"({n_piled} piled-up):")
+for i, pk in enumerate(crowd_peaks):
+    flags = 'PILED' if pk.quality & dec.Q_PEAK_PILED else 'isolated'
+    print(f"  peak {i}: pos={pk.pos:3d}, t={pk.time:7.2f} ns, "
+          f"h={pk.height:6.1f}, Σ={pk.integral:7.1f}, "
+          f"window=[{pk.left:2d}, {pk.right:2d}] ({flags})")
+print()
+print(f"Wrote 7 PNGs to {out_dir}")

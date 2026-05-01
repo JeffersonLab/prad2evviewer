@@ -261,7 +261,49 @@ void bind_fadc(py::module_ &m)
             "Analyze one channel's FADC waveform (uint16 numpy array). "
             "Returns (pedestal_mean, pedestal_rms, peaks_list).  Peaks "
             "above ``cfg.min_threshold`` / ``cfg.threshold × rms`` are "
-            "kept; up to ``MAX_PEAKS`` per call.");
+            "kept; up to ``MAX_PEAKS`` per call.")
+        .def("analyze_full",
+            [](const fdec::WaveAnalyzer &self, py::array_t<uint16_t> samples) {
+                py::buffer_info buf = samples.request();
+                if (buf.ndim != 1)
+                    throw py::value_error("samples must be a 1-D uint16 array");
+                fdec::WaveResult res;
+                {
+                    py::gil_scoped_release rel;
+                    self.Analyze(static_cast<const uint16_t*>(buf.ptr),
+                                 static_cast<int>(buf.shape[0]), res);
+                }
+                py::list peaks;
+                for (int i = 0; i < res.npeaks; ++i)
+                    peaks.append(res.peaks[i]);
+                return py::make_tuple(res.ped, peaks);
+            },
+            py::arg("samples"),
+            "Like analyze() but returns the full (Pedestal, [Peak, ...]) "
+            "tuple — Pedestal exposes nused / quality / slope, each Peak "
+            "exposes its quality bitmask.  Use this when documenting the "
+            "analyzer or when downstream code needs the quality flags.")
+        .def("smooth",
+            [](const fdec::WaveAnalyzer &self, py::array_t<uint16_t> samples) {
+                py::buffer_info buf = samples.request();
+                if (buf.ndim != 1)
+                    throw py::value_error("samples must be a 1-D uint16 array");
+                const int n = static_cast<int>(buf.shape[0]);
+                if (n > fdec::MAX_SAMPLES)
+                    throw py::value_error("samples length exceeds MAX_SAMPLES");
+                py::array_t<float> out(n);
+                {
+                    py::gil_scoped_release rel;
+                    self.smooth(static_cast<const uint16_t*>(buf.ptr), n,
+                                static_cast<float*>(out.request().ptr));
+                }
+                return out;
+            },
+            py::arg("samples"),
+            "Run only the triangular-kernel smoothing pass (no pedestal / "
+            "peak finding).  Returns the smoothed buffer as a float32 "
+            "numpy array — useful for plotting the curve the peak finder "
+            "actually sees.");
 
     // ----- Firmware-faithful (Mode 1/2/3) analyzer -----------------------
     // Quality bitmask constants — exposed at module scope so callers can
@@ -348,7 +390,29 @@ void bind_fadc(py::module_ &m)
             "Run firmware Mode 3 (TDC) → Mode 1 + Mode 2 windowing on a "
             "uint16 sample array.  Returns (vnoise, [DaqPeak, ...]).  ``ped`` "
             "is the per-channel pedestal (firmware register or soft-analyzer "
-            "estimate); samples have not been pedestal-subtracted.");
+            "estimate); samples have not been pedestal-subtracted.")
+        .def("analyze_full",
+            [](const fdec::Fadc250FwAnalyzer &self,
+               py::array_t<uint16_t> samples, float ped) {
+                py::buffer_info buf = samples.request();
+                if (buf.ndim != 1)
+                    throw py::value_error("samples must be a 1-D uint16 array");
+                fdec::DaqWaveResult res;
+                {
+                    py::gil_scoped_release rel;
+                    self.Analyze(static_cast<const uint16_t*>(buf.ptr),
+                                 static_cast<int>(buf.shape[0]), ped, res);
+                }
+                py::list peaks;
+                for (int i = 0; i < res.npeaks; ++i)
+                    peaks.append(res.peaks[i]);
+                return py::make_tuple(res.vnoise, peaks);
+            },
+            py::arg("samples"), py::arg("ped"),
+            "Same return shape as analyze() — provided for parity with "
+            "WaveAnalyzer.analyze_full().  DaqPeak already exposes every "
+            "field including quality, so there's no extra info to surface "
+            "here today.");
 }
 
 // -------------------------------------------------------------------------
