@@ -1,5 +1,7 @@
 # HyCal Clustering in `prad2det`
 
+**Author:** Chao Peng (Argonne National Laboratory)
+
 `fdec::HyCalCluster` (in [`prad2det/include/HyCalCluster.h`](../../../prad2det/include/HyCalCluster.h))
 implements the **Island clustering** algorithm originally written for
 PRad-I (`PRadIslandCluster` / `PRadHyCalReconstructor`), now ported to

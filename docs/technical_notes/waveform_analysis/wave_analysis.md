@@ -1,5 +1,7 @@
 # Software Waveform Analysis in `prad2dec`
 
+**Author:** Chao Peng (Argonne National Laboratory)
+
 `prad2dec` ships **two** offline analyzers that run on raw FADC250 samples
 (`uint16_t[nsamples]`, 4 ns/sample at 250 MHz):
 

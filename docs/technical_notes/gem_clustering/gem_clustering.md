@@ -1,5 +1,7 @@
 # GEM Clustering in `prad2det`
 
+**Author:** Chao Peng (Argonne National Laboratory)
+
 `gem::GemCluster` (in [`prad2det/include/GemCluster.h`](../../../prad2det/include/GemCluster.h))
 takes per-plane strip charges from the SSP/MPD readout and produces 2-D
 GEM hits. It runs in two stages: a **per-plane 1-D clustering**
