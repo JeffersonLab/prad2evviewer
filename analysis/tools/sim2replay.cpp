@@ -12,6 +12,7 @@
 #include "PhysicsTools.h"
 #include "HyCalSystem.h"
 #include "EventData.h"
+#include "EventData_io.h"
 #include "InstallPaths.h"
 
 #include <TFile.h>
@@ -44,54 +45,6 @@ double beamE = 3500.0; // MeV, can be made configurable
 
 // Aliases for the shared replay data structures
 using EventVars_Recon = prad2::ReconEventData;
-void setupReconBranches(TTree *tree, EventVars_Recon &ev)
-{
-    tree->Branch("event_num",    &ev.event_num,    "event_num/I");
-    tree->Branch("trigger_type", &ev.trigger_type, "trigger_type/b");
-    tree->Branch("trigger_bits", &ev.trigger_bits, "trigger_bits/i");
-    tree->Branch("timestamp",    &ev.timestamp,    "timestamp/L");
-    tree->Branch("total_energy", &ev.total_energy, "total_energy/F");
-    // HyCal cluster branches
-    // detector coordinate system (crystal surface)
-    tree->Branch("n_clusters",   &ev.n_clusters,   "n_clusters/I");
-    tree->Branch("cl_x",         ev.cl_x,          "cl_x[n_clusters]/F");
-    tree->Branch("cl_y",         ev.cl_y,          "cl_y[n_clusters]/F");
-    tree->Branch("cl_z",         ev.cl_z,          "cl_z[n_clusters]/F");
-    tree->Branch("cl_energy",    ev.cl_energy,     "cl_energy[n_clusters]/F");
-    tree->Branch("cl_nblocks",   ev.cl_nblocks,    "cl_nblocks[n_clusters]/b");
-    tree->Branch("cl_center",    ev.cl_center,     "cl_center[n_clusters]/s");
-    tree->Branch("cl_flag",      ev.cl_flag,       "cl_flag[n_clusters]/i");
-    // Matching results
-    // the x,y,z positions in this part are in the target and beam center coordinate system
-    tree->Branch("matchFlag", ev.matchFlag,  "matchFlag[n_clusters]/i");
-    tree->Branch("matchGEMx", ev.matchGEMx,  "matchGEMx[n_clusters][4]/F");
-    tree->Branch("matchGEMy", ev.matchGEMy,  "matchGEMy[n_clusters][4]/F");
-    tree->Branch("matchGEMz", ev.matchGEMz,  "matchGEMz[n_clusters][4]/F");
-    tree->Branch("match_num", &ev.matchNum,  "match_num/I");
-    // quick access matching arrays (indexed by match_num)
-    tree->Branch("mHit_E",   ev.mHit_E,   "mHit_E[match_num]/F");
-    tree->Branch("mHit_x",   ev.mHit_x,   "mHit_x[match_num]/F");
-    tree->Branch("mHit_y",   ev.mHit_y,   "mHit_y[match_num]/F");
-    tree->Branch("mHit_z",   ev.mHit_z,   "mHit_z[match_num]/F");
-    tree->Branch("mHit_gx",  ev.mHit_gx,  "mHit_gx[match_num][2]/F");
-    tree->Branch("mHit_gy",  ev.mHit_gy,  "mHit_gy[match_num][2]/F");
-    tree->Branch("mHit_gz",  ev.mHit_gz,  "mHit_gz[match_num][2]/F");
-    tree->Branch("mHit_gid", ev.mHit_gid, "mHit_gid[match_num][2]/F");
-    // GEM part
-    //detector coordinate system (GEM plane)
-    tree->Branch("n_gem_hits",   &ev.n_gem_hits,   "n_gem_hits/I");
-    tree->Branch("det_id",       ev.det_id,        "det_id[n_gem_hits]/b");
-    tree->Branch("gem_x",        ev.gem_x,         "gem_x[n_gem_hits]/F");
-    tree->Branch("gem_y",        ev.gem_y,         "gem_y[n_gem_hits]/F");
-    tree->Branch("gem_x_charge", ev.gem_x_charge,  "gem_x_charge[n_gem_hits]/F");
-    tree->Branch("gem_y_charge", ev.gem_y_charge,  "gem_y_charge[n_gem_hits]/F");
-    tree->Branch("gem_x_peak",   ev.gem_x_peak,    "gem_x_peak[n_gem_hits]/F");
-    tree->Branch("gem_y_peak",   ev.gem_y_peak,    "gem_y_peak[n_gem_hits]/F");
-    tree->Branch("gem_x_size",   ev.gem_x_size,    "gem_x_size[n_gem_hits]/b");
-    tree->Branch("gem_y_size",   ev.gem_y_size,    "gem_y_size[n_gem_hits]/b");
-    // Raw 0xE10C SSP trigger bank words (variable-length per event)
-    tree->Branch("ssp_raw", &ev.ssp_raw);
-}
 //event data structure for the input Geant4 simulation output
 struct SimEventData {
     int VD_n = 0; // number of hits in the virtual detector
@@ -224,7 +177,7 @@ int main (int argc, char *argv[])
     // create TTree and branches for reconstructed data
     TTree *tree_out = new TTree("recon", "PRad2 replay reconstruction from G4");
     auto ev = std::make_unique<EventVars_Recon>();
-    setupReconBranches(tree_out, *ev);
+    prad2::SetReconWriteBranches(tree_out, *ev);
 
     // caculate luminosity and number of events to process for ep and ee
     double lumi = std::min(ep_lumi, ee_lumi);

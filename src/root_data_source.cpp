@@ -5,6 +5,7 @@
 #ifdef WITH_ROOT
 
 #include "root_data_source.h"
+#include "EventData_io.h"
 
 #include <TFile.h>
 #include <TTree.h>
@@ -50,40 +51,9 @@ std::string RootRawDataSource::open(const std::string &path)
 
     n_entries_ = static_cast<int>(tree_->GetEntries());
 
-    // event-level branches (shared RawEventData struct)
-    tree_->SetBranchAddress("event_num",    &ev_.event_num);
-    if (tree_->GetBranch("trigger_type"))
-        tree_->SetBranchAddress("trigger_type", &ev_.trigger_type);
-    if (tree_->GetBranch("trigger_bits"))
-        tree_->SetBranchAddress("trigger_bits", &ev_.trigger_bits);
-    tree_->SetBranchAddress("timestamp",     &ev_.timestamp);
-
-    // HyCal per-channel data (indexed by module_id, not crate/slot/channel)
-    tree_->SetBranchAddress("hycal.nch",        &ev_.nch);
-    tree_->SetBranchAddress("hycal.module_id",  ev_.module_id);
-    tree_->SetBranchAddress("hycal.nsamples",   ev_.nsamples);
-    tree_->SetBranchAddress("hycal.samples",    ev_.samples);
-    has_peaks_ = (tree_->GetBranch("hycal.npeaks") != nullptr);
-    if (has_peaks_) {
-        tree_->SetBranchAddress("hycal.ped_mean",   ev_.ped_mean);
-        tree_->SetBranchAddress("hycal.ped_rms",    ev_.ped_rms);
-    }
-    if (has_peaks_) {
-        tree_->SetBranchAddress("hycal.npeaks",        ev_.npeaks);
-        tree_->SetBranchAddress("hycal.peak_height",   ev_.peak_height);
-        tree_->SetBranchAddress("hycal.peak_time",     ev_.peak_time);
-        tree_->SetBranchAddress("hycal.peak_integral", ev_.peak_integral);
-    }
-
-    has_gem_ = (tree_->GetBranch("gem.nch") != nullptr);
-    if (has_gem_) {
-        tree_->SetBranchAddress("gem.nch",         &ev_.gem_nch);
-        tree_->SetBranchAddress("gem.mpd_crate",   ev_.mpd_crate);
-        tree_->SetBranchAddress("gem.mpd_fiber",   ev_.mpd_fiber);
-        tree_->SetBranchAddress("gem.apv",         ev_.apv);
-        tree_->SetBranchAddress("gem.strip",       ev_.strip);
-        tree_->SetBranchAddress("gem.ssp_samples", ev_.ssp_samples);
-    }
+    auto status = prad2::SetRawReadBranches(tree_, ev_);
+    has_peaks_ = status.has_peaks;
+    has_gem_   = status.has_gem;
 
     if (!hycal_) {
         std::cerr << "ROOT raw: warning — no HyCalSystem provided; "
@@ -210,32 +180,7 @@ std::string RootReconDataSource::open(const std::string &path)
 
     n_entries_ = static_cast<int>(tree_->GetEntries());
 
-    tree_->SetBranchAddress("event_num",    &ev_.event_num);
-    if (tree_->GetBranch("trigger_type"))
-        tree_->SetBranchAddress("trigger_type", &ev_.trigger_type);
-    if (tree_->GetBranch("trigger_bits"))
-        tree_->SetBranchAddress("trigger_bits", &ev_.trigger_bits);
-    tree_->SetBranchAddress("timestamp",    &ev_.timestamp);
-
-    // HyCal clusters
-    tree_->SetBranchAddress("n_clusters",   &ev_.n_clusters);
-    tree_->SetBranchAddress("cl_x",         ev_.cl_x);
-    tree_->SetBranchAddress("cl_y",         ev_.cl_y);
-    tree_->SetBranchAddress("cl_energy",    ev_.cl_energy);
-    tree_->SetBranchAddress("cl_nblocks",   ev_.cl_nblocks);
-    tree_->SetBranchAddress("cl_center",    ev_.cl_center);
-
-    // GEM hits
-    tree_->SetBranchAddress("n_gem_hits",   &ev_.n_gem_hits);
-    tree_->SetBranchAddress("det_id",       ev_.det_id);
-    tree_->SetBranchAddress("gem_x",        ev_.gem_x);
-    tree_->SetBranchAddress("gem_y",        ev_.gem_y);
-    tree_->SetBranchAddress("gem_x_charge", ev_.gem_x_charge);
-    tree_->SetBranchAddress("gem_y_charge", ev_.gem_y_charge);
-    tree_->SetBranchAddress("gem_x_peak",   ev_.gem_x_peak);
-    tree_->SetBranchAddress("gem_y_peak",   ev_.gem_y_peak);
-    tree_->SetBranchAddress("gem_x_size",   ev_.gem_x_size);
-    tree_->SetBranchAddress("gem_y_size",   ev_.gem_y_size);
+    prad2::SetReconReadBranches(tree_, ev_);
 
     std::cerr << "ROOT recon: " << n_entries_ << " events\n";
     return "";

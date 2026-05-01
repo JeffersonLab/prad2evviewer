@@ -5,6 +5,7 @@
 #include "DaqConfig.h"
 #include "WaveAnalyzer.h"
 #include "EventData.h"
+#include "EventData_io.h"
 #include "InstallPaths.h"
 
 #include <TFile.h>
@@ -23,22 +24,6 @@
 static constexpr int kMaxCh = fdec::MAX_ROCS * fdec::MAX_SLOTS * 16;
 
 using EventVars       = prad2::RawEventData;
-void SetReadBranches(TTree *tree, EventVars &ev, bool write_peaks)
-{
-    tree->SetBranchAddress("event_num", &ev.event_num);
-    tree->SetBranchAddress("trigger_bits",   &ev.trigger_bits);
-    tree->SetBranchAddress("timestamp", &ev.timestamp);
-    tree->SetBranchAddress("hycal.nch",       &ev.nch);
-    tree->SetBranchAddress("hycal.module_id", ev.module_id);
-    tree->SetBranchAddress("hycal.nsamples",  ev.nsamples);
-    tree->SetBranchAddress("hycal.samples",   ev.samples);
-    if (write_peaks) {
-        tree->SetBranchAddress("hycal.npeaks",       &ev.npeaks);
-        tree->SetBranchAddress("hycal.peak_height",  ev.peak_height);
-        tree->SetBranchAddress("hycal.peak_time",    ev.peak_time);
-        tree->SetBranchAddress("hycal.peak_integral",ev.peak_integral);
-    }
-}
 
 const int LG_num = 76;
 int LG_module_id[LG_num] = 
@@ -78,7 +63,7 @@ int main(int argc, char *argv[])
         return 1;
     }
     EventVars ev;
-    SetReadBranches(tree, ev, true);
+    prad2::SetRawReadBranches(tree, ev);
 
     //setup for reconstruction
     fdec::HyCalSystem hycal;

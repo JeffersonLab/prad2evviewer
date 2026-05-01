@@ -25,6 +25,7 @@
 #include "HyCalCluster.h"
 #include "WaveAnalyzer.h"
 #include "EventData.h"
+#include "EventData_io.h"
 #include "InstallPaths.h"
 #include "load_daq_config.h"
 #include "RunInfoConfig.h"
@@ -58,20 +59,6 @@ namespace fs = std::filesystem;
 
 using EventVars = prad2::RawEventData;
 using namespace analysis;
-
-// ── Branch setup ─────────────────────────────────────────────────────────────
-static void SetReadBranches(TTree *tree, EventVars &ev)
-{
-    tree->SetBranchAddress("event_num",         &ev.event_num);
-    tree->SetBranchAddress("trigger_bits",      &ev.trigger_bits);
-    tree->SetBranchAddress("hycal.nch",         &ev.nch);
-    tree->SetBranchAddress("hycal.module_id",   ev.module_id);
-    tree->SetBranchAddress("hycal.npeaks",      &ev.npeaks);
-    tree->SetBranchAddress("hycal.peak_time",   ev.peak_time);
-    tree->SetBranchAddress("hycal.peak_integral", ev.peak_integral);
-    tree->SetBranchAddress("hycal.gain_factor", ev.gain_factor);
-    tree->SetBranchAddress("hycal.peak_height", ev.peak_height);
-}
 
 // ── Per-thread accumulated results ──────────────────────────────────────────
 struct ThreadResult {
@@ -278,7 +265,7 @@ int main(int argc, char *argv[])
                 }
 
                 EventVars ev;
-                SetReadBranches(tree, ev);
+                prad2::SetRawReadBranches(tree, ev);
 
                 int run_num = get_run_int(root_files[fi]);
                 gRunConfig = LoadRunConfig(db_dir + "/runinfo/2p1_general.json", run_num);
