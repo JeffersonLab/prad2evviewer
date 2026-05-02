@@ -139,6 +139,10 @@ void Replay::clearEvent(EventVars &ev)
     ev.nch = 0;
     ev.gem_nch = 0;
     ev.ssp_raw.clear();
+    std::fill(std::begin(ev.npeaks), std::end(ev.npeaks), 0);
+    std::fill(&ev.peak_height[0][0],   &ev.peak_height[0][0]   + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.peak_time[0][0],     &ev.peak_time[0][0]     + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.peak_integral[0][0], &ev.peak_integral[0][0] + prad2::kMaxChannels * fdec::MAX_PEAKS, 0.f);
 }
 
 void Replay::clearReconEvent(EventVars_Recon &ev)
@@ -155,6 +159,14 @@ void Replay::clearReconEvent(EventVars_Recon &ev)
     ev.veto_nch = 0;
     ev.lms_nch = 0;
     ev.ssp_raw.clear();
+    std::fill(std::begin(ev.veto_npeaks), std::end(ev.veto_npeaks), 0);
+    std::fill(&ev.veto_peak_time[0][0],     &ev.veto_peak_time[0][0]     + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.veto_peak_height[0][0],   &ev.veto_peak_height[0][0]   + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.veto_peak_integral[0][0], &ev.veto_peak_integral[0][0] + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(std::begin(ev.lms_npeaks), std::end(ev.lms_npeaks), 0);
+    std::fill(&ev.lms_peak_time[0][0],     &ev.lms_peak_time[0][0]     + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.lms_peak_height[0][0],   &ev.lms_peak_height[0][0]   + 4 * fdec::MAX_PEAKS, 0.f);
+    std::fill(&ev.lms_peak_integral[0][0], &ev.lms_peak_integral[0][0] + 4 * fdec::MAX_PEAKS, 0.f);
 }
 
 void Replay::setupBranches(TTree *tree, EventVars &ev, bool write_peaks)
@@ -301,7 +313,7 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
                             ev->ped_quality[nch] = wres.ped.quality;
                             ev->ped_slope[nch]   = wres.ped.slope;
                             ev->npeaks[nch]   = static_cast<uint8_t>(wres.npeaks);
-                            for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                            for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; p++) {
                                 ev->peak_height[nch][p]   = wres.peaks[p].height;
                                 ev->peak_time[nch][p]     = wres.peaks[p].time;
                                 ev->peak_integral[nch][p] = wres.peaks[p].integral;
@@ -528,71 +540,77 @@ if(!prad1){
                         if (!(roc.slots[s].channel_mask & (1ull << c))) continue;
                         auto &cd = roc.slots[s].channels[c];
                         if (cd.nsamples <= 0) continue;
+
+                        std::string mod_name = moduleName(crate, s, c);
+                        if(mod_name.empty()) continue;
+
                         if(is_lms || is_alpha) {
-                            std::string mod_name = moduleName(crate, s, c);
-                            if(mod_name.empty()) continue;
-                            if(mod_name[0] != 'W' && mod_name[0] != 'G'){
-                                if(mod_name[0] == 'V'){
-                                    if(mod_name.length() != 2) continue;
-                                    ev->veto_id[veto_nch] = mod_name[1] - '0';
-                                    ana.Analyze(cd.samples, cd.nsamples, wres);
-                                    ev->veto_npeaks[veto_nch] = wres.npeaks;
-                                    for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
-                                        ev->veto_peak_integral[veto_nch][p] = wres.peaks[p].integral;
-                                        ev->veto_peak_time[veto_nch][p] = wres.peaks[p].time;
-                                    }
-                                    veto_nch++;
+                            if(mod_name[0] == 'L'){
+                                if(mod_name.length() != 4) continue;
+                                if(lms_nch >= 4) { lms_nch++; continue; } // guard against overflow
+                                if(mod_name[3] == 'P') ev->lms_id[lms_nch] = 0;
+                                else ev->lms_id[lms_nch] = mod_name[3] - '0';
+                                ana.Analyze(cd.samples, cd.nsamples, wres);
+                                ev->lms_npeaks[lms_nch] = wres.npeaks;
+                                if(wres.npeaks <= 0) continue;
+                                for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                                    ev->lms_peak_height[lms_nch][p] = wres.peaks[p].height;
+                                    ev->lms_peak_integral[lms_nch][p] = wres.peaks[p].integral;
+                                    ev->lms_peak_time[lms_nch][p] = wres.peaks[p].time;
                                 }
-                                else if(mod_name[0] == 'L'){
-                                    if(mod_name.length() != 4) continue;
-                                    if(mod_name[3] == 'P') ev->lms_id[lms_nch] = 0;
-                                    else ev->lms_id[lms_nch] = mod_name[3] - '0';
-                                    ana.Analyze(cd.samples, cd.nsamples, wres);
-                                    ev->lms_npeaks[lms_nch] = wres.npeaks;
-                                    for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
-                                        ev->lms_peak_integral[lms_nch][p] = wres.peaks[p].integral;
-                                        ev->lms_peak_time[lms_nch][p] = wres.peaks[p].time;
-                                    }
-                                    lms_nch++;
+                                lms_nch++;
+                            }
+                            else continue;
+                        }
+
+                        if(is_sum && !is_lms) {
+                            if(mod_name[0] == 'V'){
+                                if(mod_name.length() != 2) continue;
+                                if(veto_nch >= 4) { veto_nch++; continue; } // guard against overflow
+                                ev->veto_id[veto_nch] = mod_name[1] - '0';
+                                ana.Analyze(cd.samples, cd.nsamples, wres);
+                                ev->veto_npeaks[veto_nch] = wres.npeaks;
+                                if(wres.npeaks <= 0) continue;
+                                for (int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p) {
+                                    ev->veto_peak_height[veto_nch][p] = wres.peaks[p].height;
+                                    ev->veto_peak_integral[veto_nch][p] = wres.peaks[p].integral;
+                                    ev->veto_peak_time[veto_nch][p] = wres.peaks[p].time;
                                 }
+                                veto_nch++;
+                            }
+                            else{
+                                const auto *mod = hycal.module_by_daq(crate, s, c);
+                                if (!mod || !mod->is_hycal()) continue;
+                                float adc = 0.f;
+                                if(prad1 == true) 
+                                    adc = cd.samples[0] * 0.543; //0.543 for prad1 run1308,correct to 1.1GeV
                                 else{
-                                    //std::cerr << "Replay: unknown module " << mod_name << " at crate " << crate << " slot " << s << " channel " << c << "\n";
-                                }
-                                continue;
-                            }
-                        }
-                        if( !(is_sum && !is_lms) ) continue; 
-
-                        const auto *mod = hycal.module_by_daq(crate, s, c);
-                        if (!mod || !mod->is_hycal()) continue;
-                        float adc = 0.f;
-                        if(prad1 == true) 
-                            adc = cd.samples[0] * 0.543; //0.543 for prad1 run1308,correct to 1.1GeV
-                        else{
-                            ana.Analyze(cd.samples, cd.nsamples, wres);
-                            if (wres.npeaks <= 0) continue;
-                            int bestIdx = -1;
-                            float bestHeight = -1.f;
-                            for(int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p){
-                                if(wres.peaks[p].time > gRunConfig.hc_time_win_lo &&
-                                   wres.peaks[p].time < gRunConfig.hc_time_win_hi) {
-                                    if(wres.peaks[p].height > bestHeight) {
-                                        bestHeight = wres.peaks[p].height;
-                                        bestIdx = p;
+                                    ana.Analyze(cd.samples, cd.nsamples, wres);
+                                    if (wres.npeaks <= 0) continue;
+                                    int bestIdx = -1;
+                                    float bestHeight = -1.f;
+                                    for(int p = 0; p < wres.npeaks && p < fdec::MAX_PEAKS; ++p){
+                                        if(wres.peaks[p].time > gRunConfig.hc_time_win_lo &&
+                                        wres.peaks[p].time < gRunConfig.hc_time_win_hi) {
+                                            if(wres.peaks[p].height > bestHeight) {
+                                                bestHeight = wres.peaks[p].height;
+                                                bestIdx = p;
+                                            }
+                                        }
                                     }
+                                    if (bestIdx < 0) continue;
+                                    adc = wres.peaks[bestIdx].integral;
                                 }
-                            }
-                            if (bestIdx < 0) continue;
-                            adc = wres.peaks[bestIdx].integral;
-                        }
-                        //gain correction for HyCal modules
-                        if(mod->id > 1000) adc *= gain_correction.w[mod->id-1000].avg;
-                        else adc *= gain_correction.g[mod->id].avg;
+                                //gain correction for HyCal modules
+                                if(mod->id > 1000) adc *= gain_correction.w[mod->id-1000].avg;
+                                else adc *= gain_correction.g[mod->id].avg;
 
-                        float energy = static_cast<float>(mod->energize(adc));
-                        clusterer.AddHit(mod->index, energy);
-                        ev->total_energy += energy;
-                        nch++;
+                                float energy = static_cast<float>(mod->energize(adc));
+                                clusterer.AddHit(mod->index, energy);
+                                ev->total_energy += energy;
+                                nch++;
+                            }
+                        }
                     }
                 }
             }
