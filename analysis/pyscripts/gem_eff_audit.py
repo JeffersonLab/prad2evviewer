@@ -435,6 +435,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--max-hits-per-det", type=int,   default=3,
                     help="Cap seed/match candidates per detector (mirrors "
                          "AppState::gem_eff_max_hits_per_det = 3).")
+    ap.add_argument("--min-cluster-energy", type=float, default=500.0,
+                    help="Minimum HyCal cluster energy (MeV) to enter the "
+                         "denominator.  Mirrors AppState::"
+                         "gem_eff_min_cluster_energy.  Default 500 MeV.")
     ap.add_argument("--n-dets",           type=int,   default=4,
                     help="Number of GEM detectors to consider (default 4).")
     args = ap.parse_args(argv)
@@ -473,6 +477,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         max_hits_per_det = args.max_hits_per_det,
         gem_pos_res      = gem_pos_res,
     )
+    print(f"[setup] min HyCal cluster E = {args.min_cluster_energy:.0f} MeV")
 
     mode_current  = ModeStats("current (seed=0,1)")
     mode_allseeds = ModeStats("all-seeds (0,1,2,3)")
@@ -544,6 +549,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 all_dets = list(range(n_dets))
                 for hcx, hcy, hcz, energy in hc_lab:
                     if hcz <= 0:
+                        continue
+                    if energy < args.min_cluster_energy:
                         continue
                     sigma_hc = C.hycal_pos_resolution(pr_A, pr_B, pr_C, energy)
                     n_used += 1
@@ -651,7 +658,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     write_outputs(out_dir,
                   mode_current, mode_allseeds, mode_unbiased, mode_target,
-                  loo, params, n_phys, n_events_filter_pass, n_used)
+                  loo, params, n_phys, n_events_filter_pass, n_used,
+                  args.min_cluster_energy)
     return 0
 
 
@@ -669,7 +677,8 @@ def write_outputs(out_dir: Path,
                   cur: ModeStats, allseeds: ModeStats, unbiased: ModeStats,
                   target: ModeStats,
                   loo: LooStats, params: TrackingParams,
-                  n_phys: int, n_events_filter_pass: int, n_used: int
+                  n_phys: int, n_events_filter_pass: int, n_used: int,
+                  min_cluster_energy: float
                   ) -> None:
 
     # ---- text summary (stdout) --------------------------------------------
@@ -680,7 +689,8 @@ def write_outputs(out_dir: Path,
     print(f"physics events processed : {n_phys}")
     print(f"events passing filter    : {n_events_filter_pass}  "
           f"(≥1 HyCal cluster AND ≥3 GEM detectors with hits)")
-    print(f"HyCal clusters considered: {n_used}")
+    print(f"HyCal clusters considered: {n_used}  "
+          f"(after E ≥ {min_cluster_energy:.0f} MeV cut)")
     print(f"match_nsigma             : {params.match_nsigma}")
     print(f"max_chi2_per_dof         : {params.max_chi2}")
     print(f"max_hits_per_det         : {params.max_hits_per_det}")
