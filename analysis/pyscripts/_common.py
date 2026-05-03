@@ -26,7 +26,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 try:
     from prad2py import dec, det
@@ -117,6 +117,71 @@ def load_matching_config(
     if isinstance(t, list) and len(t) >= 3:
         tgt = (float(t[0]), float(t[1]), float(t[2]))
     return (A, B, C), gem, tgt
+
+
+def _read_recon_config() -> dict:
+    """Parse database/reconstruction_config.json once.  Returns {} on any
+    failure (file missing, parse error, etc.) so callers can fall back to
+    library defaults silently."""
+    db = os.environ.get("PRAD2_DATABASE_DIR", "database")
+    try:
+        with open(Path(db) / "reconstruction_config.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def make_hycal_cluster_config():
+    """Build a det.HyCalClusterConfig from
+    reconstruction_config.json:hycal.  Falls back to the C++ struct's
+    library defaults for any missing key, so partial JSON works."""
+    cfg = det.HyCalClusterConfig()
+    j = _read_recon_config().get("hycal")
+    if not isinstance(j, dict):
+        return cfg
+    if "min_module_energy"  in j: cfg.min_module_energy  = float(j["min_module_energy"])
+    if "min_center_energy"  in j: cfg.min_center_energy  = float(j["min_center_energy"])
+    if "min_cluster_energy" in j: cfg.min_cluster_energy = float(j["min_cluster_energy"])
+    if "min_cluster_size"   in j: cfg.min_cluster_size   = int(j["min_cluster_size"])
+    if "corner_conn"        in j: cfg.corner_conn        = bool(j["corner_conn"])
+    if "split_iter"         in j: cfg.split_iter         = int(j["split_iter"])
+    if "least_split"        in j: cfg.least_split        = float(j["least_split"])
+    if "log_weight_thres"   in j: cfg.log_weight_thres   = float(j["log_weight_thres"])
+    return cfg
+
+
+def _apply_gem_cluster_overrides(cfg, j: dict) -> None:
+    """Mutate a det.ClusterConfig in place from a JSON dict."""
+    if "min_cluster_hits"    in j: cfg.min_cluster_hits    = int(j["min_cluster_hits"])
+    if "max_cluster_hits"    in j: cfg.max_cluster_hits    = int(j["max_cluster_hits"])
+    if "consecutive_thres"   in j: cfg.consecutive_thres   = int(j["consecutive_thres"])
+    if "split_thres"         in j: cfg.split_thres         = float(j["split_thres"])
+    if "cross_talk_width"    in j: cfg.cross_talk_width    = float(j["cross_talk_width"])
+    if "charac_dists"        in j and isinstance(j["charac_dists"], list):
+        cfg.charac_dists = [float(v) for v in j["charac_dists"]]
+    if "match_mode"          in j: cfg.match_mode          = int(j["match_mode"])
+    if "match_adc_asymmetry" in j: cfg.match_adc_asymmetry = float(j["match_adc_asymmetry"])
+    if "match_time_diff"     in j: cfg.match_time_diff     = float(j["match_time_diff"])
+    if "match_ts_period"     in j: cfg.ts_period           = float(j["match_ts_period"])
+
+
+def make_gem_cluster_configs(n_dets: int) -> list:
+    """Return one det.ClusterConfig per GEM detector.  Starts from
+    reconstruction_config.json:gem.default and applies per-detector
+    overrides under gem.{0..n_dets-1}.  If the JSON has no gem block we
+    return n_dets default-initialized ClusterConfigs."""
+    base = _read_recon_config().get("gem")
+    out = [det.ClusterConfig() for _ in range(n_dets)]
+    if not isinstance(base, dict):
+        return out
+    if isinstance(base.get("default"), dict):
+        for c in out:
+            _apply_gem_cluster_overrides(c, base["default"])
+    for d in range(n_dets):
+        per = base.get(str(d))
+        if isinstance(per, dict):
+            _apply_gem_cluster_overrides(out[d], per)
+    return out
 
 
 def hycal_pos_resolution(A: float, B: float, C: float, energy_mev: float) -> float:
@@ -410,7 +475,12 @@ def setup_pipeline(*,
         _print("[WARN] no HyCal calibration file — energies will be wrong.")
 
     p.hc_clusterer = det.HyCalCluster(p.hycal)
-    p.hc_clusterer.set_config(det.HyCalClusterConfig())
+    hc_cfg = make_hycal_cluster_config()
+    p.hc_clusterer.set_config(hc_cfg)
+    _print(f"[setup] HC cluster : min_mod_E={hc_cfg.min_module_energy:g}  "
+           f"min_ctr_E={hc_cfg.min_center_energy:g}  "
+           f"min_cl_E={hc_cfg.min_cluster_energy:g}  "
+           f"split_iter={hc_cfg.split_iter}")
 
     p.wave_ana = dec.WaveAnalyzer(p.cfg.wave_cfg)
 
@@ -423,16 +493,66 @@ def setup_pipeline(*,
 
     ped_path = gem_ped_file or resolve_db_path(p.geo.gem_pedestal_file)
     cm_path  = gem_cm_file  or resolve_db_path(p.geo.gem_common_mode_file)
+    # Crate remap (file-side hardware crate ID → logical crate ID in
+    # gem_map.json) — built from daq_cfg.roc_tags entries with type == "gem".
+    # Mirrors the C++ server's setup; without it, pedestals/CM keyed by raw
+    # EVIO bank crate IDs (146/147) silently fail to match the gem_map's
+    # remapped crates (1/2) and APVs run at default noise → no hits.
+    gem_crate_remap = {int(re.tag): int(re.crate)
+                       for re in p.cfg.roc_tags
+                       if getattr(re, "type", "") == "gem"}
+    if gem_crate_remap:
+        _print(f"[setup] GEM crate remap: {gem_crate_remap}")
     if ped_path:
-        p.gem_sys.load_pedestals(ped_path)
+        p.gem_sys.load_pedestals(ped_path, gem_crate_remap)
         _print(f"[setup] GEM peds   : {ped_path}")
     else:
         _print("[WARN] no GEM pedestal file — full-readout data reconstructs empty.")
     if cm_path:
-        p.gem_sys.load_common_mode_range(cm_path)
+        p.gem_sys.load_common_mode_range(cm_path, gem_crate_remap)
         _print(f"[setup] GEM CM     : {cm_path}")
+    # Pedestal checksum so we can prove the loaded values are identical
+    # to the C++ server's [PEDSUM] line.  If the sums differ, the same
+    # file is being applied differently between the two pipelines.
+    n_apvs = p.gem_sys.get_n_apvs()
+    sum_noise = 0.0
+    sum_off   = 0.0
+    n_strips  = 0
+    for ai in range(n_apvs):
+        apv = p.gem_sys.get_apv_config(ai)
+        for ch in range(128):
+            ped = apv.pedestal(ch)
+            sum_noise += float(ped.noise)
+            sum_off   += float(ped.offset)
+            n_strips  += 1
+    _print(f"[PEDSUM] n_apvs={n_apvs} n_strips={n_strips} "
+           f"sum_noise={sum_noise:.6f} sum_offset={sum_off:.6f}")
 
     p.gem_clusterer = det.GemCluster()
+    # gem_map.json globals — print so a startup diff against the C++ server
+    # confirms identical strip-level filtering.
+    _print(f"[GEMSYS] common_mode_thr={p.gem_sys.common_mode_threshold:g}"
+           f" zero_sup_thr={p.gem_sys.zero_sup_threshold:g}"
+           f" cross_talk_thr={p.gem_sys.cross_talk_threshold:g}"
+           f" min_peak={p.gem_sys.min_peak_adc:g}"
+           f" min_sum={p.gem_sys.min_sum_adc:g}"
+           f" rej_first={int(p.gem_sys.reject_first_timebin)}"
+           f" rej_last={int(p.gem_sys.reject_last_timebin)}")
+    gem_cfgs = make_gem_cluster_configs(p.gem_sys.get_n_detectors())
+    p.gem_sys.set_recon_configs(gem_cfgs)
+    # Per-detector ClusterConfig dump — matches the C++ [GEMCFG] line so
+    # the two startups can be diffed.
+    for d, c in enumerate(gem_cfgs):
+        _print(f"[GEMCFG] d{d}"
+               f" min_hits={c.min_cluster_hits}"
+               f" max_hits={c.max_cluster_hits}"
+               f" consec={c.consecutive_thres}"
+               f" split={c.split_thres:g}"
+               f" xtalk={c.cross_talk_width:g}"
+               f" match_mode={c.match_mode}"
+               f" asym={c.match_adc_asymmetry:g}"
+               f" tdiff={c.match_time_diff:g}"
+               f" tperiod={c.ts_period:g}")
 
     # ---- EVIO discovery --------------------------------------------------
     p.evio_files = discover_split_files(evio_path or "")
@@ -456,9 +576,18 @@ HC_TIME_LO = 100.0
 HC_TIME_HI = 200.0
 
 
-def reconstruct_hycal(p: Pipeline, fadc_evt) -> list:
+def reconstruct_hycal(p: Pipeline, fadc_evt,
+                      time_window: Optional[Tuple[float, float]] = None) -> list:
     """Run HyCal waveform → energy → cluster on one decoded EventData.
-    Returns a list of det.ClusterHit (detector frame)."""
+    Returns a list of det.ClusterHit (detector frame).
+
+    Per-channel peak selection mirrors the C++ server's clustering input
+    (`AppState::processEvent`): pick the peak with the largest integral
+    across all detected peaks (no time gate), then feed the integral as
+    the channel's clustering energy.  Pass `time_window=(lo, hi)` to also
+    require the chosen peak's time within those bounds — useful when an
+    analysis wants to restrict to triggered peaks only, but NOT what the
+    online monitor does."""
     p.hc_clusterer.clear()
     for ri in range(fadc_evt.nrocs):
         roc = fadc_evt.roc(ri)
@@ -477,13 +606,18 @@ def reconstruct_hycal(p: Pipeline, fadc_evt) -> list:
                 if cd.nsamples <= 0:
                     continue
                 _, _, peaks = p.wave_ana.analyze(cd.samples)
-                # Largest peak inside the trigger window.
+                # Best peak by INTEGRAL across all detected peaks — matches
+                # `bestPeak()` in viewer_utils.h, which the server feeds into
+                # HyCalCluster::AddHit.
                 best = None
-                best_h = -1.0
+                best_i = -1.0
                 for pk in peaks:
-                    if HC_TIME_LO < pk.time < HC_TIME_HI and pk.height > best_h:
+                    if time_window is not None:
+                        if not (time_window[0] < pk.time < time_window[1]):
+                            continue
+                    if pk.integral > best_i:
                         best = pk
-                        best_h = pk.height
+                        best_i = pk.integral
                 if best is None:
                     continue
                 p.hc_clusterer.add_hit(mod.index,
@@ -535,8 +669,26 @@ def add_common_args(ap: argparse.ArgumentParser) -> None:
                     help="Skip the column-name header row.")
 
 
-# Trigger gate — only events with this exact bitmask are reconstructed.
-# Same as the C++ scripts' `trigger_bits == 0x100` filter.
+# Physics trigger bits accepted for reconstruction.  Mirrors the server's
+# `physics.accept_trigger_bits` set in monitor_config.json — currently
+# {SSP0, SSP1, SSP2, SSP3} = bits {8,9,10,11} = mask 0xf00.  The check is
+# bitwise-AND (an event passes if ANY accepted bit is set), matching
+# `TriggerFilter::operator()` in src/app_state.h.  The previous behaviour
+# (== 0x100) restricted the audit to SSP0-only events and silently
+# excluded the cluster-counting triggers, which produced a 2× sample-bias
+# vs the server in the GEM efficiency audit.
+PHYSICS_TRIGGER_MASK = 0xf00
+
+
+def passes_physics_trigger(trigger_bits: int) -> bool:
+    """C++-equivalent physics trigger gate (`bits & PHYSICS_TRIGGER_MASK`).
+    Use this in scripts instead of `== PHYSICS_TRIGGER_BITS`."""
+    return bool(trigger_bits & PHYSICS_TRIGGER_MASK)
+
+
+# Backwards-compat alias — old scripts that did `!= PHYSICS_TRIGGER_BITS`
+# still work but only accept SSP0.  New code should call
+# `passes_physics_trigger`.
 PHYSICS_TRIGGER_BITS = 0x100
 
 

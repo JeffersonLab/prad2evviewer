@@ -276,8 +276,15 @@ float GemSystem::GetHoleXOffset() const
 
 void GemSystem::Clear()
 {
-    for (auto &w : apv_work_)
+    for (auto &w : apv_work_) {
         std::memset(w.hit_pos, 0, sizeof(w.hit_pos));
+        // Also zero the raw waveform buffer.  Strict reading of the ZS
+        // path says raw is invisible to consumers when hit_pos is false,
+        // but in practice not zeroing it makes the per-event result
+        // depend on which prior events were processed (see commit msg
+        // for the gem_eff_audit/server divergence we chased down).
+        std::memset(w.raw, 0, sizeof(w.raw));
+    }
     for (auto &pd : plane_data_) {
         pd[0].hits.clear();
         pd[0].clusters.clear();

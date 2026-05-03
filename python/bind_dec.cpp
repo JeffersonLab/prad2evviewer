@@ -73,10 +73,16 @@ void bind_fadc(py::module_ &m)
         .def_property_readonly("samples",
             [](const fdec::ChannelData &c) {
                 // Always copy — the owning EventData may be reused/overwritten.
-                return py::array_t<uint16_t>(
-                    {c.nsamples},
-                    {static_cast<py::ssize_t>(sizeof(uint16_t))},
-                    c.samples);
+                // Explicit copy: allocate a fresh numpy array with no base
+                // pointer, then std::copy_n into it.  The (shape,strides,ptr)
+                // constructor without a base is interpreted by pybind11 as
+                // "wrap this pointer", which silently corrupts memory when the
+                // C++ object is freed (we hit this exact bug — accessing
+                // .samples poisoned unrelated SspEventData buffers stored
+                // alongside).  Allocating-then-copying is unambiguously safe.
+                py::array_t<uint16_t> arr(c.nsamples);
+                std::copy_n(c.samples, c.nsamples, arr.mutable_data());
+                return arr;
             },
             "16-bit ADC samples as a fresh numpy array (copy of nsamples values).");
 
@@ -720,21 +726,24 @@ void bind_ssp(py::module_ &m)
         .def_readonly("has_online_cm", &ssp::ApvData::has_online_cm)
         .def_property_readonly("strips",
             [](const ssp::ApvData &a) {
-                // [APV_STRIP_SIZE][SSP_TIME_SAMPLES] int16 — fresh copy.
-                return py::array_t<int16_t>(
-                    {static_cast<py::ssize_t>(ssp::APV_STRIP_SIZE),
-                     static_cast<py::ssize_t>(ssp::SSP_TIME_SAMPLES)},
-                    {static_cast<py::ssize_t>(sizeof(int16_t) * ssp::SSP_TIME_SAMPLES),
-                     static_cast<py::ssize_t>(sizeof(int16_t))},
-                    &a.strips[0][0]);
+                // [APV_STRIP_SIZE][SSP_TIME_SAMPLES] int16 — explicit
+                // allocate-then-copy.  The 3-arg array_t(shape,strides,ptr)
+                // constructor has ambiguous ownership and was observed to
+                // poison unrelated buffers (see ChannelData.samples note).
+                py::array_t<int16_t> arr({
+                    static_cast<py::ssize_t>(ssp::APV_STRIP_SIZE),
+                    static_cast<py::ssize_t>(ssp::SSP_TIME_SAMPLES)});
+                std::copy_n(&a.strips[0][0],
+                            ssp::APV_STRIP_SIZE * ssp::SSP_TIME_SAMPLES,
+                            arr.mutable_data());
+                return arr;
             },
             "(128, 6) int16 numpy array of raw ADC samples (fresh copy).")
         .def_property_readonly("online_cm",
             [](const ssp::ApvData &a) {
-                return py::array_t<int16_t>(
-                    {static_cast<py::ssize_t>(ssp::SSP_TIME_SAMPLES)},
-                    {static_cast<py::ssize_t>(sizeof(int16_t))},
-                    a.online_cm);
+                py::array_t<int16_t> arr(static_cast<py::ssize_t>(ssp::SSP_TIME_SAMPLES));
+                std::copy_n(a.online_cm, ssp::SSP_TIME_SAMPLES, arr.mutable_data());
+                return arr;
             },
             "6-element online common-mode values (fresh copy).")
         .def("has_strip", &ssp::ApvData::hasStrip);

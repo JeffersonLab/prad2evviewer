@@ -516,8 +516,14 @@ void ViewerServer::buildHistograms()
             // skip events that don't pass the filter
             if (app_file_.filterActive() && !app_file_.evaluateFilter(event, ssp))
                 return;
-            app_file_.processEvent(event, ana, wres);
+            // GEM reco BEFORE processEvent — runGemEfficiency (inside
+            // processEvent) reads gem_sys.GetHits(d), which only holds the
+            // current event's hits after processGemEvent runs.  Online and
+            // single-event accumulate paths already use this order; the
+            // preprocess loop must too, otherwise efficiency reads stale
+            // GEM hits from the previous event.
             if (ssp) app_file_.processGemEvent(*ssp);
+            app_file_.processEvent(event, ana, wres);
         },
         // recon events (ROOT recon)
         [&](int idx, const ReconEventData &recon) {

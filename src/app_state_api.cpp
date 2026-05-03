@@ -134,7 +134,15 @@ json AppState::apiGemEfficiency() const
     std::lock_guard<std::mutex> lk(data_mtx);
     int n = (int)gem_eff_num.size();
     int n_dets_runtime = std::min(n, gem_sys.GetNDetectors());
-    int den = gem_eff_den;   // shared denominator
+
+    auto loo_mode_name = [](GemEffLooMode m) -> const char* {
+        switch (m) {
+            case GemEffLooMode::Loo:           return "loo";
+            case GemEffLooMode::LooTargetIn:   return "loo-target-in";
+            case GemEffLooMode::TargetSeed:    return "loo-target-seed";
+        }
+        return "loo-target-seed";
+    };
 
     json counters = json::array();
     json detectors = json::array();
@@ -143,8 +151,10 @@ json AppState::apiGemEfficiency() const
             ? gem_sys.GetDetectors()[d].name
             : ("GEM" + std::to_string(d));
         int num = gem_eff_num[d];
+        int den = (d < (int)gem_eff_den.size()) ? gem_eff_den[d] : 0;
         float eff_pct = (den > 0) ? (100.f * num / den) : 0.f;
-        // Each detector's card shows num/den with the same shared `den`.
+        // Per-detector LOO: each card has its own denominator (anchors that
+        // succeeded with detector d as the test detector).
         counters.push_back({
             {"id", d}, {"name", name},
             {"num", num}, {"den", den}, {"eff_pct", eff_pct},
@@ -162,14 +172,25 @@ json AppState::apiGemEfficiency() const
         }
         detectors.push_back(info);
     }
+    json diag = json::array();
+    for (int d = 0; d < 4; ++d) {
+        diag.push_back({
+            {"test_d",       d},
+            {"n_call",       gem_eff_diag_call[d]},
+            {"n_3matched",   gem_eff_diag_3matched[d]},
+            {"n_pass_chi2",  gem_eff_diag_pass_chi2[d]},
+            {"n_pass_resid", gem_eff_diag_pass_resid[d]},
+        });
+    }
     return {
         {"enabled",   gem_enabled},
         {"counters",  counters},
-        {"den",       den},
         {"detectors", detectors},
+        {"diag",      diag},
         {"snapshot",  gemEffSnapshotJson()},
         {"hycal_z",   hycal_transform.z},
         {"config", {
+            {"loo_mode",              loo_mode_name(gem_eff_loo_mode)},
             {"min_cluster_energy",    gem_eff_min_cluster_energy},
             {"match_nsigma",          gem_eff_match_nsigma},
             {"max_chi2_per_dof",      gem_eff_max_chi2},
@@ -177,6 +198,9 @@ json AppState::apiGemEfficiency() const
             {"min_denom_for_eff",     gem_eff_min_denom},
             {"healthy",               gem_eff_healthy},
             {"warning",               gem_eff_warning},
+            {"target_sigma",          {gem_eff_target_sigma_x,
+                                       gem_eff_target_sigma_y,
+                                       gem_eff_target_sigma_z}},
         }},
     };
 }
@@ -610,15 +634,27 @@ void AppState::fillConfigJson(json &cfg) const
             {"min", gem_resid_min}, {"max", gem_resid_max}, {"step", gem_resid_step},
         }},
     };
-    cfg["gem"]["efficiency"] = {
-        {"min_cluster_energy",    gem_eff_min_cluster_energy},
-        {"match_nsigma",          gem_eff_match_nsigma},
-        {"max_chi2_per_dof",      gem_eff_max_chi2},
-        {"max_hits_per_detector", gem_eff_max_hits_per_det},
-        {"min_denom_for_eff",     gem_eff_min_denom},
-        {"healthy",               gem_eff_healthy},
-        {"warning",               gem_eff_warning},
-    };
+    {
+        const char *loo_name = "loo-target-seed";
+        switch (gem_eff_loo_mode) {
+            case GemEffLooMode::Loo:           loo_name = "loo"; break;
+            case GemEffLooMode::LooTargetIn:   loo_name = "loo-target-in"; break;
+            case GemEffLooMode::TargetSeed:    loo_name = "loo-target-seed"; break;
+        }
+        cfg["gem"]["efficiency"] = {
+            {"loo_mode",              loo_name},
+            {"min_cluster_energy",    gem_eff_min_cluster_energy},
+            {"match_nsigma",          gem_eff_match_nsigma},
+            {"max_chi2_per_dof",      gem_eff_max_chi2},
+            {"max_hits_per_detector", gem_eff_max_hits_per_det},
+            {"min_denom_for_eff",     gem_eff_min_denom},
+            {"healthy",               gem_eff_healthy},
+            {"warning",               gem_eff_warning},
+            {"target_sigma",          json::array({gem_eff_target_sigma_x,
+                                                   gem_eff_target_sigma_y,
+                                                   gem_eff_target_sigma_z})},
+        };
+    }
     cfg["gem"]["pos_res"] = gem_pos_res;
     cfg["gem"]["hycal_pos_res"] = json::array({
         hycal.GetPositionResolutionA(),

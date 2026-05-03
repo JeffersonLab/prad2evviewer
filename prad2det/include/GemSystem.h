@@ -34,30 +34,35 @@ namespace gem
 // --- data structures --------------------------------------------------------
 
 struct StripHit {
-    int32_t strip;          // plane-wise strip number
-    float   charge;         // max charge across time samples
-    short   max_timebin;    // time sample with max charge
-    float   position;       // physical position in mm
-    bool    cross_talk;
+    int32_t strip       = 0;   // plane-wise strip number
+    float   charge      = 0.f; // max charge across time samples
+    short   max_timebin = 0;   // time sample with max charge
+    float   position    = 0.f; // physical position in mm
+    bool    cross_talk  = false;
     std::vector<float> ts_adc;  // all time sample ADC values
 };
 
 struct StripCluster {
-    float   position;       // charge-weighted position (mm)
-    float   peak_charge;    // highest strip charge in cluster
-    float   total_charge;   // sum of all strip charges
-    short   max_timebin;
-    bool    cross_talk;
+    float   position     = 0.f; // charge-weighted position (mm)
+    float   peak_charge  = 0.f; // highest strip charge in cluster
+    float   total_charge = 0.f; // sum of all strip charges
+    short   max_timebin  = -1;
+    // CRITICAL: must be value-initialized.  filterClusters() reads
+    // this field; an uninitialized value (random heap byte) was the
+    // root cause of the cross-call non-determinism that made GEM0
+    // efficiency ~half the expected rate when reconstruct_hycal was
+    // interleaved with reconstruct_gem.
+    bool    cross_talk   = false;
     std::vector<StripHit> hits;
 };
 
 struct GEMHit {
-    float x, y, z;
-    int   det_id;
-    float x_charge, y_charge;
-    float x_peak,   y_peak;
-    short x_max_timebin, y_max_timebin;
-    int   x_size, y_size;
+    float x = 0.f, y = 0.f, z = 0.f;
+    int   det_id = -1;
+    float x_charge = 0.f, y_charge = 0.f;
+    float x_peak   = 0.f, y_peak   = 0.f;
+    short x_max_timebin = 0, y_max_timebin = 0;
+    int   x_size = 0, y_size = 0;
 };
 
 // --- APV pedestal -----------------------------------------------------------
@@ -247,6 +252,10 @@ public:
     float GetCommonModeThreshold() const { return common_thres_; }
     float GetZeroSupThreshold()    const { return zerosup_thres_; }
     float GetCrossTalkThreshold()  const { return crosstalk_thres_; }
+    bool  GetRejectFirstTimebin()  const { return reject_first_timebin_; }
+    bool  GetRejectLastTimebin()   const { return reject_last_timebin_; }
+    float GetMinPeakAdc()          const { return min_peak_adc_; }
+    float GetMinSumAdc()           const { return min_sum_adc_; }
     void  SetCommonModeThreshold(float v) { common_thres_ = v; }
     void  SetZeroSupThreshold(float v)    { zerosup_thres_ = v; }
 

@@ -319,24 +319,36 @@ struct AppState {
     // dependent resolution lives on HyCalSystem (PositionResolution(E)).
     std::vector<float> gem_pos_res;
 
-    // GEM tracking-efficiency monitor (target-seeded straight-line fits).
+    // GEM tracking-efficiency monitor — leave-one-out per detector.
     //
-    // A "good track" is one where the fit through HyCal + ≥3 GEM hits passes
-    // the χ² gate.  The seed line is (target → HyCal cluster) — no GEM is in
-    // the seed, so every detector competes on equal footing for matching and
-    // the per-detector numerator isn't biased by an "auto-matched seed".
-    // Tracks that don't point back to the target are rejected, removing
-    // beam halo from the sample.  Each good track increments the shared
-    // denominator gem_eff_den; per-detector numerator gem_eff_num[R]
-    // increments for every detector R that contributed a matched hit.
-    // See runGemEfficiency().
+    // For each test detector D, the OTHER 3 GEMs + HyCal anchor a straight
+    // line; the line is then projected to D and a hit is searched within the
+    // matching window.  D contributes nothing to the anchor, so the
+    // prediction at D is unbiased.  Three modes select how the anchor is
+    // built:
+    //   loo-target-seed  single seed = (target → HyCal); cheapest.  Default.
+    //   loo              for each OTHER GEM hit, draw seed (HyCal → that
+    //                    hit), pick lowest-χ² anchor.  No vertex assumption.
+    //   loo-target-in    same GEM-seeding as `loo` but the fit also includes
+    //                    (target_x, target_y, target_z) as a soft constraint
+    //                    weighted by σ_target_{x,y} ⊕ slope·σ_target_z.
+    // Per-detector counters: `gem_eff_den[D]` is the number of anchors that
+    // succeeded for test detector D, `gem_eff_num[D]` is the subset of those
+    // where D actually had a hit at the prediction.
+    enum class GemEffLooMode { TargetSeed = 0, Loo = 1, LooTargetIn = 2 };
+    GemEffLooMode gem_eff_loo_mode  = GemEffLooMode::TargetSeed;
     float gem_eff_min_cluster_energy = 500.f;  // MeV — HyCal cluster gate for the seed
     float gem_eff_match_nsigma       = 3.f;
-    float gem_eff_max_chi2           = 10.f;
+    float gem_eff_max_chi2           = 3.5f;
     int   gem_eff_max_hits_per_det   = 50;
     int   gem_eff_min_denom          = 20;
     float gem_eff_healthy            = 90.f;
     float gem_eff_warning            = 70.f;
+    // Beam-spot transverse + target-length sigmas, used only by loo-target-in
+    // (and only matter when the fit actually pulls toward the target).
+    float gem_eff_target_sigma_x    = 1.0f;   // mm
+    float gem_eff_target_sigma_y    = 1.0f;   // mm
+    float gem_eff_target_sigma_z    = 20.0f;  // mm
 
     // EPICS config
     int   epics_max_history = 5000;
@@ -429,8 +441,17 @@ struct AppState {
     // GEM efficiency counters: per-detector numerator, single shared
     // denominator (incremented once per good track).  See class-level comment
     // above for the definition of a good track.
-    std::vector<int> gem_eff_num;
-    int              gem_eff_den = 0;
+    std::vector<int> gem_eff_num;   // per-detector numerator
+    std::vector<int> gem_eff_den;   // per-detector denominator (LOO test count)
+    // Per-stage breakdown for the loo-target-seed mode: lets us diff the
+    // server's anchor pipeline against the offline gem_eff_audit.py at
+    // each gate.  Only the target-seeded path is instrumented because
+    // the GEM-seeded modes try multiple seeds per (HyCal, test_d) and
+    // the per-stage counts would not be 1:1 comparable.
+    int gem_eff_diag_call[4]       = {0,0,0,0};
+    int gem_eff_diag_3matched[4]   = {0,0,0,0};
+    int gem_eff_diag_pass_chi2[4]  = {0,0,0,0};
+    int gem_eff_diag_pass_resid[4] = {0,0,0,0};
     static constexpr int GEM_EFF_MAX_DETS = 4;
     // Snapshot of the last good track for the "last good event" panel.
     // Stores the single fit + per-detector status (used in fit, prediction,

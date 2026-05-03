@@ -372,7 +372,9 @@ def best_track_target_seed(hcx: float, hcy: float, hcz: float,
                            gem_z: Sequence[float],
                            params: TrackingParams,
                            min_match: int = 3,
-                           candidate_dets: Optional[Sequence[int]] = None
+                           candidate_dets: Optional[Sequence[int]] = None,
+                           diag: Optional[Dict[str, List[int]]] = None,
+                           test_d: int = -1,
                            ) -> Optional[TrackResult]:
     """Target-seeded tracker — no GEM in the seed line.
 
@@ -391,6 +393,8 @@ def best_track_target_seed(hcx: float, hcy: float, hcz: float,
     n_dets = len(hits_by_det)
     if candidate_dets is None:
         candidate_dets = range(n_dets)
+    if diag is not None and test_d >= 0:
+        diag["n_call"][test_d] += 1
     ax_s, bx_s, ay_s, by_s = seed_line(target_x, target_y, target_z,
                                        hcx, hcy, hcz)
 
@@ -409,13 +413,19 @@ def best_track_target_seed(hcx: float, hcy: float, hcz: float,
         s_gem = params.gem_pos_res[d] if d < len(params.gem_pos_res) else 0.1
         s_total = math.sqrt(s_hc_at_gem * s_hc_at_gem + s_gem * s_gem)
         cut = params.match_nsigma * s_total
-        idx, _ = find_closest(hits_by_det[d], pred_x, pred_y, cut)
+        # Cap candidate hits per detector to mirror the C++
+        # findClosest cap (gem_eff_max_hits_per_det).
+        cap = params.max_hits_per_det
+        cand_hits = hits_by_det[d][:cap] if cap > 0 else hits_by_det[d]
+        idx, _ = find_closest(cand_hits, pred_x, pred_y, cut)
         if idx >= 0:
             matched[d] = True
-            cand[d] = hits_by_det[d][idx]
+            cand[d] = cand_hits[idx]
 
     if sum(matched) < min_match:
         return None
+    if diag is not None and test_d >= 0:
+        diag["n_3matched"][test_d] += 1
 
     z_arr: List[float] = [hcz]
     x_arr: List[float] = [hcx]
@@ -437,8 +447,12 @@ def best_track_target_seed(hcx: float, hcy: float, hcz: float,
     ax, bx, ay, by, chi2_per_dof = fit
     if chi2_per_dof > params.max_chi2:
         return None
+    if diag is not None and test_d >= 0:
+        diag["n_pass_chi2"][test_d] += 1
     if not fit_residuals_within_window((ax, bx, ay, by), matched, cand, params):
         return None
+    if diag is not None and test_d >= 0:
+        diag["n_pass_resid"][test_d] += 1
     return TrackResult(chi2_per_dof, matched, cand, (ax, bx, ay, by))
 
 
@@ -521,17 +535,28 @@ class LooStats:
     chi2_list:      List[float]       = field(default_factory=list)
     residuals_x:    List[List[float]] = field(default_factory=lambda: [[],[],[],[]])
     residuals_y:    List[List[float]] = field(default_factory=lambda: [[],[],[],[]])
+    # Predicted hit position at the test detector, in detector-local (mm),
+    # split into "matched" (efficiency map) and "unmatched" (inefficiency
+    # map) per test detector.
+    eff_local_x:    List[List[float]] = field(default_factory=lambda: [[],[],[],[]])
+    eff_local_y:    List[List[float]] = field(default_factory=lambda: [[],[],[],[]])
+    ineff_local_x:  List[List[float]] = field(default_factory=lambda: [[],[],[],[]])
+    ineff_local_y:  List[List[float]] = field(default_factory=lambda: [[],[],[],[]])
 
 
 def _record_loo(stats: "LooStats", test_d: int,
                 track: Optional[TrackResult],
                 hits_by_det: List[List[Tuple[float, float, float]]],
                 gem_z: Sequence[float],
-                params: TrackingParams) -> None:
+                params: TrackingParams,
+                test_xform) -> None:
     """Bookkeeping for a single LOO test attempt.  If `track` is None the
     anchor failed (3-GEM fit didn't pass χ²/residual gates); we don't
     increment any counter — denominator only counts events where the
-    OTHER 3 GEMs delivered a clean anchor."""
+    OTHER 3 GEMs delivered a clean anchor.  `test_xform` is the test
+    detector's DetectorTransform, used to convert the predicted hit
+    position (lab) to detector-local for the efficiency / inefficiency
+    histograms."""
     if track is None:
         return
     stats.chi2_list.append(track.chi2_per_dof)
@@ -544,11 +569,18 @@ def _record_loo(stats: "LooStats", test_d: int,
     cut = params.match_nsigma * s_gem
     idx, _ = find_closest(hits_by_det[test_d], pred_x, pred_y, cut)
     stats.n_attempted[test_d] += 1
+    # Predicted hit position in test-detector local coords (for the heatmap).
+    pred_lx, pred_ly, _ = test_xform.lab_to_local(pred_x, pred_y, zd)
     if idx >= 0:
         stats.n_matched[test_d] += 1
         h = hits_by_det[test_d][idx]
         stats.residuals_x[test_d].append(h[0] - pred_x)
         stats.residuals_y[test_d].append(h[1] - pred_y)
+        stats.eff_local_x[test_d].append(pred_lx)
+        stats.eff_local_y[test_d].append(pred_ly)
+    else:
+        stats.ineff_local_x[test_d].append(pred_lx)
+        stats.ineff_local_y[test_d].append(pred_ly)
 
 
 # ---------------------------------------------------------------------------
@@ -568,9 +600,9 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "3.5 — picks up real tracks while cutting the "
                          "anchor χ² tail of pile-up combinations.  The "
                          "anchor_chi2.png plot sweeps a range around this.")
-    ap.add_argument("--max-hits-per-det", type=int,   default=3,
+    ap.add_argument("--max-hits-per-det", type=int,   default=50,
                     help="Cap seed/match candidates per detector (mirrors "
-                         "AppState::gem_eff_max_hits_per_det = 3).")
+                         "AppState::gem_eff_max_hits_per_det = 50).")
     ap.add_argument("--min-cluster-energy", type=float, default=500.0,
                     help="Minimum HyCal cluster energy (MeV) to enter the "
                          "denominator.  Mirrors AppState::"
@@ -631,6 +663,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     n_dets = min(args.n_dets, 4, p.gem_sys.get_n_detectors())
     gem_z = list(p.geo.gem_z[:n_dets])
+    # Per-detector half-extents (mm) for the local-coord heatmaps.
+    det_half: List[Tuple[float, float]] = []
+    _det_cfgs = p.gem_sys.get_detectors()
+    for d in range(n_dets):
+        dc = _det_cfgs[d]
+        det_half.append((dc.plane_x.size * 0.5, dc.plane_y.size * 0.5))
+    while len(det_half) < 4:
+        det_half.append((300.0, 300.0))
     print(f"[setup] GEM lab z = {gem_z}")
     print(f"[setup] target    = ({p.geo.target_x:g}, {p.geo.target_y:g}, "
           f"{p.geo.target_z:g}) mm  (from runinfo)")
@@ -659,6 +699,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"loo-target-seed (target=({p.geo.target_x:g},{p.geo.target_y:g},"
         f"{p.geo.target_z:g})→HyCal seed, HyCal + 3 OTHER GEMs in fit)")
     loo_modes = (loo, loo_target_in, loo_target_seed)
+    # Per-test_d stage counters for the loo-target-seed mode (matches the
+    # server's default loo_mode).  Lets us pinpoint where Python and the
+    # C++ server's anchor counts diverge.
+    diag_target_seed: Dict[str, List[int]] = {
+        "n_call":        [0]*4,   # times best_track_target_seed entered for test_d
+        "n_3matched":    [0]*4,   # all 3 candidate dets matched in seed window
+        "n_pass_chi2":   [0]*4,   # passed χ²/dof gate (after 3-match)
+        "n_pass_resid":  [0]*4,   # passed per-det residual gate (= denominator)
+    }
     n_events_filter_pass = 0
 
     ch = dec.EvChannel()
@@ -686,7 +735,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
                 fadc_evt = decoded["event"]
                 ssp_evt  = decoded["ssp"]
-                if fadc_evt.info.trigger_bits != C.PHYSICS_TRIGGER_BITS:
+                if not C.passes_physics_trigger(fadc_evt.info.trigger_bits):
                     continue
 
                 # HyCal clusters → lab.
@@ -738,6 +787,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     for test_d in range(n_dets):
                         others = [d for d in range(n_dets) if d != test_d]
                         seeds_for_loo = [d for d in others if hits_by_det[d]]
+                        test_xform = p.gem_xforms[test_d]
 
                         # --- loo: GEM-seeded, no target ---
                         if seeds_for_loo:
@@ -747,7 +797,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 candidate_dets=others,
                                 params=params, min_match=3)
                             _record_loo(loo, test_d, track,
-                                        hits_by_det, gem_z, params)
+                                        hits_by_det, gem_z, params, test_xform)
 
                         # --- loo-target-in: GEM-seeded, target in fit ---
                         if seeds_for_loo:
@@ -764,15 +814,16 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 sigma_target_y=sigma_target_y,
                                 sigma_target_z=sigma_target_z)
                             _record_loo(loo_target_in, test_d, track,
-                                        hits_by_det, gem_z, params)
+                                        hits_by_det, gem_z, params, test_xform)
 
                         # --- loo-target-seed: target→HyCal seed, no target in fit ---
                         track = best_track_target_seed(hcx, hcy, hcz,
                             p.geo.target_x, p.geo.target_y, p.geo.target_z,
                             sigma_hc, hits_by_det, gem_z, params,
-                            min_match=3, candidate_dets=others)
+                            min_match=3, candidate_dets=others,
+                            diag=diag_target_seed, test_d=test_d)
                         _record_loo(loo_target_seed, test_d, track,
-                                    hits_by_det, gem_z, params)
+                                    hits_by_det, gem_z, params, test_xform)
 
             if done:
                 break
@@ -785,9 +836,21 @@ def main(argv: Optional[List[str]] = None) -> int:
           f"{n_events_filter_pass} pass filter (≥1 HyCal + ≥3 GEMs), "
           f"{n_used} HyCal clusters used, {elapsed:.1f}s")
 
+    print()
+    print("loo-target-seed per-stage breakdown (per test_d):")
+    print(f"  {'test_d':>8} {'n_call':>10} {'n_3matched':>12} "
+          f"{'n_pass_chi2':>12} {'n_pass_resid':>13}")
+    for d in range(4):
+        print(f"  {d:>8} "
+              f"{diag_target_seed['n_call'][d]:>10} "
+              f"{diag_target_seed['n_3matched'][d]:>12} "
+              f"{diag_target_seed['n_pass_chi2'][d]:>12} "
+              f"{diag_target_seed['n_pass_resid'][d]:>13}")
+    print()
+
     write_outputs(out_dir, loo_modes, params,
                   n_phys, n_events_filter_pass, n_used,
-                  args.min_cluster_energy)
+                  args.min_cluster_energy, det_half)
     return 0
 
 
@@ -805,7 +868,8 @@ def write_outputs(out_dir: Path,
                   loo_modes: Sequence["LooStats"],
                   params: TrackingParams,
                   n_phys: int, n_events_filter_pass: int, n_used: int,
-                  min_cluster_energy: float
+                  min_cluster_energy: float,
+                  det_half: Sequence[Tuple[float, float]]
                   ) -> None:
 
     # ---- text summary (stdout) --------------------------------------------
@@ -858,6 +922,8 @@ def write_outputs(out_dir: Path,
     for mode in loo_modes:
         slug = mode.name.split()[0].replace("/", "_")
         _plot_residuals(plt, mode, out_dir / f"residuals_{slug}.png")
+        _plot_eff_ineff_local(plt, mode, det_half,
+                              out_dir / f"eff_ineff_{slug}.png")
 
 
 def _import_pyplot():
@@ -968,6 +1034,71 @@ def _plot_anchor_chi2(plt, modes: Sequence[LooStats],
     ax_acc.legend(loc="best", fontsize=9)
 
     fig.tight_layout()
+    fig.savefig(out, dpi=120)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+def _plot_eff_ineff_local(plt, loo: LooStats,
+                          det_half: Sequence[Tuple[float, float]],
+                          out: Path) -> None:
+    """2 rows × 4 columns of local-coord 2D histograms for one LOO variant.
+    Top row: efficiency map — predicted hit position (in detector-local mm)
+    for every LOO test where the test detector also recorded a hit.
+    Bottom row: inefficiency map — predicted positions where it didn't.
+    Columns are GEM 0..3.  Axes are shared within columns (x) and within
+    rows (y) so the eight panels pack tight; colorbars sit at the right
+    edge of each row."""
+    has_eff   = any(loo.eff_local_x[d]   for d in range(4))
+    has_ineff = any(loo.ineff_local_x[d] for d in range(4))
+    if not (has_eff or has_ineff):
+        return
+    import numpy as np
+    fig, axes = plt.subplots(
+        2, 4, figsize=(13, 11), sharex="col", sharey="row",
+        gridspec_kw={"wspace": 0.02, "hspace": 0.10,
+                     "left": 0.07, "right": 0.94,
+                     "top": 0.95, "bottom": 0.05})
+    row_meta = (
+        ("efficiency",   "expected and detected",     "viridis",
+         lambda d: loo.eff_local_x[d],   lambda d: loo.eff_local_y[d]),
+        ("inefficiency", "expected but not detected", "magma",
+         lambda d: loo.ineff_local_x[d], lambda d: loo.ineff_local_y[d]),
+    )
+    for row, (kind, blurb, cmap, get_x, get_y) in enumerate(row_meta):
+        last_im = None
+        for d in range(4):
+            xmax, ymax = (det_half[d] if d < len(det_half) else (300.0, 300.0))
+            bins_x = np.linspace(-xmax, xmax, 60)
+            bins_y = np.linspace(-ymax, ymax, 60)
+            ax = axes[row, d]
+            xs, ys = get_x(d), get_y(d)
+            n = len(xs)
+            if n > 0:
+                _, _, _, im = ax.hist2d(xs, ys, bins=[bins_x, bins_y],
+                                        cmap=cmap)
+                last_im = im
+            else:
+                ax.text(0.5, 0.5, "no data", ha="center", va="center",
+                        transform=ax.transAxes)
+            ax.set_aspect("equal")
+            ax.set_xlim(-xmax, xmax)
+            ax.set_ylim(-ymax, ymax)
+            ax.set_title(f"GEM{d}  (n={n})", fontsize=10)
+            if row == 1:
+                ax.set_xlabel("local x (mm)")
+            if d == 0:
+                ax.set_ylabel(f"{kind}\n({blurb})\nlocal y (mm)",
+                              fontsize=9)
+            ax.tick_params(labelsize=8)
+            ax.grid(True, alpha=0.2)
+        # one shared colorbar per row, riding on the rightmost panel
+        if last_im is not None:
+            cax = fig.add_axes([0.945, axes[row, -1].get_position().y0,
+                                0.012, axes[row, -1].get_position().height])
+            fig.colorbar(last_im, cax=cax)
+    fig.suptitle(f"LOO predicted hit positions at the test detector  "
+                 f"[{loo.name.split()[0]}]", fontsize=11, y=0.98)
     fig.savefig(out, dpi=120)
     plt.close(fig)
     print(f"[plot] {out}")

@@ -155,10 +155,16 @@
             "residual_hist": {"min": -50.0, "max": 50.0, "step": 0.5}
         },
         "efficiency": {
-            "// min_cluster_energy: MeV — HyCal cluster gate for target-seed line": "",
+            "// LOO per-detector tracking efficiency.  Three modes:": "",
+            "//   loo-target-seed  single seed=(target→HyCal); fit=HyCal+3 OTHER GEMs.": "",
+            "//   loo              GEM-seeded; fit=HyCal+3 OTHER GEMs.  Vertex-agnostic.": "",
+            "//   loo-target-in    GEM-seeded; target also in fit weighted by": "",
+            "//                    matching:target_pos_res in reconstruction_config.json.": "",
+            "loo_mode":               "loo-target-seed",
+            "// min_cluster_energy: MeV — HyCal cluster gate for the seed.": "",
             "min_cluster_energy":     500.0,
             "match_nsigma":           3.0,
-            "max_chi2_per_dof":       10.0,
+            "max_chi2_per_dof":       3.5,
             "max_hits_per_detector":  50,
             "min_denom_for_eff":      20,
             "healthy":                90,

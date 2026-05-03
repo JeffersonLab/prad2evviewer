@@ -4,6 +4,7 @@
 #include "RunInfoConfig.h"
 
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
@@ -209,7 +210,15 @@ void AppState::init(const std::string &db_dir,
             gem_sys.Init(gem_map_file);
             gem_enabled = (gem_sys.GetNDetectors() > 0);
             if (gem_enabled) {
-                std::cerr << "GEM       : " << gem_sys.GetNDetectors() << " detectors\n";
+                std::cerr << "GEM       : " << gem_sys.GetNDetectors() << " detectors\n"
+                          << "[GEMSYS] common_mode_thr=" << gem_sys.GetCommonModeThreshold()
+                          << " zero_sup_thr="    << gem_sys.GetZeroSupThreshold()
+                          << " cross_talk_thr="  << gem_sys.GetCrossTalkThreshold()
+                          << " min_peak="        << gem_sys.GetMinPeakAdc()
+                          << " min_sum="         << gem_sys.GetMinSumAdc()
+                          << " rej_first="       << (int)gem_sys.GetRejectFirstTimebin()
+                          << " rej_last="        << (int)gem_sys.GetRejectLastTimebin()
+                          << "\n";
                 int ndet = gem_sys.GetNDetectors();
                 gem_transforms.resize(ndet);
                 // No eager prepare() here — fields are still defaults; the
@@ -491,6 +500,14 @@ void AppState::init(const std::string &db_dir,
             if (ge.contains("min_denom_for_eff"))     gem_eff_min_denom          = ge["min_denom_for_eff"];
             if (ge.contains("healthy"))               gem_eff_healthy            = ge["healthy"];
             if (ge.contains("warning"))               gem_eff_warning            = ge["warning"];
+            if (ge.contains("loo_mode")) {
+                std::string m = ge["loo_mode"].get<std::string>();
+                if      (m == "loo")              gem_eff_loo_mode = GemEffLooMode::Loo;
+                else if (m == "loo-target-in")    gem_eff_loo_mode = GemEffLooMode::LooTargetIn;
+                else if (m == "loo-target-seed")  gem_eff_loo_mode = GemEffLooMode::TargetSeed;
+                else std::cerr << "[WARN] gem.efficiency.loo_mode='" << m
+                               << "' unknown; falling back to loo-target-seed\n";
+            }
         }
         std::cerr << "GEM cfg   : match=" << gem_match_nsigma << "σ"
                   << "  efficiency=" << gem_eff_match_nsigma << "σ"
@@ -608,6 +625,25 @@ void AppState::init(const std::string &db_dir,
                     else
                         gem_sys.LoadCommonModeRange(cm, gem_crate_remap);
                 }
+                // Pedestal checksum — diff against Python audit's [PEDSUM]
+                // line to prove identical loaded values.
+                int n_apvs = gem_sys.GetNApvs();
+                double sum_noise = 0.0, sum_off = 0.0;
+                long n_strips = 0;
+                for (int ai = 0; ai < n_apvs; ++ai) {
+                    const auto &apv = gem_sys.GetApvConfig(ai);
+                    for (int ch = 0; ch < 128; ++ch) {
+                        sum_noise += apv.pedestal[ch].noise;
+                        sum_off   += apv.pedestal[ch].offset;
+                        ++n_strips;
+                    }
+                }
+                std::cerr << "[PEDSUM] n_apvs=" << n_apvs
+                          << " n_strips=" << n_strips
+                          << " sum_noise=" << std::fixed << std::setprecision(6)
+                          << sum_noise
+                          << " sum_offset=" << sum_off
+                          << std::defaultfloat << "\n";
             }
         }
     } else if (rcfg.contains("runinfo")) {
@@ -650,6 +686,22 @@ void AppState::init(const std::string &db_dir,
             std::string key = std::to_string(d);
             if (gemr.contains(key)) applyOne(gemr[key], per[d]);
         }
+        // Print the resolved per-detector configs before move so we can
+        // diff against the Python audit's [GEMCFG] block.
+        for (int d = 0; d < (int)per.size(); ++d) {
+            const auto &c = per[d];
+            std::cerr << "[GEMCFG] d" << d
+                      << " min_hits=" << c.min_cluster_hits
+                      << " max_hits=" << c.max_cluster_hits
+                      << " consec="   << c.consecutive_thres
+                      << " split="    << c.split_thres
+                      << " xtalk="    << c.cross_talk_width
+                      << " match_mode=" << c.match_mode
+                      << " asym="     << c.match_adc_asymmetry
+                      << " tdiff="    << c.match_time_diff
+                      << " tperiod="  << c.ts_period
+                      << "\n";
+        }
         gem_sys.SetReconConfigs(std::move(per));
         std::cerr << "GEM reco  : " << gem_sys.GetNDetectors()
                   << " per-detector ClusterConfig(s) installed\n";
@@ -671,13 +723,22 @@ void AppState::init(const std::string &db_dir,
             gem_pos_res.clear();
             for (auto &v : m["gem_pos_res"]) gem_pos_res.push_back(v.get<float>());
         }
+        if (m.contains("target_pos_res") && m["target_pos_res"].is_array()
+                && m["target_pos_res"].size() >= 3) {
+            gem_eff_target_sigma_x = m["target_pos_res"][0].get<float>();
+            gem_eff_target_sigma_y = m["target_pos_res"][1].get<float>();
+            gem_eff_target_sigma_z = m["target_pos_res"][2].get<float>();
+        }
         std::cerr << "Matching  : HyCal sigma(E)=sqrt((" << hycal.GetPositionResolutionA()
                   << "/sqrt(E_GeV))^2+(" << hycal.GetPositionResolutionB()
                   << "/E_GeV)^2+" << hycal.GetPositionResolutionC() << "^2) mm"
                   << "  GEM sigma=[";
         for (size_t i = 0; i < gem_pos_res.size(); ++i)
             std::cerr << (i ? "," : "") << gem_pos_res[i];
-        std::cerr << "] mm\n";
+        std::cerr << "] mm  target sigma=("
+                  << gem_eff_target_sigma_x << ","
+                  << gem_eff_target_sigma_y << ","
+                  << gem_eff_target_sigma_z << ") mm\n";
     }
 
     std::cerr << "Reco      : " << (recon_path.empty() ? "(none)" : recon_path)

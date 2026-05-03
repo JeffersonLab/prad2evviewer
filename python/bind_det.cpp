@@ -262,20 +262,29 @@ static void bind_gem(py::module_ &m)
             "Load the detector hierarchy and APV mapping from a JSON file "
             "(typically database/gem_map.json).")
         .def("load_pedestals",
-            [](gem::GemSystem &self, const std::string &path) {
+            [](gem::GemSystem &self, const std::string &path,
+               const std::map<int, int> &crate_remap) {
                 py::gil_scoped_release rel;
-                self.LoadPedestals(path);
+                self.LoadPedestals(path, crate_remap);
             },
             py::arg("ped_file"),
+            py::arg("crate_remap") = std::map<int, int>{},
             "Load per-strip pedestal mean/RMS.  Required before ProcessEvent "
-            "for real zero suppression — defaults keep all strips silent.")
+            "for real zero suppression — defaults keep all strips silent.  "
+            "`crate_remap` (file-side hardware crate ID → logical crate ID "
+            "in gem_map.json) defaults to identity; pass {tag: crate, ...} "
+            "from daq_cfg.roc_tags when the pedestal file uses raw EVIO "
+            "bank crate IDs (e.g. 146 → 1, 147 → 2 for PRad-II).")
         .def("load_common_mode_range",
-            [](gem::GemSystem &self, const std::string &path) {
+            [](gem::GemSystem &self, const std::string &path,
+               const std::map<int, int> &crate_remap) {
                 py::gil_scoped_release rel;
-                self.LoadCommonModeRange(path);
+                self.LoadCommonModeRange(path, crate_remap);
             },
             py::arg("cm_file"),
-            "Optional per-APV common-mode suppression window file.")
+            py::arg("crate_remap") = std::map<int, int>{},
+            "Optional per-APV common-mode suppression window file.  "
+            "`crate_remap` semantics match load_pedestals.")
 
         // per-event processing
         .def("clear", &gem::GemSystem::Clear,
@@ -400,7 +409,17 @@ static void bind_gem(py::module_ &m)
             &gem::GemSystem::GetZeroSupThreshold,
             &gem::GemSystem::SetZeroSupThreshold)
         .def_property_readonly("cross_talk_threshold",
-            &gem::GemSystem::GetCrossTalkThreshold);
+            &gem::GemSystem::GetCrossTalkThreshold)
+        // Per-strip filters loaded from gem_map.json — exposed read-only so
+        // analysis scripts can verify they match the live monitor.
+        .def_property_readonly("reject_first_timebin",
+            &gem::GemSystem::GetRejectFirstTimebin)
+        .def_property_readonly("reject_last_timebin",
+            &gem::GemSystem::GetRejectLastTimebin)
+        .def_property_readonly("min_peak_adc",
+            &gem::GemSystem::GetMinPeakAdc)
+        .def_property_readonly("min_sum_adc",
+            &gem::GemSystem::GetMinSumAdc);
 
     // --- GemPedestal -------------------------------------------------------
     py::class_<gem::GemPedestal>(m, "GemPedestal",
@@ -830,6 +849,17 @@ static void bind_transform(py::module_ &m)
             py::arg("dx"), py::arg("dy"), py::arg("dz") = 0.0f,
             "Map a local point to lab-frame (x, y, z).  dz defaults to 0 "
             "for planar GEM hits; pass shower depth for HyCal clusters.")
+        .def("lab_to_local",
+            [](const DetectorTransform &self,
+               float lx, float ly, float lz) {
+                float dx, dy, dz;
+                self.labToLocal(lx, ly, lz, dx, dy, dz);
+                return py::make_tuple(dx, dy, dz);
+            },
+            py::arg("lx"), py::arg("ly"), py::arg("lz"),
+            "Inverse of to_lab: map a lab-frame point to detector-local "
+            "(dx, dy, dz).  Useful for histogramming predicted hit "
+            "positions on the detector plane.")
         .def("rotate",
             [](const DetectorTransform &self, float dx, float dy) {
                 float ox, oy;

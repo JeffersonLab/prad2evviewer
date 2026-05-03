@@ -107,29 +107,45 @@ Line3D seedLine(float x1, float y1, float z1, float x2, float y2, float z2)
 }
 
 // Independent weighted LSQ fits in (z, x) and (z, y) — 4-parameter line.
-// chi2/dof reflects both axes: dof = 2N - 4 (N points × 2 measurements).
+// `wy = nullptr` reuses `wx` for both axes (the common case where σ_x = σ_y);
+// pass distinct arrays for anisotropic per-point uncertainties (e.g. the
+// target point in loo-target-in, where σ_target_z couples differently into
+// σ_x_eff and σ_y_eff via the slope).  dof = 2N - 4.
 bool fitWeightedLine(int N,
-                     const float *z, const float *x, const float *y, const float *w,
+                     const float *z, const float *x, const float *y,
+                     const float *wx, const float *wy,
                      Line3D &out)
 {
     if (N < 2) return false;
-    double Sw=0, Sz=0, Szz=0, Sx=0, Sxz=0, Sy=0, Syz=0;
+    if (wy == nullptr) wy = wx;
+    // x-fit
+    double Swx=0, Szx=0, Szzx=0, Sx=0, Sxz=0;
     for (int i = 0; i < N; ++i) {
-        double wi = w[i];
-        Sw  += wi;
-        Sz  += wi * z[i];
-        Szz += wi * z[i] * z[i];
-        Sx  += wi * x[i];
-        Sxz += wi * x[i] * z[i];
-        Sy  += wi * y[i];
-        Syz += wi * y[i] * z[i];
+        double wi = wx[i];
+        Swx  += wi;
+        Szx  += wi * z[i];
+        Szzx += wi * z[i] * z[i];
+        Sx   += wi * x[i];
+        Sxz  += wi * x[i] * z[i];
     }
-    double Delta = Sw * Szz - Sz * Sz;
-    if (std::abs(Delta) < 1e-9) return false;
-    double bx = (Sw * Sxz - Sz * Sx) / Delta;
-    double ax = (Sx - bx * Sz) / Sw;
-    double by = (Sw * Syz - Sz * Sy) / Delta;
-    double ay = (Sy - by * Sz) / Sw;
+    double Dx = Swx * Szzx - Szx * Szx;
+    if (std::abs(Dx) < 1e-9) return false;
+    double bx = (Swx * Sxz - Szx * Sx) / Dx;
+    double ax = (Sx - bx * Szx) / Swx;
+    // y-fit
+    double Swy=0, Szy=0, Szzy=0, Sy=0, Syz=0;
+    for (int i = 0; i < N; ++i) {
+        double wi = wy[i];
+        Swy  += wi;
+        Szy  += wi * z[i];
+        Szzy += wi * z[i] * z[i];
+        Sy   += wi * y[i];
+        Syz  += wi * y[i] * z[i];
+    }
+    double Dy = Swy * Szzy - Szy * Szy;
+    if (std::abs(Dy) < 1e-9) return false;
+    double by = (Swy * Syz - Szy * Sy) / Dy;
+    double ay = (Sy - by * Szy) / Swy;
     out.ax = (float)ax; out.bx = (float)bx;
     out.ay = (float)ay; out.by = (float)by;
     int dof = 2 * N - 4;
@@ -138,13 +154,21 @@ bool fitWeightedLine(int N,
         for (int i = 0; i < N; ++i) {
             double dxp = (ax + bx * z[i]) - x[i];
             double dyp = (ay + by * z[i]) - y[i];
-            chi2 += w[i] * (dxp*dxp + dyp*dyp);
+            chi2 += wx[i] * dxp * dxp + wy[i] * dyp * dyp;
         }
         out.chi2_per_dof = (float)(chi2 / dof);
     } else {
         out.chi2_per_dof = 0.f;
     }
     return true;
+}
+
+// Convenience overload: same weight for x and y at every point.
+inline bool fitWeightedLine(int N,
+                            const float *z, const float *x, const float *y,
+                            const float *w, Line3D &out)
+{
+    return fitWeightedLine(N, z, x, y, w, nullptr, out);
 }
 
 // Project a lab-frame line onto a detector's local plane (z_local = 0) using
@@ -599,7 +623,12 @@ void AppState::processEvent(fdec::EventData &event,
         for (size_t i = 0; i < reco_hits.size(); ++i) {
             auto &rh = reco_hits[i];
             auto &ci = cinfo[i];
-            hycal_transform.toLab(rh.x, rh.y, ci.lx, ci.ly, ci.lz);
+            // Use shower depth as z_local so the lab cluster sits at the
+            // shower-max plane, not the front face.  GEM-projection lever
+            // arms (hcz / z_gem) depend on this — at PRad scale the
+            // ~10 cm depth shifts predicted GEM positions by ~1-2 mm.
+            const float z_local = fdec::shower_depth(rh.center_id, rh.energy);
+            hycal_transform.toLab(rh.x, rh.y, z_local, ci.lx, ci.ly, ci.lz);
             float dx = ci.lx - target_x, dy = ci.ly - target_y, dz = ci.lz - target_z;
             float rv = std::sqrt(dx*dx + dy*dy);
             ci.theta = std::atan2(rv, dz) * (180.f / 3.14159265f);
@@ -771,7 +800,9 @@ void AppState::processReconEvent(const ReconEventData &recon)
         for (size_t i = 0; i < recon.clusters.size(); ++i) {
             auto &cl = recon.clusters[i];
             auto &ci = cinfo[i];
-            hycal_transform.toLab(cl.x, cl.y, ci.lx, ci.ly, ci.lz);
+            // Same shower-depth correction as the EVIO path above.
+            const float z_local = fdec::shower_depth(cl.center_id, cl.energy);
+            hycal_transform.toLab(cl.x, cl.y, z_local, ci.lx, ci.ly, ci.lz);
             float dx = ci.lx - target_x, dy = ci.ly - target_y, dz = ci.lz - target_z;
             float r = std::sqrt(dx*dx + dy*dy);
             ci.theta = std::atan2(r, dz) * (180.f / 3.14159265f);
@@ -1206,14 +1237,20 @@ void AppState::initGemEfficiency()
 {
     int n_gem = gem_enabled ? (int)gem_transforms.size() : 0;
     gem_eff_num.assign(n_gem, 0);
-    gem_eff_den = 0;
+    gem_eff_den.assign(n_gem, 0);
     gem_eff_snapshot = GemEffSnapshot{};
 }
 
 void AppState::clearGemEfficiency()
 {
     for (auto &n : gem_eff_num) n = 0;
-    gem_eff_den = 0;
+    for (auto &n : gem_eff_den) n = 0;
+    for (int d = 0; d < 4; ++d) {
+        gem_eff_diag_call[d] = 0;
+        gem_eff_diag_3matched[d] = 0;
+        gem_eff_diag_pass_chi2[d] = 0;
+        gem_eff_diag_pass_resid[d] = 0;
+    }
     gem_eff_snapshot = GemEffSnapshot{};
 }
 
@@ -1279,113 +1316,231 @@ void AppState::runGemEfficiency(int event_id,
         return std::abs(lx) <= xmax && std::abs(ly) <= ymax;
     };
 
-    // Target-seed: line from (target_x, target_y, target_z) → HyCal cluster.
-    // No GEM in the seed → every detector competes on equal footing for
-    // matching, so per-detector numerators aren't biased by an auto-matched
-    // seed detector (the prior GEM0/1-seeded mode inflated their numbers by
-    // ~3-5%).  Tracks that don't point back to the target are rejected,
-    // removing beam halo / upstream interactions from the sample.
-    Line3D seed = seedLine(target_x, target_y, target_z, hcx, hcy, hcz);
+    // ---- LOO anchor finder ------------------------------------------------
+    // Try a single seed (HyCal, S_hit) and return the resulting fit if it
+    // passes χ² + per-detector residual gates.  S = -1 means target-seeded
+    // (line goes target → HyCal, no GEM in the seed).  candidate_dets is a
+    // bitmask: bit d set ⇒ detector d is allowed as a match candidate.  The
+    // anchor never accesses the bit-cleared detectors (i.e. the test
+    // detector is invisible to the anchor).
+    constexpr int CAP = GEM_EFF_MAX_DETS + 1 + 1;  // +HyCal +target
+    struct Anchor {
+        bool   valid = false;
+        Line3D fit;
+        bool   matched[GEM_EFF_MAX_DETS] = {false,false,false,false};
+        float  cand_lx[GEM_EFF_MAX_DETS] = {0,0,0,0};
+        float  cand_ly[GEM_EFF_MAX_DETS] = {0,0,0,0};
+        float  cand_lz[GEM_EFF_MAX_DETS] = {0,0,0,0};
+    };
 
-    bool  matched[GEM_EFF_MAX_DETS] = {false,false,false,false};
-    float cand_lx[GEM_EFF_MAX_DETS] = {0,0,0,0};
-    float cand_ly[GEM_EFF_MAX_DETS] = {0,0,0,0};
-    float cand_lz[GEM_EFF_MAX_DETS] = {0,0,0,0};
-    for (int d = 0; d < n_dets; ++d) {
-        float pred_lx, pred_ly;
-        projectLineToLocal(gem_transforms[d], seed, pred_lx, pred_ly);
-        int idx; float lab_x, lab_y, lab_z;
-        findClosest(d, pred_lx, pred_ly, idx, lab_x, lab_y, lab_z);
-        if (idx >= 0) {
-            matched[d] = true;
-            cand_lx[d] = lab_x; cand_ly[d] = lab_y; cand_lz[d] = lab_z;
+    // Target-seeded LOO is the production-default path; we use a passed-in
+    // test_d to bump the per-stage diag counters for that mode only.  GEM-
+    // seeded modes try many seeds per (HyCal, test_d), so per-seed gates
+    // don't map 1:1 onto the audit script's per-anchor breakdown.
+    auto trySeed = [&](int S, int seed_idx, unsigned cand_mask,
+                       bool target_in_fit, int diag_test_d) -> Anchor {
+        Anchor a{};
+        Line3D seed;
+        if (S < 0) {
+            seed = seedLine(target_x, target_y, target_z, hcx, hcy, hcz);
+        } else {
+            const auto &hits_s = hits_by_det[S];
+            if (seed_idx < 0 || seed_idx >= (int)hits_s.size()) return a;
+            const auto &g0 = hits_s[seed_idx];
+            seed = seedLine(hcx, hcy, hcz, g0[0], g0[1], g0[2]);
+            a.matched[S] = true;
+            a.cand_lx[S] = g0[0]; a.cand_ly[S] = g0[1]; a.cand_lz[S] = g0[2];
         }
-    }
+        for (int d = 0; d < n_dets; ++d) {
+            if (!(cand_mask & (1u << d))) continue;
+            if (a.matched[d]) continue;          // S already matched
+            float pred_lx, pred_ly;
+            projectLineToLocal(gem_transforms[d], seed, pred_lx, pred_ly);
+            int idx; float lab_x, lab_y, lab_z;
+            findClosest(d, pred_lx, pred_ly, idx, lab_x, lab_y, lab_z);
+            if (idx >= 0) {
+                a.matched[d] = true;
+                a.cand_lx[d] = lab_x; a.cand_ly[d] = lab_y; a.cand_lz[d] = lab_z;
+            }
+        }
+        // Need all 3 candidate detectors to have matched (LOO requires the
+        // OTHER 3 GEMs all delivered a hit; this is the "clean basis" cut).
+        int nmatch = 0;
+        for (int d = 0; d < n_dets; ++d) if (a.matched[d]) ++nmatch;
+        if (nmatch < 3) return a;
+        if (S < 0 && diag_test_d >= 0 && diag_test_d < 4)
+            gem_eff_diag_3matched[diag_test_d]++;
+        // Build fit arrays: HyCal (+ optionally target) + matched GEMs.
+        float zarr[CAP], xarr[CAP], yarr[CAP], wxarr[CAP], wyarr[CAP];
+        int   N = 0;
+        zarr[N] = hcz; xarr[N] = hcx; yarr[N] = hcy;
+        wxarr[N] = wyarr[N] = w_h; ++N;
+        if (target_in_fit) {
+            // σ_target_z couples to the transverse measurement at z=target_z
+            // through the slope: σ_x_eff² = σ_target_x² + (bx_est·σ_z)².
+            // Slope estimate from the target → HyCal lever arm.
+            const float lever = (hcz != target_z) ? (hcz - target_z) : 1.f;
+            const float bx_est = (hcx - target_x) / lever;
+            const float by_est = (hcy - target_y) / lever;
+            const float sx2 = gem_eff_target_sigma_x * gem_eff_target_sigma_x
+                              + (bx_est * gem_eff_target_sigma_z)
+                              * (bx_est * gem_eff_target_sigma_z);
+            const float sy2 = gem_eff_target_sigma_y * gem_eff_target_sigma_y
+                              + (by_est * gem_eff_target_sigma_z)
+                              * (by_est * gem_eff_target_sigma_z);
+            zarr[N] = target_z; xarr[N] = target_x; yarr[N] = target_y;
+            wxarr[N] = 1.f / sx2; wyarr[N] = 1.f / sy2;
+            ++N;
+        }
+        for (int d = 0; d < n_dets; ++d) {
+            if (!a.matched[d]) continue;
+            zarr[N] = a.cand_lz[d]; xarr[N] = a.cand_lx[d]; yarr[N] = a.cand_ly[d];
+            const float s = sigmaGem(d);
+            wxarr[N] = wyarr[N] = 1.f / (s * s);
+            ++N;
+        }
+        if (!fitWeightedLine(N, zarr, xarr, yarr, wxarr, wyarr, a.fit)) return a;
+        if (a.fit.chi2_per_dof > gem_eff_max_chi2) {
+            a.matched[0] = a.matched[1] = a.matched[2] = a.matched[3] = false;
+            return a;
+        }
+        if (S < 0 && diag_test_d >= 0 && diag_test_d < 4)
+            gem_eff_diag_pass_chi2[diag_test_d]++;
+        // Per-detector fit-residual gate on the 3 anchors.
+        for (int d = 0; d < n_dets; ++d) {
+            if (!a.matched[d]) continue;
+            const float px = a.fit.ax + a.fit.bx * a.cand_lz[d];
+            const float py = a.fit.ay + a.fit.by * a.cand_lz[d];
+            const float dx = a.cand_lx[d] - px;
+            const float dy = a.cand_ly[d] - py;
+            const float s  = sigmaGem(d);
+            const float c  = gem_eff_match_nsigma * s;
+            if (dx*dx + dy*dy > c*c) {
+                a.matched[0] = a.matched[1] = a.matched[2] = a.matched[3] = false;
+                return a;
+            }
+        }
+        if (S < 0 && diag_test_d >= 0 && diag_test_d < 4)
+            gem_eff_diag_pass_resid[diag_test_d]++;
+        a.valid = true;
+        return a;
+    };
 
-    int nmatch = 0;
-    for (int d = 0; d < n_dets; ++d) if (matched[d]) nmatch++;
-    if (nmatch < 3) return;     // need ≥3 GEMs for a "good track"
+    // Build the anchor for one test_d under the configured LOO mode.
+    auto buildAnchor = [&](int test_d) -> Anchor {
+        unsigned cand_mask = 0;
+        for (int d = 0; d < n_dets; ++d) {
+            if (d != test_d) cand_mask |= (1u << d);
+        }
+        const bool target_in_fit =
+            (gem_eff_loo_mode == GemEffLooMode::LooTargetIn);
+        if (gem_eff_loo_mode == GemEffLooMode::TargetSeed) {
+            return trySeed(-1, -1, cand_mask, /*target_in_fit=*/false,
+                           /*diag_test_d=*/test_d);
+        }
+        // GEM-seeded modes (loo, loo-target-in): try every (S, hit) in the
+        // candidate detectors, keep the lowest-χ² anchor.
+        Anchor best{};
+        best.fit.chi2_per_dof = std::numeric_limits<float>::infinity();
+        for (int S = 0; S < n_dets; ++S) {
+            if (S == test_d) continue;
+            const auto &hits_s = hits_by_det[S];
+            int max_seeds = std::min((int)hits_s.size(),
+                                     gem_eff_max_hits_per_det);
+            for (int si = 0; si < max_seeds; ++si) {
+                Anchor a = trySeed(S, si, cand_mask, target_in_fit,
+                                   /*diag_test_d=*/-1);
+                if (!a.valid) continue;
+                if (a.fit.chi2_per_dof < best.fit.chi2_per_dof) best = a;
+            }
+        }
+        if (!best.valid) best = Anchor{};
+        return best;
+    };
 
-    // Fit: HyCal + every matched GEM.
-    constexpr int CAP = GEM_EFF_MAX_DETS + 1;
-    float zarr[CAP], xarr[CAP], yarr[CAP], warr[CAP];
-    int N = 0;
-    zarr[N] = hcz; xarr[N] = hcx; yarr[N] = hcy; warr[N] = w_h; ++N;
-    for (int d = 0; d < n_dets; ++d) {
-        if (!matched[d]) continue;
-        zarr[N] = cand_lz[d]; xarr[N] = cand_lx[d]; yarr[N] = cand_ly[d];
-        const float s = sigmaGem(d);
-        warr[N] = 1.f / (s * s); ++N;
-    }
-
-    Line3D fit;
-    if (!fitWeightedLine(N, zarr, xarr, yarr, warr, fit)) return;
-    if (fit.chi2_per_dof > gem_eff_max_chi2) return;
-
-    // Per-detector fit-residual gate: every matched detector's hit must lie
-    // within match_nsigma · σ_GEM[d] of the FIT line.  The seed-line window
-    // (σ_total) was just for finding initial candidates; once HyCal is in
-    // the fit, the projection uncertainty at any plane is dominated by GEM
-    // resolution — anything outside that radius is more likely a noise /
-    // pile-up hit than the actual track.
-    for (int d = 0; d < n_dets; ++d) {
-        if (!matched[d]) continue;
-        const float pred_x = fit.ax + fit.bx * cand_lz[d];
-        const float pred_y = fit.ay + fit.by * cand_lz[d];
-        const float dx = cand_lx[d] - pred_x;
-        const float dy = cand_ly[d] - pred_y;
-        const float s  = sigmaGem(d);
-        const float cut = gem_eff_match_nsigma * s;
-        if (dx * dx + dy * dy > cut * cut) return;
-    }
-
-    // Good track found.  Increment shared denominator and per-detector
-    // numerators (one per detector that contributed to the fit).
-    gem_eff_den++;
-    for (int R = 0; R < n_dets; ++R) {
-        if (matched[R]) gem_eff_num[R]++;
-    }
-
-    // Snapshot — overwrite previous "last good".
+    // Per-test-detector LOO — run the anchor finder excluding D, then probe D.
+    // The snapshot records the LAST valid anchor (whichever test_d succeeds
+    // last); per-detector counters accumulate independently.
     GemEffSnapshot &snap = gem_eff_snapshot;
-    snap = GemEffSnapshot{};
-    snap.valid = true;
-    snap.event_id = event_id;
-    snap.hycal_x = hcx; snap.hycal_y = hcy; snap.hycal_z = hcz;
-    snap.chi2_per_dof = fit.chi2_per_dof;
-    snap.ax = fit.ax; snap.bx = fit.bx;
-    snap.ay = fit.ay; snap.by = fit.by;
-
-    for (int R = 0; R < GEM_EFF_MAX_DETS; ++R) {
-        auto &dx = snap.dets[R];
-        dx = {};
-        if (R >= n_dets) continue;
-        dx.used_in_fit = matched[R];
-        dx.hit_present = matched[R];
-        if (matched[R]) {
-            dx.hit_lab_x = cand_lx[R];
-            dx.hit_lab_y = cand_ly[R];
-            dx.hit_lab_z = cand_lz[R];
-        }
-        // Predict on R from the fit.
+    bool any_valid = false;
+    for (int test_d = 0; test_d < n_dets; ++test_d) {
+        if (gem_eff_loo_mode == GemEffLooMode::TargetSeed
+            && test_d >= 0 && test_d < 4)
+            gem_eff_diag_call[test_d]++;
+        Anchor a = buildAnchor(test_d);
+        if (!a.valid) continue;
+        gem_eff_den[test_d]++;
+        // Project the anchor fit to test_d, search for a hit within
+        // match_nsigma · σ_GEM[test_d].
         float pred_lx, pred_ly;
-        projectLineToLocal(gem_transforms[R], fit, pred_lx, pred_ly);
-        dx.predicted_local_x = pred_lx;
-        dx.predicted_local_y = pred_ly;
-        float plab_x, plab_y, plab_z;
-        gem_transforms[R].toLab(pred_lx, pred_ly, plab_x, plab_y, plab_z);
-        dx.predicted_lab_x = plab_x;
-        dx.predicted_lab_y = plab_y;
-        dx.predicted_lab_z = plab_z;
-        dx.inside = inside(R, pred_lx, pred_ly);
-        if (matched[R]) {
-            float hl_x, hl_y, hl_z;
-            gem_transforms[R].labToLocal(cand_lx[R], cand_ly[R], cand_lz[R],
-                                          hl_x, hl_y, hl_z);
-            dx.resid_dx = hl_x - pred_lx;
-            dx.resid_dy = hl_y - pred_ly;
+        projectLineToLocal(gem_transforms[test_d], a.fit, pred_lx, pred_ly);
+        int idx; float lab_x, lab_y, lab_z;
+        const float s_test = sigmaGem(test_d);
+        // Reuse findClosest's gate by temporarily using a tighter window:
+        // it normally uses σ_total but here we want σ_GEM only.  Inline
+        // the search to keep findClosest unchanged.
+        idx = -1;
+        const auto &hits_t = hits_by_det[test_d];
+        const int max_n = std::min((int)hits_t.size(), gem_eff_max_hits_per_det);
+        const float cut_t = gem_eff_match_nsigma * s_test;
+        float best_d2 = cut_t * cut_t;
+        for (int i = 0; i < max_n; ++i) {
+            const auto &h = hits_t[i];
+            float lx, ly, lz;
+            gem_transforms[test_d].labToLocal(h[0], h[1], h[2], lx, ly, lz);
+            float dxr = lx - pred_lx, dyr = ly - pred_ly;
+            float d2 = dxr*dxr + dyr*dyr;
+            if (d2 < best_d2) {
+                best_d2 = d2;
+                idx = i;
+                lab_x = h[0]; lab_y = h[1]; lab_z = h[2];
+            }
         }
+        if (idx >= 0) gem_eff_num[test_d]++;
+
+        // Snapshot — record the latest successful LOO test for the GUI.
+        snap = GemEffSnapshot{};
+        snap.valid = true;
+        snap.event_id = event_id;
+        snap.hycal_x = hcx; snap.hycal_y = hcy; snap.hycal_z = hcz;
+        snap.chi2_per_dof = a.fit.chi2_per_dof;
+        snap.ax = a.fit.ax; snap.bx = a.fit.bx;
+        snap.ay = a.fit.ay; snap.by = a.fit.by;
+        for (int R = 0; R < GEM_EFF_MAX_DETS; ++R) {
+            auto &dx = snap.dets[R];
+            dx = {};
+            if (R >= n_dets) continue;
+            // R is "in the anchor fit" iff R != test_d and R was matched.
+            dx.used_in_fit = (R != test_d) && a.matched[R];
+            dx.hit_present = (R == test_d) ? (idx >= 0) : a.matched[R];
+            if (R == test_d && idx >= 0) {
+                dx.hit_lab_x = lab_x; dx.hit_lab_y = lab_y; dx.hit_lab_z = lab_z;
+            } else if (R != test_d && a.matched[R]) {
+                dx.hit_lab_x = a.cand_lx[R];
+                dx.hit_lab_y = a.cand_ly[R];
+                dx.hit_lab_z = a.cand_lz[R];
+            }
+            float plx, ply;
+            projectLineToLocal(gem_transforms[R], a.fit, plx, ply);
+            dx.predicted_local_x = plx;
+            dx.predicted_local_y = ply;
+            float pX, pY, pZ;
+            gem_transforms[R].toLab(plx, ply, pX, pY, pZ);
+            dx.predicted_lab_x = pX;
+            dx.predicted_lab_y = pY;
+            dx.predicted_lab_z = pZ;
+            dx.inside = inside(R, plx, ply);
+            if (dx.hit_present) {
+                float hlx, hly, hlz;
+                gem_transforms[R].labToLocal(dx.hit_lab_x, dx.hit_lab_y, dx.hit_lab_z,
+                                              hlx, hly, hlz);
+                dx.resid_dx = hlx - plx;
+                dx.resid_dy = hly - ply;
+            }
+        }
+        any_valid = true;
     }
+    (void)any_valid;
 }
 
 nlohmann::json AppState::gemEffSnapshotJson() const

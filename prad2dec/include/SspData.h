@@ -64,7 +64,14 @@ struct ApvData {
         strip_mask[0] = strip_mask[1] = 0;
         flags = 0;
         has_online_cm = false;
-        // zero strips only when needed (lazy clear via strip_mask)
+        // Zero strips fully — lazy clear (relying on strip_mask) caused
+        // an event-order-dependent divergence between the Python audit
+        // and the C++ server's GEM0 efficiency.  Investigation traced it
+        // to ApvData read paths that didn't gate on hasStrip(), e.g. the
+        // Python `apv.strips` binding's std::copy_n reading the full
+        // 128×6 buffer.  The cost is one ~1.5 KB memset per APV per
+        // event; worth the determinism guarantee.
+        std::memset(strips, 0, sizeof(strips));
     }
 
     void setStrip(int strip, int ts, int16_t value)
