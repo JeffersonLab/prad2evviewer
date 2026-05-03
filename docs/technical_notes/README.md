@@ -21,7 +21,7 @@ Each note lives in its own folder with the layout
 
 | # | Note | Author(s) | Subject |
 |---|---|---|---|
-| 1 | [Software Waveform Analysis](waveform_analysis/wave_analysis.md) | Chao Peng (ANL) | `fdec::WaveAnalyzer` (median+MAD pedestal, peak finding, integration) and `fdec::Fadc250FwAnalyzer` (firmware Mode 1/2/3 emulation), worked through one example PbWO₄ pulse. |
+| 1 | [Software Waveform Analysis](waveform_analysis/wave_analysis.md) | Chao Peng (ANL) | `fdec::WaveAnalyzer` (median+MAD pedestal, peak finding, integration), `fdec::Fadc250FwAnalyzer` (firmware Mode 1/2/3 emulation), and per-type pulse-template pile-up deconvolution, worked through synthetic and real PbWO₄ traces. |
 | 2 | [HyCal Clustering](hycal_clustering/hycal_clustering.md) | Chao Peng (ANL) | `fdec::HyCalCluster` Island clustering: DFS grouping, log-weighted center-of-gravity, profile-based shower split, shower-depth correction. |
 | 3 | [GEM Clustering](gem_clustering/gem_clustering.md) | Chao Peng (ANL) | `gem::GemCluster` strip-level clustering and X/Y matching: group + split + charge-weighted position, then Cartesian-with-cuts vs ADC-sorted matching. |
 

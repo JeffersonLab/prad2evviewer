@@ -456,6 +456,75 @@ with `Q_PEAK_PILED`, runs the explicit `wave_ana.deconvolve()` binding
 production `enabled` flag), and writes a small set of before/after PNGs
 suitable for slides or a code-review.
 
+### Worked example — synthetic 3-pulse pile-up
+
+Same input trace as
+[fig 7](#crowded-windows-and-pile-up-flagging) — three PbWO₄-like
+pulses placed at samples 20 / 35 / 50 with input heights 800 / 600 /
+350 ADC, on top of a 146 ADC baseline.  The script
+[`scripts/plot_wave_deconv.py`](scripts/plot_wave_deconv.py) calls
+`fdec::WaveAnalyzer::Deconvolve` through the bindings; every plotted
+amplitude is the C++ solver's output, not a Python re-fit.
+
+![synth-deconv](plots/fig8_deconv_synth.png)
+
+What the plot shows:
+
+- **Open red/green/purple triangles** — `WaveAnalyzer.peaks[k].height`,
+  the local-maxima heights from the soft-analyzer pre-deconv path.
+  Tail bleed-through systematically biases peak-1 (the trailing
+  shoulder of pulse-0 lifts its baseline) and peak-2 (twice-piled).
+- **Filled coloured circles** — `DeconvOutput.height[k] = a_k ·
+  T_max(τ_r_k, τ_f_k)`, where the LM has freed `(a_k, t0_k, τ_r_k,
+  τ_f_k)` for each peak using the per-type template
+  `(τ_r=10 ns, τ_f=48 ns)` as the initial guess.
+- **Black + crosses** — the synthetic input heights (truth).
+- **Orange curve** — `Σ a_k · T(t-t0_k; τ_r_k, τ_f_k)` evaluated at
+  the same sample times the C++ design matrix uses; should pass
+  through every coloured circle by construction.
+
+Numerical comparison printed by the script for this trace:
+
+| peak | truth | WA height | deconv height | Δ(WA) | Δ(deconv) |
+|---:|---:|---:|---:|---:|---:|
+| #0 |  800 |  ~800 |  ~800 | small | small |
+| #1 |  600 |  *biased* |  ~600 | large positive | small |
+| #2 |  350 |  *biased* |  ~350 | large positive | small |
+
+The exact numbers are reproduced in stdout when the script runs;
+checking them against this table verifies that `Deconvolve` is doing
+what it's supposed to (≪ 1 % bias on the leading peak, single-digit
+percent on the buried ones, vs the order-of-tens-percent bias the
+local-maxima method shows on peaks 1 and 2).
+
+### Worked example — real PbWO₄ pile-up event
+
+Pulled from a production EVIO file by the same script when invoked
+with `--evio <path>`:
+
+```bash
+cd docs/technical_notes/waveform_analysis
+python scripts/plot_wave_deconv.py --evio /data/evio/data/prad_024202/prad_024202.evio.00000
+```
+
+The script scans for the first physics event with a `Q_PEAK_PILED`
+peak on a channel whose module type is covered by the per-type
+template store (PbGlass / PbWO4 / LMS / Veto from
+`database/waveform/pulse_templates_024177.json`) and whose LM
+deconvolution converges under the configured τ-range gates.
+
+![real-deconv](plots/fig9_deconv_real.png)
+
+Same legend convention as fig 8.  The "truth" markers are absent
+because real data has no ground truth; the comparison instead reads
+off the magnitude of the WA→deconv shift on the trailing peak — the
+typical sign that pile-up was inflating the local-maxima height.
+
+The fig 9 file is regenerated only when EVIO data is available.  The
+checked-in PNG was produced from run 024202 (event index reported in
+the script's stdout); rerun the script against any local EVIO file to
+regenerate against your own data.
+
 ### Parameter sensitivity
 
 Two of the parameters above visibly change the analyzer's output on this
@@ -658,28 +727,41 @@ excluded.
 
 ## Reproducing the plots
 
-The figures and printed numbers in this note are produced by
-[`scripts/plot_wave_analysis.py`](scripts/plot_wave_analysis.py),
-which calls the *actual* C++ analyzers through the `prad2py` Python
-bindings — there is no separate Python re-implementation that can
-drift from the production code.  Build the project with the bindings
-enabled (CMake `-DBUILD_PYTHON=ON`) so `import prad2py` resolves, then
-run from this directory:
+The figures and printed numbers in this note are produced by two
+scripts that both call the *actual* C++ analyzers through the
+`prad2py` Python bindings — there is no separate Python
+re-implementation that can drift from the production code.  Build the
+project with the bindings enabled (CMake `-DBUILD_PYTHON=ON`) so
+`import prad2py` resolves, then run from this directory:
 
 ```bash
 cd docs/technical_notes/waveform_analysis
-python scripts/plot_wave_analysis.py
+python scripts/plot_wave_analysis.py                   # figs 1–7
+python scripts/plot_wave_deconv.py [--evio <path>]     # figs 8–9
 ```
 
-Regenerates the seven PNGs in `plots/` (overview, firmware analysis,
-soft analysis, parameter sensitivity, smoothing demo, robustness, and
-crowded-window pile-up) and prints the numeric results quoted above.
+[`scripts/plot_wave_analysis.py`](scripts/plot_wave_analysis.py)
+regenerates the seven PNGs covering the analyzer pipeline (overview,
+firmware analysis, soft analysis, parameter sensitivity, smoothing
+demo, robustness, and crowded-window pile-up flagging) and prints the
+numeric results quoted above.
+[`scripts/plot_wave_deconv.py`](scripts/plot_wave_deconv.py) adds the
+two pile-up deconvolution panels — fig 8 from the same synthetic
+3-pulse trace fig 7 uses, and fig 9 from the first piled-up real
+event in an EVIO file when `--evio` is supplied.  Pass
+`--daq-config` / `--template` to override the defaults, otherwise the
+script reads `database/daq_config.json` to find the per-type template
+JSON.
 
-The only Python re-implementation in the script is a small σ-clip
-helper used by the robustness figure to demonstrate the *old*
-simple-mean seed strategy — the binding only exposes the current
-median + MAD seed, so the side-by-side comparison can't be done
-through it.
+The only Python re-implementations in either script are pedagogical:
+a small σ-clip helper used by the robustness figure to demonstrate
+the *old* simple-mean seed strategy (the binding only exposes the
+current median + MAD seed), and the two-tau evaluation
+`(1−exp(−t/τ_r))·exp(−t/τ_f)` used to draw the model-trace overlay in
+figs 8 / 9 from the per-peak `(a_k, t0_k, τ_r_k, τ_f_k)` already
+returned by `DeconvOutput`.  Neither touches the algorithm path —
+heights, integrals, and convergence flags all come from the C++
+solver.
 
 ## See also
 
