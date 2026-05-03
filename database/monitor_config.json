@@ -36,7 +36,7 @@
         "reject_trigger_bits": [],
         "energy_hist": {
             "min": 0,
-            "max": 3000,
+            "max": 4000,
             "step": 10
         },
         "nclusters_hist": {
@@ -92,7 +92,7 @@
             "angle_max": 8.0,
             "angle_step": 0.2,
             "energy_min": 0.0,
-            "energy_max": 3000.0,
+            "energy_max": 4000.0,
             "energy_step": 100.0
         },
         "moller": {
