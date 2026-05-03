@@ -28,8 +28,8 @@ static void setTransform(DetectorTransform &t,
 //                              pedestal_file) tell us where the merged
 //                              detector maps + pedestal JSON live.
 //   monitor_config.json        GUI + online server (waveform/hycal_hist
-//                              binning, lms_monitor, livetime, epics, physics
-//                              display cuts, gem diagnostics, elog, etc.).
+//                              binning, lms_monitor, monitor_status, epics,
+//                              physics display cuts, gem diagnostics, elog).
 //   reconstruction_config.json runinfo pointer + cluster/hit reco knobs
 //                              (hycal clustering, gem per-detector
 //                              ClusterConfig with default + per-id overrides).
@@ -270,32 +270,66 @@ void AppState::init(const std::string &db_dir,
                   << " alpha=" << alpha_trigger << "\n";
     }
 
-    if (mcfg.contains("livetime")) {
-        auto &lt = mcfg["livetime"];
-        if (lt.contains("command"))  livetime_cmd      = lt["command"].get<std::string>();
-        if (lt.contains("poll_sec")) livetime_poll_sec = std::max(1, (int)lt["poll_sec"]);
-        if (lt.contains("healthy"))  livetime_healthy  = lt["healthy"];
-        if (lt.contains("warning"))  livetime_warning  = lt["warning"];
-        const auto &ds = daq_cfg.dsc_scaler;
-        using DSrc = evc::DaqConfig::DscScaler::Source;
-        const char *src_name = (ds.source == DSrc::Ref) ? "ref"
-                             : (ds.source == DSrc::Trg) ? "trg" : "tdc";
-        std::cerr << "Livetime  : "
-                  << (livetime_cmd.empty() ? "disabled"
-                                           : ("'" + livetime_cmd + "' every "
-                                              + std::to_string(livetime_poll_sec) + "s"))
-                  << " healthy>=" << livetime_healthy
-                  << " warn>=" << livetime_warning;
-        if (ds.enabled()) {
-            std::cerr << " | DSC2 bank=0x" << std::hex << ds.bank_tag << std::dec
-                      << " slot=" << ds.slot << " src=" << src_name;
-            if (ds.source != DSrc::Ref)
-                std::cerr << " ch=" << ds.channel;
-        } else {
-            std::cerr << " | DSC2 disabled";
+    // monitor_status: nested {livetime, beam: {energy, current}} — header
+    // status panel for online mode (livetime + beam shell-poll metrics).
+    if (mcfg.contains("monitor_status")) {
+        auto parse_shell_metric = [](const nlohmann::json &j, ShellMetric &m) {
+            if (j.contains("command"))  m.command  = j["command"].get<std::string>();
+            if (j.contains("unit"))     m.unit     = j["unit"].get<std::string>();
+            if (j.contains("poll_sec")) m.poll_sec = std::max(1, (int)j["poll_sec"]);
+            if (j.contains("trip_warn_below")) {
+                m.has_trip_warn   = true;
+                m.trip_warn_below = j["trip_warn_below"];
+            }
+        };
+        auto &ms = mcfg["monitor_status"];
+        if (ms.contains("livetime")) {
+            auto &lt = ms["livetime"];
+            if (lt.contains("command"))  livetime_cmd      = lt["command"].get<std::string>();
+            if (lt.contains("unit"))     livetime_unit     = lt["unit"].get<std::string>();
+            if (lt.contains("poll_sec")) livetime_poll_sec = std::max(1, (int)lt["poll_sec"]);
+            if (lt.contains("healthy"))  livetime_healthy  = lt["healthy"];
+            if (lt.contains("warning"))  livetime_warning  = lt["warning"];
         }
-        std::cerr << "\n";
+        if (ms.contains("beam")) {
+            auto &beam = ms["beam"];
+            if (beam.contains("energy"))  parse_shell_metric(beam["energy"],  beam_energy_status);
+            if (beam.contains("current")) parse_shell_metric(beam["current"], beam_current_status);
+        }
     }
+
+    const auto &ds = daq_cfg.dsc_scaler;
+    using DSrc = evc::DaqConfig::DscScaler::Source;
+    const char *src_name = (ds.source == DSrc::Ref) ? "ref"
+                         : (ds.source == DSrc::Trg) ? "trg" : "tdc";
+    std::cerr << "Livetime  : "
+              << (livetime_cmd.empty() ? "disabled"
+                                       : ("'" + livetime_cmd + "' every "
+                                          + std::to_string(livetime_poll_sec) + "s"))
+              << " healthy>=" << livetime_healthy
+              << " warn>=" << livetime_warning;
+    if (ds.enabled()) {
+        std::cerr << " | DSC2 bank=0x" << std::hex << ds.bank_tag << std::dec
+                  << " slot=" << ds.slot << " src=" << src_name;
+        if (ds.source != DSrc::Ref)
+            std::cerr << " ch=" << ds.channel;
+    } else {
+        std::cerr << " | DSC2 disabled";
+    }
+    std::cerr << "\n";
+
+    auto log_metric = [](const char *label, const ShellMetric &m) {
+        std::cerr << label
+                  << (m.command.empty() ? "disabled"
+                                        : ("'" + m.command + "' every "
+                                           + std::to_string(m.poll_sec) + "s"
+                                           + " unit=" + m.unit));
+        if (m.has_trip_warn)
+            std::cerr << " trip_warn<" << m.trip_warn_below;
+        std::cerr << "\n";
+    };
+    log_metric("BeamE     : ", beam_energy_status);
+    log_metric("BeamI     : ", beam_current_status);
 
     if (mcfg.contains("color_ranges")) {
         for (auto &[key, val] : mcfg["color_ranges"].items()) {

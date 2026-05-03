@@ -62,7 +62,7 @@ void ViewerServer::joinAll()
 {
 #ifdef WITH_ET
     if (et_thread_.joinable()) et_thread_.join();
-    if (livetime_thread_.joinable()) livetime_thread_.join();
+    if (monitor_status_thread_.joinable()) monitor_status_thread_.join();
 #endif
     { std::lock_guard<std::mutex> lk(load_mtx_);
       if (load_thread_.joinable()) load_thread_.join(); }
@@ -214,8 +214,10 @@ void ViewerServer::run()
     // start ET reader thread (sleeps until et_active_)
 #ifdef WITH_ET
     et_thread_ = std::thread([this]() { etReaderThread(); });
-    if (!app_file_.livetime_cmd.empty())
-        livetime_thread_ = std::thread([this]() { livetimePollThread(); });
+    if (!app_file_.livetime_cmd.empty() ||
+        !app_file_.beam_energy_status.command.empty() ||
+        !app_file_.beam_current_status.command.empty())
+        monitor_status_thread_ = std::thread([this]() { monitorStatusPollThread(); });
 #endif
 
     // load initial file (blocking)
@@ -262,8 +264,10 @@ int ViewerServer::startAsync(int port)
     // start ET reader thread
 #ifdef WITH_ET
     et_thread_ = std::thread([this]() { etReaderThread(); });
-    if (!app_file_.livetime_cmd.empty())
-        livetime_thread_ = std::thread([this]() { livetimePollThread(); });
+    if (!app_file_.livetime_cmd.empty() ||
+        !app_file_.beam_energy_status.command.empty() ||
+        !app_file_.beam_current_status.command.empty())
+        monitor_status_thread_ = std::thread([this]() { monitorStatusPollThread(); });
 #endif
 
     // load initial file (async)

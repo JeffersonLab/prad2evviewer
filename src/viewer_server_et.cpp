@@ -5,8 +5,10 @@
 #include "EtChannel.h"
 #endif
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 using namespace evc;
 using json = nlohmann::json;
@@ -346,61 +348,92 @@ void ViewerServer::etReaderThread()
     }
 }
 
-// Optional DAQ-livetime poller: shells out to the user-configured command
-// (typical: "caget -t <epics_channel>") and parses the first floating-point
-// number from stdout.  Empty command disables the thread entirely; this is
-// gated in run()/startAsync() so we never spawn a useless poller.
+namespace {
+
+// Run a shell command, return the first floating-point number parsed from
+// stdout, or NaN if none was found / popen failed.  Used by the monitor-
+// status pollers to interpret `caget -t CHAN` output (just "<num>"), bare
+// `caget CHAN` ("<chan>  <num>"), or any tool that prints "X = N%".
+double runShellNumber(const std::string &cmd)
+{
+    FILE *p = popen(cmd.c_str(), "r");
+    if (!p) return std::numeric_limits<double>::quiet_NaN();
+    char buf[512];
+    std::string out;
+    while (fgets(buf, sizeof(buf), p)) out += buf;
+    pclose(p);
+
+    size_t i = 0;
+    while (i < out.size()) {
+        char c = out[i];
+        if (c == '-' || c == '+' || c == '.' || (c >= '0' && c <= '9')) {
+            try {
+                size_t consumed = 0;
+                double v = std::stod(out.substr(i), &consumed);
+                if (consumed > 0) return v;
+            } catch (...) {}
+        }
+        ++i;
+    }
+    return std::numeric_limits<double>::quiet_NaN();
+}
+
+} // namespace
+
+// Single monitor-status poller for livetime + beam energy + current.
+// Each metric ticks on its own configured poll_sec (so a 3 s livetime and a
+// 5 s beam reading don't interfere) but they share one thread, since the
+// shell-out cost is the work — the thread itself is essentially free.
 //
 // Polls only while ET is active.  On bad output the value goes back to <0
-// (frontend hides the display) — the reading is consumed as a snapshot, not
-// integrated, so transient parse failures self-heal on the next poll.
-void ViewerServer::livetimePollThread()
+// (frontend hides the cell) — readings are snapshots, not integrated, so
+// transient parse failures self-heal on the next poll.  An empty command
+// skips that metric entirely.
+void ViewerServer::monitorStatusPollThread()
 {
-    const std::string cmd = app_file_.livetime_cmd;
-    const int poll_sec = std::max(1, app_file_.livetime_poll_sec);
-    if (cmd.empty()) return;
+    struct Metric {
+        const char *label;
+        std::string cmd;
+        int poll_sec;
+        std::atomic<double> *slot;
+        int next_in_ds;          // deciseconds until next poll
+        int consecutive_failures;
+    };
+    std::vector<Metric> metrics;
+    auto add = [&](const char *label, const std::string &cmd, int sec,
+                   std::atomic<double> *slot) {
+        if (cmd.empty()) return;
+        metrics.push_back({label, cmd, std::max(1, sec), slot, 0, 0});
+    };
+    add("Livetime", app_file_.livetime_cmd, app_file_.livetime_poll_sec, &livetime_);
+    add("BeamE",    app_file_.beam_energy_status.command,
+                    app_file_.beam_energy_status.poll_sec,  &beam_energy_);
+    add("BeamI",    app_file_.beam_current_status.command,
+                    app_file_.beam_current_status.poll_sec, &beam_current_);
+    if (metrics.empty()) return;
 
-    int consecutive_failures = 0;
+    constexpr int TICK_MS = 100;        // 0.1 s — schedule resolution
     while (running_) {
         while (running_ && !et_active_)
-            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            std::this_thread::sleep_for(std::chrono::milliseconds(TICK_MS * 2));
         if (!running_) break;
 
-        double val = -1.0;
-        FILE *p = popen(cmd.c_str(), "r");
-        if (p) {
-            char buf[512];
-            std::string out;
-            while (fgets(buf, sizeof(buf), p)) out += buf;
-            pclose(p);
-
-            // Extract the first floating-point number found in stdout.
-            // Works with `caget -t CHAN` (just "<num>"), bare `caget CHAN`
-            // ("<chan>  <num>"), or any tool that prints "Livetime = X%".
-            size_t i = 0;
-            while (i < out.size()) {
-                char c = out[i];
-                if (c == '-' || c == '+' || c == '.' || (c >= '0' && c <= '9')) {
-                    try {
-                        size_t consumed = 0;
-                        double v = std::stod(out.substr(i), &consumed);
-                        if (consumed > 0) { val = v; break; }
-                    } catch (...) {}
-                }
-                ++i;
+        for (auto &m : metrics) {
+            if (m.next_in_ds > 0) { --m.next_in_ds; continue; }
+            double v = runShellNumber(m.cmd);
+            double val = std::isnan(v) ? -1.0 : v;
+            m.slot->store(val);
+            if (val < 0) {
+                if (m.consecutive_failures++ == 0)
+                    std::cerr << m.label << ": poll command produced no number "
+                              << "(`" << m.cmd << "`) — leaving as 'not available'\n";
+            } else {
+                m.consecutive_failures = 0;
             }
-        }
-        livetime_.store(val);
-        if (val < 0) {
-            if (consecutive_failures++ == 0)
-                std::cerr << "Livetime  : poll command produced no number "
-                          << "(`" << cmd << "`) — leaving as 'not available'\n";
-        } else {
-            consecutive_failures = 0;
+            m.next_in_ds = m.poll_sec * 10;   // re-arm
         }
 
-        for (int i = 0; i < poll_sec * 10 && running_ && et_active_; ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        std::this_thread::sleep_for(std::chrono::milliseconds(TICK_MS));
     }
 }
 

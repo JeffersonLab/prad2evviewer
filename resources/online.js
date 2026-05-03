@@ -44,45 +44,87 @@ function updateFollowStatus() {
     }
 }
 
-// LIVETIME — poll server for DAQ livetime (server shells out to caget).
-// Thresholds + poll interval come from the server config in applyConfig().
-// livetimeEnabled is set from cfg.livetime.enabled (server-side command !=  "").
-let livetimePollMs=5000;
+// MONITOR STATUS — poll server for DAQ livetime + beam (server shells out
+// to caget for each).  Thresholds + poll interval + units come from the
+// server config in applyConfig().  monitorStatusEnabled is true when at
+// least one of livetime / beam-energy / beam-current has a command set.
+let monitorStatusPollMs=5000;
 let livetimeHealthy=90, livetimeWarning=80;
-let livetimeEnabled=false;
-let livetimeTimer=null;
-function pollLivetime(){
-    fetch('/api/livetime').then(r=>r.json()).then(d=>{
-        const el=document.getElementById('livetime-display');
-        if(!el) return;
-        el.style.display='';
-        const ts=(d.livetime>=0)?d.livetime:null;
-        const meas=(d.measured>=0)?d.measured:null;
-        if(ts==null && meas==null){
-            el.textContent='DAQ Livetime: N/A';
-            el.style.color=THEME.textDim;
-            return;
+let livetimeEnabled=false, livetimeUnit='%';
+let beamEnergyEnabled=false, beamEnergyUnit='MeV';
+let beamCurrentEnabled=false, beamCurrentUnit='nA';
+let beamCurrentTripWarn=null;     // null = no warn threshold configured
+let monitorStatusEnabled=false;
+let monitorStatusTimer=null;
+function pollMonitorStatus(){
+    fetch('/api/monitor_status').then(r=>r.json()).then(d=>{
+        const ltEl=document.getElementById('livetime-display');
+        if(ltEl){
+            const lt=d.livetime||{};
+            const ts  =(lt.ts>=0)      ? lt.ts       : null;
+            const meas=(lt.measured>=0)? lt.measured : null;
+            if(ts==null && meas==null){
+                if(livetimeEnabled){
+                    ltEl.style.display='';
+                    ltEl.textContent='DAQ Livetime: N/A';
+                    ltEl.style.color=THEME.textDim;
+                } else {
+                    ltEl.style.display='none';
+                }
+            } else {
+                ltEl.style.display='';
+                const parts=[];
+                if(ts!=null)   parts.push(ts.toFixed(1)+livetimeUnit+' (TS)');
+                if(meas!=null) parts.push(meas.toFixed(1)+livetimeUnit+' (Meas.)');
+                ltEl.textContent='DAQ Livetime: '+parts.join(' / ');
+                // Color by the worse of the two so a sick channel still flags red.
+                const worst=Math.min(ts??meas, meas??ts);
+                ltEl.style.color=worst>=livetimeHealthy?THEME.success
+                              :worst>=livetimeWarning?THEME.warn:THEME.danger;
+            }
         }
-        const parts=[];
-        if(ts!=null)   parts.push(ts.toFixed(1)+'% (TS)');
-        if(meas!=null) parts.push(meas.toFixed(1)+'% (Meas.)');
-        el.textContent='DAQ Livetime: '+parts.join(' / ');
-        // Color by the worse of the two so a sick channel still flags red.
-        const worst=Math.min(ts??meas, meas??ts);
-        el.style.color=worst>=livetimeHealthy?THEME.success
-                      :worst>=livetimeWarning?THEME.warn:THEME.danger;
+
+        const beamEl=document.getElementById('beam-display');
+        if(beamEl){
+            const beam=d.beam||{};
+            const eVal=(beam.energy>=0) ? beam.energy : null;
+            const iVal=(beam.current>=0)? beam.current: null;
+            const showE=beamEnergyEnabled, showI=beamCurrentEnabled;
+            if(!showE && !showI){
+                beamEl.style.display='none';
+            } else {
+                beamEl.style.display='';
+                const ePart=showE ? (eVal!=null ? `${eVal.toFixed(1)} ${beamEnergyUnit}` : `N/A ${beamEnergyUnit}`) : '';
+                const iPart=showI ? (iVal!=null ? `${iVal.toFixed(2)} ${beamCurrentUnit}` : `N/A ${beamCurrentUnit}`) : '';
+                let txt='Beam: ';
+                if(showE && showI)      txt += `${ePart} @ ${iPart}`;
+                else if(showE)          txt += ePart;
+                else                    txt += iPart;
+                beamEl.textContent=txt;
+                // Red if current is below the configured trip-warn threshold,
+                // dim if either reading is missing, otherwise success-green.
+                const tripped = (showI && beamCurrentTripWarn!=null
+                                 && iVal!=null && iVal < beamCurrentTripWarn);
+                const missing = (showE && eVal==null) || (showI && iVal==null);
+                beamEl.style.color = tripped ? THEME.danger
+                                   : missing ? THEME.textDim
+                                             : THEME.success;
+            }
+        }
     }).catch(()=>{});
 }
-function startLivetimePolling(){
-    if(livetimeTimer) return;
-    if(!livetimeEnabled) return;          // server has no command configured
-    pollLivetime();
-    livetimeTimer=setInterval(pollLivetime,livetimePollMs);
+function startMonitorStatusPolling(){
+    if(monitorStatusTimer) return;
+    if(!monitorStatusEnabled) return;     // nothing configured server-side
+    pollMonitorStatus();
+    monitorStatusTimer=setInterval(pollMonitorStatus,monitorStatusPollMs);
 }
-function stopLivetimePolling(){
-    if(livetimeTimer){clearInterval(livetimeTimer);livetimeTimer=null;}
-    const el=document.getElementById('livetime-display');
-    if(el) el.style.display='none';
+function stopMonitorStatusPolling(){
+    if(monitorStatusTimer){clearInterval(monitorStatusTimer);monitorStatusTimer=null;}
+    for(const id of ['livetime-display','beam-display']){
+        const el=document.getElementById(id);
+        if(el) el.style.display='none';
+    }
 }
 
 function connectWebSocket() {

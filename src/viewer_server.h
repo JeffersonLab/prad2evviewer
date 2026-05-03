@@ -215,16 +215,22 @@ private:
     void etReaderThread();
     void sleepMs(int ms);
 
-    // DAQ livetime (TS, percent).  <0 = not available.
-    // Written by livetimePollThread() — an optional shell-command poll
-    // (typical: "caget -t <channel>") configured via AppState::livetime_cmd.
-    // Disabled when livetime_cmd is empty.  Avoids a build-time EPICS
-    // dependency by shelling out to whatever tool the host provides.
-    // The "measured" companion lives on AppState::measured_livetime and is
-    // populated from the DSC2 scaler bank in the EVIO stream.
+    // Monitor-mode header status (livetime + beam energy + current).  All
+    // three are <0 when unavailable so the frontend can hide each cell
+    // independently.  A single background thread polls every configured
+    // metric on its own cadence (per-metric poll_sec); a metric whose
+    // command is empty stays at -1.0.  Avoids a build-time EPICS dependency
+    // by shelling out to whatever tool the host provides (typically caget).
+    //   - livetime_       ← AppState::livetime_cmd        (TS, percent)
+    //   - beam_energy_    ← AppState::beam_energy_status  (MeV)
+    //   - beam_current_   ← AppState::beam_current_status (nA)
+    // The DSC2-derived "measured" livetime companion lives on
+    // AppState::measured_livetime, populated from the EVIO stream.
     std::atomic<double> livetime_{-1.0};
-    std::thread         livetime_thread_;
-    void                livetimePollThread();
+    std::atomic<double> beam_energy_{-1.0};
+    std::atomic<double> beam_current_{-1.0};
+    std::thread         monitor_status_thread_;
+    void                monitorStatusPollThread();
 #endif
 
     void joinAll();      // join all background threads (safe to call multiple times)

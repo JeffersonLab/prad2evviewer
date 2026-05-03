@@ -160,11 +160,27 @@ function applyConfig(data){
         refreshHistMs=data.refresh_ms.histogram||2000;
         refreshLmsMs=data.refresh_ms.lms||2000;
     }
-    if(data.livetime){
-        livetimeEnabled=!!(data.livetime.enabled || data.livetime.measured_enabled);
-        livetimePollMs=Math.max(1000,(data.livetime.poll_sec||5)*1000);
-        livetimeHealthy=data.livetime.healthy ?? 90;
-        livetimeWarning=data.livetime.warning ?? 80;
+    if(data.monitor_status){
+        const lt=data.monitor_status.livetime||{};
+        const beam=data.monitor_status.beam||{};
+        const be=beam.energy||{};
+        const bc=beam.current||{};
+        livetimeEnabled    = !!(lt.enabled || lt.measured_enabled);
+        livetimeUnit       = lt.unit || '%';
+        livetimeHealthy    = lt.healthy ?? 90;
+        livetimeWarning    = lt.warning ?? 80;
+        beamEnergyEnabled  = !!be.enabled;
+        beamEnergyUnit     = be.unit || 'MeV';
+        beamCurrentEnabled = !!bc.enabled;
+        beamCurrentUnit    = bc.unit || 'nA';
+        beamCurrentTripWarn= (bc.trip_warn_below!=null) ? bc.trip_warn_below : null;
+        // Use the smallest configured poll_sec so the snappier metric drives
+        // the loop; floor at 1s to keep the server from being hammered.
+        const polls=[lt.poll_sec, be.poll_sec, bc.poll_sec]
+            .filter(v=>v!=null && v>0);
+        const minPoll=polls.length ? Math.min(...polls) : 5;
+        monitorStatusPollMs   = Math.max(1000, minPoll*1000);
+        monitorStatusEnabled  = livetimeEnabled || beamEnergyEnabled || beamCurrentEnabled;
     }
     initReport(data);
     initEpics(data);
@@ -189,8 +205,8 @@ function applyConfig(data){
     // show/hide mode-specific UI
     document.getElementById('nav-file').style.display   = mode!=='online'?'flex':'none';
     document.getElementById('nav-online').style.display = mode==='online'?'flex':'none';
-    // DAQ livetime — start/stop polling /api/livetime per mode.
-    if(mode==='online') startLivetimePolling(); else stopLivetimePolling();
+    // Monitor status (livetime + beam) — start/stop polling per mode.
+    if(mode==='online') startMonitorStatusPolling(); else stopMonitorStatusPolling();
     document.getElementById('btn-open').style.display='';
 
     // mode toggle button — visible whenever ET is available

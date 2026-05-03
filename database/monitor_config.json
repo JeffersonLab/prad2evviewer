@@ -60,11 +60,31 @@
             "accept_trigger_bits": ["Alpha"]
         }
     },
-    "livetime": {
-        "command": "caget -t B_DAQ:PRAD:livetime",
-        "poll_sec": 3,
-        "healthy": 90,
-        "warning": 80
+    "monitor_status": {
+        "// Header status panel shown only in online (monitor) mode.": "",
+        "// Each metric shells out to a command (typically `caget -t <chan>`)": "",
+        "// and parses the first floating-point number from stdout.  An empty": "",
+        "// command disables the metric.  Values <0 are displayed as N/A.": "",
+        "livetime": {
+            "command": "caget -t B_DAQ:PRAD:livetime",
+            "unit": "%",
+            "poll_sec": 3,
+            "healthy": 90,
+            "warning": 80
+        },
+        "beam": {
+            "energy": {
+                "command": "caget -t MBSY2C_energy",
+                "unit": "MeV",
+                "poll_sec": 5
+            },
+            "current": {
+                "command": "caget -t hallb_IPM2C21A_CUR",
+                "unit": "nA",
+                "poll_sec": 5,
+                "trip_warn_below": 0.3
+            }
+        }
     },
     "epics": {
         "max_history": 5000,

@@ -533,12 +533,28 @@ void AppState::fillConfigJson(json &cfg) const
         {"warn_threshold", lms_warn_thresh},
         {"events", lms_events.load()}, {"ref_channels", apiLmsRefChannels()},
     };
-    cfg["livetime"] = {
-        {"enabled", !livetime_cmd.empty()},
-        {"measured_enabled", daq_cfg.dsc_scaler.enabled()},
-        {"poll_sec", livetime_poll_sec},
-        {"healthy", livetime_healthy},
-        {"warning", livetime_warning},
+    auto metric_cfg = [](const ShellMetric &m) {
+        nlohmann::json j = {
+            {"enabled",  !m.command.empty()},
+            {"unit",     m.unit},
+            {"poll_sec", m.poll_sec},
+        };
+        if (m.has_trip_warn) j["trip_warn_below"] = m.trip_warn_below;
+        return j;
+    };
+    cfg["monitor_status"] = {
+        {"livetime", {
+            {"enabled",          !livetime_cmd.empty()},
+            {"measured_enabled", daq_cfg.dsc_scaler.enabled()},
+            {"unit",             livetime_unit},
+            {"poll_sec",         livetime_poll_sec},
+            {"healthy",          livetime_healthy},
+            {"warning",          livetime_warning},
+        }},
+        {"beam", {
+            {"energy",  metric_cfg(beam_energy_status)},
+            {"current", metric_cfg(beam_current_status)},
+        }},
     };
     cfg["runinfo"] = {
         {"beam_energy", beam_energy.load()},

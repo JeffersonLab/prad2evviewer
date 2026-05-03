@@ -531,17 +531,24 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     // --- progress ---
     if (uri == "/api/progress") { reply(progress_.toJson().dump()); return; }
 
-    // LIVETIME — TS (caget poll) and Meas. (DSC2 from data stream).  Either
-    // may be <0 to mean "not available"; the frontend hides each value
-    // independently.  The DSC2 path is read from activeApp() so it follows
-    // file/online mode without extra state.
-    if (uri == "/api/livetime") {
-        double ts = -1.0;
+    // MONITOR STATUS — header panel for online mode.  Each value may be <0
+    // to mean "not available"; the frontend hides cells independently.
+    //   livetime.ts       ← caget poll (AppState::livetime_cmd)
+    //   livetime.measured ← DSC2 scaler in EVIO stream (activeApp())
+    //   beam.energy       ← caget poll (AppState::beam_energy_status)
+    //   beam.current      ← caget poll (AppState::beam_current_status)
+    if (uri == "/api/monitor_status") {
+        double ts = -1.0, be = -1.0, bc = -1.0;
         double meas = activeApp().measured_livetime.load();
 #ifdef WITH_ET
         ts = livetime_.load();
+        be = beam_energy_.load();
+        bc = beam_current_.load();
 #endif
-        reply(json({{"livetime", ts}, {"measured", meas}}).dump());
+        reply(json({
+            {"livetime", {{"ts", ts}, {"measured", meas}}},
+            {"beam",     {{"energy", be}, {"current", bc}}},
+        }).dump());
         return;
     }
 

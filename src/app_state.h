@@ -156,16 +156,33 @@ struct AppState {
     std::map<int, float> latest_lms_integral;     // module_index → latest LMS-trigger integral
     std::map<int, float> latest_alpha_integral;   // module_index → latest Alpha-trigger integral
 
-    // DAQ livetime polling — optional shell command (typical: "caget -t <channel>").
-    // Empty disables the poller; ViewerServer reads these after init() and only
-    // launches the poll thread when livetime_cmd is non-empty.  Avoids a build-
-    // time EPICS dependency by shelling out to whatever tool the host provides.
-    // healthy/warning are percent thresholds for the frontend display color
+    // Monitor-mode status panel: shell-poll metrics shown in the header.
+    // All three (livetime, beam energy, beam current) follow the same pattern
+    // — run `command`, parse first float from stdout, display with `unit`.
+    // ViewerServer reads these after init() and runs one shared poll thread
+    // that ticks each metric on its own poll_sec; an empty command skips
+    // that metric.  Avoids a build-time EPICS dependency by shelling out to
+    // whatever tool the host provides (typically caget).
+    //
+    // livetime: healthy/warning are percent thresholds for color
     // (≥ healthy → green, ≥ warning → orange, otherwise red).
     std::string livetime_cmd;
+    std::string livetime_unit       = "%";
     int         livetime_poll_sec   = 30;
     float       livetime_healthy    = 90.f;
     float       livetime_warning    = 80.f;
+
+    // Beam status (energy, current).  trip_warn for current colors red when
+    // the reading drops below the threshold (beam-trip indicator).
+    struct ShellMetric {
+        std::string command;
+        std::string unit;
+        int         poll_sec        = 5;
+        bool        has_trip_warn   = false;
+        float       trip_warn_below = 0.f;
+    };
+    ShellMetric beam_energy_status;
+    ShellMetric beam_current_status;
 
     // Measured DAQ livetime from DSC2 scalers in the EVIO stream
     // (1 - gated/ungated).  Bank tag, slot, source, channel live in
