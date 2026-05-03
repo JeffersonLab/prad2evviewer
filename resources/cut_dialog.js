@@ -14,7 +14,12 @@ function initCutDialog(){
     function buildBitList(containerId, set){
         const c = $(containerId);
         if (!c) return;
-        const bits = (window.histConfig && histConfig.quality_bits) || [];
+        // `histConfig` is declared with `let` at top level of viewer.js,
+        // so it lives in the global lexical scope — NOT on `window`.
+        // Reference it directly; guard with typeof for the very first
+        // microtask before viewer.js has executed.
+        const bits = (typeof histConfig !== 'undefined'
+                      && histConfig.quality_bits) || [];
         c.innerHTML = '';
         if (!bits.length) {
             const empty = document.createElement('div');
@@ -40,7 +45,7 @@ function initCutDialog(){
         cutDialog.classList.add('open');
         $('cut-status-msg').textContent = '';
 
-        const f = (window.histConfig && histConfig.filter) || {};
+        const f = (typeof histConfig !== 'undefined' && histConfig.waveform_filter) || {};
         const fillAxis = (axis, idMin, idMax) => {
             const r = f[axis] || {};
             $(idMin).value = r.min != null ? r.min : '';
@@ -85,7 +90,7 @@ function initCutDialog(){
     }
 
     // Local redraw when the *show* toggle flips: pulls overlays from
-    // histConfig.filter and the cut-show state.  Server isn't touched.
+    // histConfig.waveform_filter and the cut-show state.  Server isn't touched.
     // Bypasses the histogram refresh throttle (online mode) so the toggle
     // feels responsive — without this, showHistograms() may early-return
     // for ~1s and the overlays don't update.
@@ -120,8 +125,8 @@ function initCutDialog(){
 
     $('cut-apply-btn').onclick = () => {
         const body = {
-            filter:        buildFilter(),
-            filter_enable: $('cut-apply').checked
+            waveform_filter:        buildFilter(),
+            waveform_filter_active: $('cut-apply').checked
         };
         $('cut-status-msg').textContent = 'Saving…';
         fetch('/api/hist_config', {
@@ -147,7 +152,7 @@ function initCutDialog(){
         fetch('/api/hist_config', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({filter_enable: this.checked})
+            body: JSON.stringify({waveform_filter_active: this.checked})
         }).then(() => {
             if (typeof fetchConfigAndApply === 'function') fetchConfigAndApply();
         }).catch(() => {});

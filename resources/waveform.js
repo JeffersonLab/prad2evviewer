@@ -46,7 +46,7 @@ function cutShow(){
 // unset (empty range).  Otherwise returns {min?, max?}.
 function filterRange(field){
     if (!cutShow()) return null;
-    const f = window.histConfig && histConfig.filter;
+    const f = (typeof histConfig !== 'undefined') && histConfig.waveform_filter;
     if (!f) return null;
     const r = f[field];
     if (!r || (r.min == null && r.max == null)) return null;
@@ -441,7 +441,8 @@ function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, 
 // Compose a short "[min-max ns]" suffix for hist titles when the time filter
 // has values; empty string otherwise.
 function timeRangeLabel(){
-    const f = window.histConfig && histConfig.filter && histConfig.filter.time;
+    const f = (typeof histConfig !== 'undefined')
+        && histConfig.waveform_filter && histConfig.waveform_filter.time;
     if (!f) return '';
     const lo = f.min != null ? f.min : '';
     const hi = f.max != null ? f.max : '';

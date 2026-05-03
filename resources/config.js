@@ -98,13 +98,17 @@ function applyConfig(data){
     filteredCount=data.filtered_count||totalEvents;
     histEnabled=data.hist_enabled||false;
     histConfig=data.hist||{};
-    // peak filter (Waveform Tab) — runtime-mutable; the Cut-Settings dialog edits this
-    histConfig.filter        = data.filter        || {};
-    histConfig.filter_enable = !!data.filter_enable;
-    histConfig.quality_bits  = data.quality_bits  || [];
+    // Waveform-Tab peak filter — runtime-mutable via the Cut-Settings dialog.
+    // `waveform_filter_active` is the server-side enable flag (the "apply"
+    // toggle); `waveform_filter` is the {time, integral, height, quality_bits}
+    // payload.  Distinct from `filter_active` (event-level filter loaded via
+    // /api/filter/load).
+    histConfig.waveform_filter        = data.waveform_filter        || {};
+    histConfig.waveform_filter_active = !!data.waveform_filter_active;
+    histConfig.quality_bits           = data.quality_bits           || [];
     // sync "apply" toggle to server's enable state
     const cutApplyCb = document.getElementById('cut-apply');
-    if (cutApplyCb) cutApplyCb.checked = histConfig.filter_enable;
+    if (cutApplyCb) cutApplyCb.checked = histConfig.waveform_filter_active;
     refLines=data.ref_lines||{};
     triggerBitsDef=data.trigger_bits||[];
     triggerTypeDef=data.trigger_type||[];

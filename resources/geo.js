@@ -239,7 +239,8 @@ function c2d(cx,cy){return[(cx-offsetX)/scale,-(cy-offsetY)/scale];}
 function isTimeCut(){
     const cb = document.getElementById('cut-show');
     if (!cb || !cb.checked) return false;
-    const f = histConfig && histConfig.filter && histConfig.filter.time;
+    const f = histConfig && histConfig.waveform_filter
+        && histConfig.waveform_filter.time;
     return !!(f && (f.min != null || f.max != null));
 }
 
@@ -247,7 +248,7 @@ function isTimeCut(){
 function peaksInCut(peaks){
     if(!peaks||!peaks.length) return [];
     if(!isTimeCut()) return peaks;
-    const f = histConfig.filter.time;
+    const f = histConfig.waveform_filter.time;
     const tmin = f.min != null ? f.min : -Infinity;
     const tmax = f.max != null ? f.max :  Infinity;
     return peaks.filter(p=>p.t>=tmin && p.t<=tmax);
@@ -279,7 +280,7 @@ function modVal(m){
     if(mt==='integral'){
         if(!d.pk||!d.pk.length) return null;
         const useTcut = isTimeCut();
-        const f = useTcut ? histConfig.filter.time : null;
+        const f = useTcut ? histConfig.waveform_filter.time : null;
         const tmin = (f && f.min != null) ? f.min : undefined;
         const tmax = (f && f.max != null) ? f.max : undefined;
         const thr  = useTcut && histConfig.threshold !== undefined ? histConfig.threshold : 0;

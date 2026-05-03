@@ -258,12 +258,12 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
     // --- config ---
     if (uri == "/api/config") { reply(buildConfig().dump()); return; }
 
-    // --- runtime peak_filter updates ---
-    // POST {filter?, filter_enable?}.  Updates both file & online AppStates,
-    // clears accumulated histograms (so the new filter takes effect on the
-    // next refresh in online mode), and broadcasts hist_config_updated +
-    // hist_cleared.  Peak detection thresholds live in daq_config.json
-    // (fadc250_waveform.analyzer) and are not runtime-mutable here.
+    // --- runtime peak_filter updates (Waveform-Tab cut settings) ---
+    // POST {waveform_filter?, waveform_filter_active?}.  Updates both file &
+    // online AppStates, clears accumulated histograms (so the new filter
+    // takes effect on the next refresh in online mode), and broadcasts
+    // hist_config_updated + hist_cleared.  Peak detection thresholds live in
+    // daq_config.json (fadc250_waveform.analyzer) and are not runtime-mutable.
     if (uri == "/api/hist_config") {
         std::string body = con->get_request_body();
         auto j = json::parse(body, nullptr, false);
@@ -272,12 +272,13 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
         }
         bool changed = false;
         auto applyTo = [&](AppState &app) {
-            if (j.contains("filter") && j["filter"].is_object()) {
-                app.peak_filter.parse(j["filter"], app.peak_quality_bits_def);
+            if (j.contains("waveform_filter") && j["waveform_filter"].is_object()) {
+                app.peak_filter.parse(j["waveform_filter"], app.peak_quality_bits_def);
                 changed = true;
             }
-            if (j.contains("filter_enable") && j["filter_enable"].is_boolean()) {
-                app.peak_filter.enable = j["filter_enable"].get<bool>();
+            if (j.contains("waveform_filter_active")
+                && j["waveform_filter_active"].is_boolean()) {
+                app.peak_filter.enable = j["waveform_filter_active"].get<bool>();
                 changed = true;
             }
         };
@@ -291,9 +292,9 @@ void ViewerServer::onHttp(WsServer *srv, websocketpp::connection_hdl hdl)
             wsBroadcast("{\"type\":\"hist_cleared\"}");
         }
         json payload = {
-            {"type",          "hist_config_updated"},
-            {"filter",        app_file_.peak_filter.toJson(app_file_.peak_quality_bits_def)},
-            {"filter_enable", app_file_.peak_filter.enable}
+            {"type",                   "hist_config_updated"},
+            {"waveform_filter",        app_file_.peak_filter.toJson(app_file_.peak_quality_bits_def)},
+            {"waveform_filter_active", app_file_.peak_filter.enable}
         };
         wsBroadcast(payload.dump());
         json resp = payload;
