@@ -98,13 +98,13 @@ function applyConfig(data){
     filteredCount=data.filtered_count||totalEvents;
     histEnabled=data.hist_enabled||false;
     histConfig=data.hist||{};
-    // populate time cut + threshold display
-    if(document.getElementById('tcut-min-show'))
-        document.getElementById('tcut-min-show').textContent=
-            histConfig.time_min!==undefined ? histConfig.time_min : '?';
-    if(document.getElementById('tcut-max-show'))
-        document.getElementById('tcut-max-show').textContent=
-            histConfig.time_max!==undefined ? histConfig.time_max : '?';
+    // peak filter (Waveform Tab) — runtime-mutable; the GUI dialog edits this
+    histConfig.filter        = data.filter        || {};
+    histConfig.filter_enable = !!data.filter_enable;
+    histConfig.quality_bits  = data.quality_bits  || [];
+    // sync "apply" checkbox to server's enable state
+    const cutApplyCb = document.getElementById('cut-apply');
+    if (cutApplyCb) cutApplyCb.checked = histConfig.filter_enable;
     if(document.getElementById('thr-show'))
         document.getElementById('thr-show').textContent=
             histConfig.threshold!==undefined ? histConfig.threshold : '?';

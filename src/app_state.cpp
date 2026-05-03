@@ -12,6 +12,69 @@
 
 using json = nlohmann::json;
 
+//=============================================================================
+// PeakFilter — JSON parse / serialize
+//=============================================================================
+namespace {
+
+// Set out to filter[axis][bound] iff that field exists and is numeric.
+void setOpt(const json &range, const char *bound, std::optional<float> &out)
+{
+    if (range.is_object() && range.contains(bound) && range[bound].is_number())
+        out = range[bound].get<float>();
+}
+
+void parseAxis(const json &filter, const char *axis,
+               std::optional<float> &mn, std::optional<float> &mx)
+{
+    mn.reset(); mx.reset();
+    if (!filter.is_object() || !filter.contains(axis)) return;
+    const auto &r = filter[axis];
+    setOpt(r, "min", mn);
+    setOpt(r, "max", mx);
+}
+
+json axisToJson(const std::optional<float> &mn, const std::optional<float> &mx)
+{
+    json o = json::object();
+    if (mn) o["min"] = *mn;
+    if (mx) o["max"] = *mx;
+    return o;
+}
+
+} // namespace
+
+void PeakFilter::parse(const json &filter, const json &quality_bits_def)
+{
+    parseAxis(filter, "time",     time_min,     time_max);
+    parseAxis(filter, "integral", integral_min, integral_max);
+    parseAxis(filter, "height",   height_min,   height_max);
+    q_accept = q_reject = 0;
+    if (filter.is_object() && filter.contains("quality_bits")
+        && filter["quality_bits"].is_object()) {
+        const auto &qb = filter["quality_bits"];
+        if (qb.contains("accept"))
+            q_accept = bitsMaskFromArray(qb["accept"], quality_bits_def, "PeakFilter");
+        if (qb.contains("reject"))
+            q_reject = bitsMaskFromArray(qb["reject"], quality_bits_def, "PeakFilter");
+    }
+}
+
+json PeakFilter::toJson(const json &quality_bits_def) const
+{
+    json out = json::object();
+    json t = axisToJson(time_min,     time_max);     if (!t.empty()) out["time"]     = t;
+    json i = axisToJson(integral_min, integral_max); if (!i.empty()) out["integral"] = i;
+    json h = axisToJson(height_min,   height_max);   if (!h.empty()) out["height"]   = h;
+    if (q_accept || q_reject) {
+        out["quality_bits"] = {
+            {"accept", bitsMaskToNames(q_accept, quality_bits_def)},
+            {"reject", bitsMaskToNames(q_reject, quality_bits_def)}
+        };
+    }
+    return out;
+}
+
 static json histToJson(const Histogram &h, float mn, float mx, float st)
 {
     if (h.bins.empty())
@@ -303,8 +366,9 @@ json AppState::computeClustersJson(fdec::EventData &event, int ev_id,
                 } else {
                     ana.SetChannelKey(roc.tag, s, c);
                     ana.Analyze(cd.samples, cd.nsamples, wres);
-                    adc_val = bestPeakInWindow(wres, hist_cfg.threshold,
-                                               hist_cfg.time_min, hist_cfg.time_max);
+                    // Clustering input has no time cut — Waveform-Tab peak_filter
+                    // is decoupled from clustering. See app_state.cpp main loop.
+                    adc_val = bestPeakAboveThreshold(wres, hist_cfg.threshold);
                 }
                 if (adc_val <= 0) continue;
 
@@ -433,56 +497,61 @@ void AppState::processEvent(fdec::EventData &event,
                 if (cd.nsamples <= 0) continue;
 
                 // ── analyze ONCE ──
-                float peak_in_window = -1;
+                // peak_for_lms_alpha keeps the historical time-window semantics
+                // (now driven by lms_time_min/max from `lms_monitor.time_cut`).
+                // peak_for_cluster has no time cut — Waveform-Tab filter is
+                // intentionally decoupled from clustering input; per-cluster
+                // cuts will be added back later in their own knob.
+                float peak_for_lms_alpha = -1;
+                float peak_for_cluster   = -1;
                 if (!is_adc1881m) {
                     ana.SetChannelKey(roc.tag, s, c);
                     ana.Analyze(cd.samples, cd.nsamples, wres);
-                    peak_in_window = bestPeakInWindow(wres, hist_cfg.threshold,
-                                                       hist_cfg.time_min, hist_cfg.time_max);
+                    peak_for_lms_alpha = bestPeakInWindow(wres, hist_cfg.threshold,
+                                                          lms_time_min, lms_time_max);
+                    peak_for_cluster   = bestPeakAboveThreshold(wres, hist_cfg.threshold);
                 } else {
                     wres.npeaks = 0;
-                    peak_in_window = cd.samples[0];
+                    peak_for_lms_alpha = peak_for_cluster = cd.samples[0];
                 }
 
                 // ── histogram consumer ──
+                // Single pass: threshold gate, then peak_filter (when enabled).
+                // Time hist gets every passing peak; height/integral hists get
+                // the best-integral passing peak (preserves per-event semantics).
                 if (do_hist && !is_adc1881m) {
                     std::string key = std::to_string(roc.tag) + "_"
                                    + std::to_string(s) + "_" + std::to_string(c);
-                    bool has_peak = false, has_peak_tcut = false;
-                    float best = -1, best_height = -1;
+                    bool any_above_thr = false, any_passing = false;
+                    float bestI = -1, bestH = -1;
                     for (int p = 0; p < wres.npeaks; ++p) {
                         auto &pk = wres.peaks[p];
                         if (pk.height < hist_cfg.threshold) continue;
-                        has_peak = true;
-                        if (pk.time >= hist_cfg.time_min && pk.time <= hist_cfg.time_max) {
-                            has_peak_tcut = true;
-                            if (pk.integral > best) { best = pk.integral; best_height = pk.height; }
-                        }
-                    }
-                    if (best >= 0) {
-                        auto &h = histograms[key];
-                        if (h.bins.empty()) h.init(hist_nbins);
-                        h.fill(best, hist_cfg.bin_min, hist_cfg.bin_step);
-                        auto &hh = height_histograms[key];
-                        if (hh.bins.empty()) hh.init(height_nbins);
-                        hh.fill(best_height, hist_cfg.height_min, hist_cfg.height_step);
-                    }
-                    for (int p = 0; p < wres.npeaks; ++p) {
-                        auto &pk = wres.peaks[p];
-                        if (pk.height < hist_cfg.threshold) continue;
+                        any_above_thr = true;
+                        if (peak_filter.enable && !peak_filter(pk)) continue;
+                        any_passing = true;
                         auto &ph = pos_histograms[key];
                         if (ph.bins.empty()) ph.init(pos_nbins);
                         ph.fill(pk.time, hist_cfg.pos_min, hist_cfg.pos_step);
+                        if (pk.integral > bestI) { bestI = pk.integral; bestH = pk.height; }
                     }
-                    if (has_peak)      occupancy[key]++;
-                    if (has_peak_tcut) occupancy_tcut[key]++;
+                    if (bestI >= 0) {
+                        auto &h = histograms[key];
+                        if (h.bins.empty()) h.init(hist_nbins);
+                        h.fill(bestI, hist_cfg.bin_min, hist_cfg.bin_step);
+                        auto &hh = height_histograms[key];
+                        if (hh.bins.empty()) hh.init(height_nbins);
+                        hh.fill(bestH, hist_cfg.height_min, hist_cfg.height_step);
+                    }
+                    if (any_above_thr) occupancy[key]++;
+                    if (any_passing)   occupancy_tcut[key]++;
                 }
 
                 // ── cluster consumer ──
                 if (do_cluster && crate >= 0) {
                     const auto *mod = hycal.module_by_daq(crate, s, c);
                     if (mod && mod->is_hycal()) {
-                        float adc_val = is_adc1881m ? (float)cd.samples[0] : peak_in_window;
+                        float adc_val = is_adc1881m ? (float)cd.samples[0] : peak_for_cluster;
                         if (adc_val > 0) {
                             float energy = (mod->cal_factor > 0.)
                                 ? static_cast<float>(mod->energize(adc_val))
@@ -496,7 +565,7 @@ void AppState::processEvent(fdec::EventData &event,
                 if (do_lms && crate >= 0) {
                     const auto *mod = hycal.module_by_daq(crate, s, c);
                     if (mod) {
-                        float val = is_adc1881m ? (float)cd.samples[0] : peak_in_window;
+                        float val = is_adc1881m ? (float)cd.samples[0] : peak_for_lms_alpha;
                         if (val > 0) {
                             auto &hist = lms_history[mod->index];
                             if (static_cast<int>(hist.size()) < lms_max_history)
@@ -512,7 +581,7 @@ void AppState::processEvent(fdec::EventData &event,
                 if (do_alpha && crate >= 0) {
                     const auto *mod = hycal.module_by_daq(crate, s, c);
                     if (mod) {
-                        float val = is_adc1881m ? (float)cd.samples[0] : peak_in_window;
+                        float val = is_adc1881m ? (float)cd.samples[0] : peak_for_lms_alpha;
                         if (val > 0) latest_alpha_integral[mod->index] = val;
                     }
                 }

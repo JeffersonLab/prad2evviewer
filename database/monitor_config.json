@@ -19,7 +19,12 @@
     "waveform": {
         "accept_trigger_bits": [],
         "reject_trigger_bits": ["Pulser"],
-        "time_cut": {"min": 160, "max": 220},
+        "// filter applies to all Waveform-Tab histograms when the GUI 'apply' toggle is on.": "",
+        "// Each axis (time/integral/height) is optional; omit a min/max to drop that side.": "",
+        "// quality_bits.{accept,reject} reference the Q_PEAK_* palette in /api/config.": "",
+        "filter": {
+            "time": {"min": 160, "max": 220}
+        },
         "height_hist": {"min": 0, "max": 4000, "step": 10},
         "integral_hist": {"min": 0, "max": 20000, "step": 100},
         "time_hist": {"min": 0, "max": 400, "step": 4},
@@ -52,6 +57,10 @@
     },
     "lms_monitor": {
         "accept_trigger_bits": ["LMS"],
+        "// time_cut: per-channel peak-time window for LMS+Alpha integral picking.": "",
+        "// Independent from waveform.filter so calibration tracks aren't perturbed": "",
+        "// by Waveform-Tab edits.": "",
+        "time_cut": {"min": 160, "max": 220},
         "warn_threshold": 0.1,
         "warn_min_mean": 100,
         "max_history": 5000,

@@ -35,29 +35,85 @@ function wfWindowNs(){
     return ptw * NS_PER_SAMPLE;
 }
 
-// Build time-cut shapes for waveform plot (dimmed regions + dashed lines)
-function timeCutShapes(xMax){
-    const shapes = refShapes('waveform') || [];
-    if (isTimeCut()) {
-        const dim = {type:'rect', yref:'paper', y0:0, y1:1,
-            fillcolor:THEME.overlayLight, line:{width:0}, layer:'above'};
-        shapes.push({...dim, xref:'x', x0:0, x1:histConfig.time_min});
-        shapes.push({...dim, xref:'x', x0:histConfig.time_max, x1:xMax});
-        const edge = {type:'line', yref:'paper', y0:0, y1:1,
-            line:{color:THEME.highlight, width:1, dash:'dash'}};
-        shapes.push({...edge, x0:histConfig.time_min, x1:histConfig.time_min});
-        shapes.push({...edge, x0:histConfig.time_max, x1:histConfig.time_max});
-    }
-    return shapes;
+// "show" toggle for overlay rendering — purely client-side.
+function cutShow(){
+    const cb = document.getElementById('cut-show');
+    return cb ? cb.checked : true;
 }
 
-// Waveform plot layout with proper x-range and time cut
-function wfLayout(title, xMax){
+// Look up filter range for an axis ('time' / 'integral' / 'height').
+// Returns null if `cut-show` is off, the filter is missing, or the axis is
+// unset (empty range).  Otherwise returns {min?, max?}.
+function filterRange(field){
+    if (!cutShow()) return null;
+    const f = window.histConfig && histConfig.filter;
+    if (!f) return null;
+    const r = f[field];
+    if (!r || (r.min == null && r.max == null)) return null;
+    return r;
+}
+
+// Build dim+edge shapes for an x-axis cut on a histogram-style plot.
+// xMin/xMax are the histogram axis range; range = {min?, max?} from filterRange.
+function xRangeShapes(xMin, xMax, range){
+    if (!range) return [];
+    const out = [];
+    const dim = {type:'rect', yref:'paper', y0:0, y1:1,
+        fillcolor:THEME.overlayLight, line:{width:0}, layer:'below'};
+    const edge = {type:'line', yref:'paper', y0:0, y1:1,
+        line:{color:THEME.highlight, width:1, dash:'dash'}};
+    if (range.min != null) {
+        out.push({...dim, x0:xMin, x1:range.min});
+        out.push({...edge, x0:range.min, x1:range.min});
+    }
+    if (range.max != null) {
+        out.push({...dim, x0:range.max, x1:xMax});
+        out.push({...edge, x0:range.max, x1:range.max});
+    }
+    return out;
+}
+
+// Build dim+edge shapes for a y-axis cut. yOffset (defaults to 0) shifts the
+// range — used by the waveform plot, which displays raw ADC samples while
+// the filter's `height` is in (sample − pedestal) units, so we pass
+// yOffset = pedestal_mean.
+function yRangeShapes(range, yOffset){
+    if (!range) return [];
+    yOffset = yOffset || 0;
+    const out = [];
+    const dim = {type:'rect', xref:'paper', x0:0, x1:1,
+        fillcolor:THEME.overlayLight, line:{width:0}, layer:'below'};
+    const edge = {type:'line', xref:'paper', x0:0, x1:1,
+        line:{color:THEME.highlight, width:1, dash:'dash'}};
+    if (range.min != null) {
+        // shade from -∞ to (offset + min) — anchor low side via yref:'paper' y0:0
+        // is not quite right; safer: rely on Plotly clamping when shape extends
+        // beyond the view.  Use a generous lower bound.
+        out.push({...dim, y0:-1e9, y1:yOffset + range.min});
+        const y = yOffset + range.min;
+        out.push({...edge, y0:y, y1:y});
+    }
+    if (range.max != null) {
+        out.push({...dim, y0:yOffset + range.max, y1:1e9});
+        const y = yOffset + range.max;
+        out.push({...edge, y0:y, y1:y});
+    }
+    return out;
+}
+
+// Waveform plot layout with x-axis time-cut overlay and (optional) y-axis
+// height-cut overlay anchored to the pedestal mean.  Pass pm=null/undefined
+// to skip the height overlay (no-data / stack-mode contexts).
+function wfLayout(title, xMax, pm){
+    const shapes = refShapes('waveform') || [];
+    shapes.push(...xRangeShapes(0, xMax, filterRange('time')));
+    if (pm != null && Number.isFinite(pm))
+        shapes.push(...yRangeShapes(filterRange('height'), pm));
     return {...PL,
         title:{text:title, font:{size:11,color:THEME.textDim}},
         xaxis:{...PL.xaxis, title:'Time (ns)', range:[0, xMax], autorange:false},
         yaxis:{...PL.yaxis, title:'ADC'},
-        shapes:timeCutShapes(xMax),
+        shapes,
     };
 }
 
@@ -193,7 +249,7 @@ function renderWaveform(mod, key, d, samples){
             marker:{color:col,size:7,symbol:'diamond'},showlegend:false});
     });
 
-    const layout = wfLayout(`${mod.n} — Event ${currentEvent}`, tMax);
+    const layout = wfLayout(`${mod.n} — Event ${currentEvent}`, tMax, d.pm);
     layout.legend = {x:1,y:1,xanchor:'right',bgcolor:THEME.overlay,font:{size:9}};
     Plotly.react('waveform-div', traces, layout, PC2);
 
@@ -346,7 +402,9 @@ function renderWaveformDaq(mod, d, samples, x, tMax){
 // =========================================================================
 // Histograms
 // =========================================================================
-function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, logYId, refKey, timeCut){
+// `field` selects which filter axis to overlay on this histogram:
+// 'time' | 'integral' | 'height' | null (no overlay).
+function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, logYId, refKey, field){
     fetch(url).then(r=>r.json()).then(data=>{
         if(data.error||!data.bins||!data.bins.length){
             currentHist[divId]=null;
@@ -362,16 +420,7 @@ function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, 
         const stats=`${data.events} evts | Entries: ${entries}  Under: ${data.underflow}  Over: ${data.overflow}`;
         const xMin=binMin, xMax=binMin+data.bins.length*binStep;
         const shapes = refKey ? (refShapes(refKey)||[]) : [];
-        if (timeCut && isTimeCut()) {
-            const dim={type:'rect',yref:'paper',y0:0,y1:1,
-                fillcolor:THEME.overlayLight,line:{width:0},layer:'below'};
-            shapes.push({...dim, x0:xMin, x1:histConfig.time_min});
-            shapes.push({...dim, x0:histConfig.time_max, x1:xMax});
-            const edge={type:'line',yref:'paper',y0:0,y1:1,
-                line:{color:THEME.highlight, width:1, dash:'dash'}};
-            shapes.push({...edge, x0:histConfig.time_min, x1:histConfig.time_min});
-            shapes.push({...edge, x0:histConfig.time_max, x1:histConfig.time_max});
-        }
+        if (field) shapes.push(...xRangeShapes(xMin, xMax, filterRange(field)));
         Plotly.react(divId,[{
             x,y:data.bins,type:'bar',marker:{color:barColor,line:{width:0}},
             hovertemplate:'%{x:.0f}: %{y}<extra></extra>',
@@ -389,6 +438,17 @@ function fetchAndPlotHist(divId, url, title, xTitle, binMin, binStep, barColor, 
     });
 }
 
+// Compose a short "[min-max ns]" suffix for hist titles when the time filter
+// has values; empty string otherwise.
+function timeRangeLabel(){
+    const f = window.histConfig && histConfig.filter && histConfig.filter.time;
+    if (!f) return '';
+    const lo = f.min != null ? f.min : '';
+    const hi = f.max != null ? f.max : '';
+    if (lo === '' && hi === '') return '';
+    return ` [${lo}-${hi} ns]`;
+}
+
 function showHistograms(mod){
     const key=`${mod.roc}_${mod.sl}_${mod.ch}`;
     // in online mode, throttle auto-refreshes of the same module to ~1 Hz
@@ -400,13 +460,14 @@ function showHistograms(mod){
     lastHistFetch = Date.now();
     lastHistModule = key;
     const h=histConfig;
+    const tlabel = timeRangeLabel();
     fetchAndPlotHist('heighthist-div',`/api/heighthist/${key}`,
-        `${mod.n} Peak Height [${h.time_min||170}-${h.time_max||190} ns]`,
-        'Peak Height', h.height_min||0, h.height_step||10, '#e599f7', 'heighthist-logy', 'height_hist');
+        `${mod.n} Peak Height${tlabel}`,
+        'Peak Height', h.height_min||0, h.height_step||10, '#e599f7', 'heighthist-logy', 'height_hist', 'height');
     fetchAndPlotHist('inthist-div',`/api/hist/${key}`,
-        `${mod.n} Integral [${h.time_min||170}-${h.time_max||190} ns]`,
-        'Peak Integral', h.bin_min||0, h.bin_step||100, '#00b4d8', 'inthist-logy', 'integral_hist');
+        `${mod.n} Integral${tlabel}`,
+        'Peak Integral', h.bin_min||0, h.bin_step||100, '#00b4d8', 'inthist-logy', 'integral_hist', 'integral');
     fetchAndPlotHist('poshist-div',`/api/poshist/${key}`,
         `${mod.n} Peak Position`,
-        'Time (ns)', h.pos_min||0, h.pos_step||4, '#51cf66', null, 'time_hist', true);
+        'Time (ns)', h.pos_min||0, h.pos_step||4, '#51cf66', null, 'time_hist', 'time');
 }

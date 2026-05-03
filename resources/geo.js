@@ -105,7 +105,8 @@ function syncDqRange(){
 }
 
 function updateTimeCutLabel(){
-    // values now shown in editable range fields (tcut-min-show, tcut-max-show)
+    // Values are shown in the Cut-Settings dialog (cut_dialog.js).
+    // Kept as a no-op so call sites in config.js / mode-switch don't break.
 }
 
 function updateRangeDisplay(){
@@ -233,17 +234,22 @@ function geoDq(){
 
 function d2c(x,y){return[x*scale+offsetX,-y*scale+offsetY];}
 function c2d(cx,cy){return[(cx-offsetX)/scale,-(cy-offsetY)/scale];}
-// check if time cut checkbox is active and config exists
+// Time cut on the geo color map follows the *show* checkbox (visual decision)
+// — separate from the server-side "apply" which gates histogram fill.
 function isTimeCut(){
-    return document.getElementById('time-cut').checked
-        && histConfig.time_min!==undefined && histConfig.time_max!==undefined;
+    const cb = document.getElementById('cut-show');
+    if (!cb || !cb.checked) return false;
+    const f = histConfig && histConfig.filter && histConfig.filter.time;
+    return !!(f && (f.min != null || f.max != null));
 }
 
 // filter peaks by time cut if active
 function peaksInCut(peaks){
     if(!peaks||!peaks.length) return [];
     if(!isTimeCut()) return peaks;
-    const tmin=histConfig.time_min, tmax=histConfig.time_max;
+    const f = histConfig.filter.time;
+    const tmin = f.min != null ? f.min : -Infinity;
+    const tmax = f.max != null ? f.max :  Infinity;
     return peaks.filter(p=>p.t>=tmin && p.t<=tmax);
 }
 
@@ -267,16 +273,16 @@ function modVal(m){
     if(!d)return null;
     if(mt==='pedestal')return d.pm||0;
     // 'integral' picks the peak with the largest integral.  Time window and
-    // threshold are honoured only when the time-cut checkbox is on, so the
-    // color map matches what the user explicitly asked for (unchecked ⇒ show
-    // the full event).  When the cut IS on, this mirrors the backend's
-    // bestPeakInWindow (clustering input).
+    // threshold are honoured only when the show-cut checkbox is on AND the
+    // filter has a time range, so the color map matches what the user
+    // explicitly asked for (overlay off ⇒ show the full event).
     if(mt==='integral'){
         if(!d.pk||!d.pk.length) return null;
-        const useTcut=isTimeCut();
-        const tmin=useTcut?histConfig.time_min:undefined;
-        const tmax=useTcut?histConfig.time_max:undefined;
-        const thr=useTcut&&histConfig.threshold!==undefined?histConfig.threshold:0;
+        const useTcut = isTimeCut();
+        const f = useTcut ? histConfig.filter.time : null;
+        const tmin = (f && f.min != null) ? f.min : undefined;
+        const tmax = (f && f.max != null) ? f.max : undefined;
+        const thr  = useTcut && histConfig.threshold !== undefined ? histConfig.threshold : 0;
         let best=-1;
         for(const p of d.pk){
             if(thr>0 && p.h<thr) continue;

@@ -172,6 +172,14 @@ function connectWebSocket() {
                 clearPhysicsFrontend();
                 redrawGeo();
                 if(activeTab==='gem') fetchGemAccum();
+            } else if (msg.type === 'hist_config_updated') {
+                // Server's peak_filter / threshold changed (any client could
+                // have edited). Pull fresh config so histConfig.filter and
+                // the "apply" checkbox stay in sync, then redraw histograms
+                // and the geo (color metric uses the time filter).
+                if (typeof fetchConfigAndApply === 'function') fetchConfigAndApply();
+                if (selectedModule) showHistograms(selectedModule);
+                redrawGeo();
             } else if (msg.type === 'lms_event') {
                 // throttle LMS refresh to ~0.5 Hz
                 const now2 = Date.now();

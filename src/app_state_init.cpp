@@ -112,15 +112,20 @@ void AppState::init(const std::string &db_dir,
         }
     }
 
+    // Per-peak quality bit palette (mirrors Q_PEAK_* in Fadc250Data.h).
+    // Exposed via /api/config so the GUI populates the Cut-Settings dialog
+    // dropdowns from a single source of truth.
+    peak_quality_bits_def = json::array({
+        {{"bit", 0}, {"name", "PILED"},       {"label", "Pile-up"}},
+        {{"bit", 1}, {"name", "DECONVOLVED"}, {"label", "Deconvolved"}}
+    });
+
     // waveform binning + trigger filter (monitor side)
     if (mcfg.contains("waveform")) {
         auto &w = mcfg["waveform"];
         waveform_trigger.parse(w, trigger_bits_def);
-        if (w.contains("time_cut")) {
-            auto &tc = w["time_cut"];
-            if (tc.contains("min")) hist_cfg.time_min = tc["min"];
-            if (tc.contains("max")) hist_cfg.time_max = tc["max"];
-        }
+        if (w.contains("filter") && w["filter"].is_object())
+            peak_filter.parse(w["filter"], peak_quality_bits_def);
         if (w.contains("integral_hist")) {
             auto &ih = w["integral_hist"];
             if (ih.contains("min"))  hist_cfg.bin_min  = ih["min"];
@@ -154,9 +159,12 @@ void AppState::init(const std::string &db_dir,
         (hist_cfg.pos_max - hist_cfg.pos_min) / hist_cfg.pos_step));
     height_nbins = std::max(1, (int)std::ceil(
         (hist_cfg.height_max - hist_cfg.height_min) / hist_cfg.height_step));
-    std::cerr << "Waveform  : time_cut=[" << hist_cfg.time_min << "," << hist_cfg.time_max
-              << "] threshold=" << hist_cfg.threshold
-              << " " << waveform_trigger << "\n";
+    {
+        std::cerr << "Waveform  : threshold=" << hist_cfg.threshold
+                  << " filter[" << (peak_filter.enable ? "on" : "off") << "]="
+                  << peak_filter.toJson(peak_quality_bits_def).dump()
+                  << " " << waveform_trigger << "\n";
+    }
 
     // --- HyCal system ------------------------------------------------------
     {
@@ -252,6 +260,11 @@ void AppState::init(const std::string &db_dir,
     if (mcfg.contains("lms_monitor")) {
         auto &lm = mcfg["lms_monitor"];
         lms_trigger.parse(lm, trigger_bits_def);
+        if (lm.contains("time_cut")) {
+            auto &tc = lm["time_cut"];
+            if (tc.contains("min")) lms_time_min = tc["min"];
+            if (tc.contains("max")) lms_time_max = tc["max"];
+        }
         if (lm.contains("warn_threshold")) lms_warn_thresh    = lm["warn_threshold"];
         if (lm.contains("warn_min_mean"))  lms_warn_min_mean  = lm["warn_min_mean"];
         if (lm.contains("max_history"))    lms_max_history    = lm["max_history"];
@@ -265,6 +278,7 @@ void AppState::init(const std::string &db_dir,
         if (lm.contains("alpha"))
             alpha_trigger.parse(lm["alpha"], trigger_bits_def);
         std::cerr << "LMS       : " << lms_trigger
+                  << " time_cut=[" << lms_time_min << "," << lms_time_max << "]"
                   << " warn=" << lms_warn_thresh
                   << " refs=" << lms_ref_channels.size()
                   << " alpha=" << alpha_trigger << "\n";

@@ -244,8 +244,9 @@ bool AppState::evaluateFilter(fdec::EventData &event,
                     } else {
                         ana.SetChannelKey(roc.tag, s, c);
                         ana.Analyze(cd.samples, cd.nsamples, wres);
-                        adc_val = bestPeakInWindow(wres, hist_cfg.threshold,
-                                                   hist_cfg.time_min, hist_cfg.time_max);
+                        // Clustering input has no time cut — peak_filter is
+                        // decoupled. Per-cluster cuts will reattach later.
+                        adc_val = bestPeakAboveThreshold(wres, hist_cfg.threshold);
                     }
                     if (adc_val > 0) {
                         float energy = (mod->cal_factor > 0.)

@@ -26,6 +26,7 @@ struct ReconEventData;
 
 #include <array>
 #include <map>
+#include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -33,6 +34,63 @@ struct ReconEventData;
 #include <mutex>
 #include <atomic>
 #include <iostream>
+
+// Resolve a JSON array of bit numbers / names to a uint32_t mask.
+// Names are looked up in `bits_defs` ([{bit,name,label},…]).  Used by both
+// TriggerFilter (trigger_bits.json) and PeakFilter (peak_quality_bits).
+inline uint32_t bitsMaskFromArray(const nlohmann::json &arr,
+                                   const nlohmann::json &bits_defs,
+                                   const char *who = "BitMask") {
+    if (!arr.is_array() || arr.empty()) return 0;
+    uint32_t m = 0;
+    for (auto &item : arr) {
+        if (item.is_number()) {
+            m |= (1u << item.get<int>());
+        } else if (item.is_string()) {
+            auto s = item.get<std::string>();
+            bool found = false;
+            for (auto &def : bits_defs) {
+                if (def.value("name", "") == s || def.value("label", "") == s) {
+                    m |= (1u << def.value("bit", 0));
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                std::cerr << who << ": unknown bit name '" << s << "'\n";
+        }
+    }
+    return m;
+}
+
+inline uint32_t bitsMaskFromKey(const nlohmann::json &section, const char *key,
+                                 const nlohmann::json &bits_defs,
+                                 const char *who = "BitMask") {
+    if (!section.contains(key)) return 0;
+    return bitsMaskFromArray(section[key], bits_defs, who);
+}
+
+// Reverse-lookup: encode a bitmask as a JSON array of bit names against
+// bits_defs.  Bits not found in bits_defs are emitted as numeric indices so
+// nothing is silently dropped.
+inline nlohmann::json bitsMaskToNames(uint32_t mask,
+                                       const nlohmann::json &bits_defs) {
+    nlohmann::json out = nlohmann::json::array();
+    if (!mask) return out;
+    for (int b = 0; b < 32; ++b) {
+        if (!(mask & (1u << b))) continue;
+        bool found = false;
+        for (auto &def : bits_defs) {
+            if (def.value("bit", -1) == b) {
+                out.push_back(def.value("name", ""));
+                found = true;
+                break;
+            }
+        }
+        if (!found) out.push_back(b);
+    }
+    return out;
+}
 
 // Trigger filter: reject overrides accept. accept==0 means accept all.
 struct TriggerFilter {
@@ -49,8 +107,8 @@ struct TriggerFilter {
     // against the trigger_bits_def lookup table from trigger_bits.json
     void parse(const nlohmann::json &section,
                const nlohmann::json &bits_defs = nlohmann::json::array()) {
-        accept = maskFrom(section, "accept_trigger_bits", bits_defs);
-        reject = maskFrom(section, "reject_trigger_bits", bits_defs);
+        accept = bitsMaskFromKey(section, "accept_trigger_bits", bits_defs, "TriggerFilter");
+        reject = bitsMaskFromKey(section, "reject_trigger_bits", bits_defs, "TriggerFilter");
     }
 
     nlohmann::json toJson() const {
@@ -61,33 +119,41 @@ struct TriggerFilter {
         return os << "trigger accept=0x" << std::hex << f.accept
                   << " reject=0x" << f.reject << std::dec;
     }
+};
 
-private:
-    static uint32_t maskFrom(const nlohmann::json &section, const char *key,
-                              const nlohmann::json &bits_defs) {
-        if (!section.contains(key)) return 0;
-        auto &arr = section[key];
-        if (!arr.is_array() || arr.empty()) return 0;
-        uint32_t m = 0;
-        for (auto &item : arr) {
-            if (item.is_number()) {
-                m |= (1u << item.get<int>());
-            } else if (item.is_string()) {
-                auto s = item.get<std::string>();
-                bool found = false;
-                for (auto &def : bits_defs) {
-                    if (def.value("name", "") == s || def.value("label", "") == s) {
-                        m |= (1u << def.value("bit", 0));
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found)
-                    std::cerr << "TriggerFilter: unknown trigger bit name '" << s << "'\n";
-            }
-        }
-        return m;
+// Per-peak filter for the Waveform Tab histograms (and any consumer that opts
+// into it).  Each axis is an optional [min, max] range — missing bound means
+// no constraint on that side.  Quality bits use accept/reject masks resolved
+// against AppState::peak_quality_bits_def.  `enable=false` makes the filter a
+// no-op (predicate returns true unconditionally) — the GUI's "apply" checkbox
+// drives this flag.
+struct PeakFilter {
+    // Default `enable=true` so the JSON-configured filter is active on
+    // startup — preserves today's behavior (time-cut always applied) without
+    // needing a runtime flag in monitor_config.json.  The GUI "apply"
+    // checkbox toggles this at runtime.
+    bool enable = true;
+    std::optional<float> time_min, time_max;
+    std::optional<float> integral_min, integral_max;
+    std::optional<float> height_min, height_max;
+    uint32_t q_accept = 0;     // 0 = accept any
+    uint32_t q_reject = 0;     // 0 = reject none
+
+    bool operator()(const fdec::Peak &pk) const {
+        if (time_min     && pk.time     < *time_min)     return false;
+        if (time_max     && pk.time     > *time_max)     return false;
+        if (integral_min && pk.integral < *integral_min) return false;
+        if (integral_max && pk.integral > *integral_max) return false;
+        if (height_min   && pk.height   < *height_min)   return false;
+        if (height_max   && pk.height   > *height_max)   return false;
+        if (q_reject && (pk.quality & q_reject))         return false;
+        if (q_accept && !(pk.quality & q_accept))        return false;
+        return true;
     }
+
+    void parse(const nlohmann::json &filter,
+               const nlohmann::json &quality_bits_def);
+    nlohmann::json toJson(const nlohmann::json &quality_bits_def) const;
 };
 
 struct AppState {
@@ -97,6 +163,17 @@ struct AppState {
     int hist_nbins   = 0;
     int pos_nbins    = 0;
     int height_nbins = 0;
+
+    // Waveform-Tab peak filter (height/integral/time hist + show overlays).
+    // `enable` is the GUI "apply" checkbox; runtime-only, not in monitor_config.json.
+    // peak_quality_bits_def is the [{bit,name,label},…] palette exposed via /api/config.
+    PeakFilter      peak_filter;
+    nlohmann::json  peak_quality_bits_def = nlohmann::json::array();
+
+    // Gain-monitoring (LMS/Alpha) time window — distinct from peak_filter so
+    // the calibration tracks aren't perturbed by Waveform-Tab edits.
+    float lms_time_min = 160.0f;
+    float lms_time_max = 220.0f;
 
     // reference lines for plots (pass-through to frontend)
     // key = plot name, value = array of {axis, pos, lw, ls, color}

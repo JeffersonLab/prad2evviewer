@@ -505,7 +505,6 @@ json AppState::apiEpicsLatest() const
 void AppState::fillConfigJson(json &cfg) const
 {
     cfg["hist"] = {
-        {"time_min", hist_cfg.time_min}, {"time_max", hist_cfg.time_max},
         {"bin_min", hist_cfg.bin_min}, {"bin_max", hist_cfg.bin_max},
         {"bin_step", hist_cfg.bin_step}, {"threshold", hist_cfg.threshold},
         {"pos_min", hist_cfg.pos_min}, {"pos_max", hist_cfg.pos_max},
@@ -513,6 +512,9 @@ void AppState::fillConfigJson(json &cfg) const
         {"height_min", hist_cfg.height_min}, {"height_max", hist_cfg.height_max},
         {"height_step", hist_cfg.height_step},
     };
+    cfg["filter"]        = peak_filter.toJson(peak_quality_bits_def);
+    cfg["filter_enable"] = peak_filter.enable;
+    cfg["quality_bits"]  = peak_quality_bits_def;
     cfg["ref_lines"] = ref_lines;
     cfg["trigger_bits"] = trigger_bits_def;
     cfg["trigger_type"] = trigger_type_def;

@@ -162,6 +162,66 @@
     </div>
 </div>
 
+<!-- cut-settings dialog (Waveform Tab peak filter) -->
+<div class="backdrop" id="cut-backdrop"></div>
+<div class="file-dialog" id="cut-dialog" style="max-width:440px">
+    <div class="file-dialog-header">
+        <span>Cut Settings</span>
+        <button id="cut-dialog-close">&times;</button>
+    </div>
+    <div class="elog-form" style="gap:6px">
+        <fieldset style="border:1px solid var(--border);padding:8px;margin:0">
+            <legend style="font-size:12px;padding:0 4px">Time (ns)</legend>
+            <div class="flt-fields">
+                <div style="display:flex;gap:6px">
+                    <label style="flex:1">min<input type="number" id="cut-time-min" step="any" placeholder=""></label>
+                    <label style="flex:1">max<input type="number" id="cut-time-max" step="any" placeholder=""></label>
+                </div>
+            </div>
+        </fieldset>
+        <fieldset style="border:1px solid var(--border);padding:8px;margin:0">
+            <legend style="font-size:12px;padding:0 4px">Integral</legend>
+            <div class="flt-fields">
+                <div style="display:flex;gap:6px">
+                    <label style="flex:1">min<input type="number" id="cut-integral-min" step="any" placeholder=""></label>
+                    <label style="flex:1">max<input type="number" id="cut-integral-max" step="any" placeholder=""></label>
+                </div>
+            </div>
+        </fieldset>
+        <fieldset style="border:1px solid var(--border);padding:8px;margin:0">
+            <legend style="font-size:12px;padding:0 4px">Height</legend>
+            <div class="flt-fields">
+                <div style="display:flex;gap:6px">
+                    <label style="flex:1">min<input type="number" id="cut-height-min" step="any" placeholder=""></label>
+                    <label style="flex:1">max<input type="number" id="cut-height-max" step="any" placeholder=""></label>
+                </div>
+            </div>
+        </fieldset>
+        <fieldset style="border:1px solid var(--border);padding:8px;margin:0">
+            <legend style="font-size:12px;padding:0 4px">Quality bits</legend>
+            <div class="flt-fields">
+                <details>
+                    <summary style="cursor:pointer;font-size:12px">Accept (allowed flags)</summary>
+                    <div id="cut-accept-list" style="padding:4px 0;display:flex;flex-direction:column;gap:2px;font-size:12px"></div>
+                </details>
+                <details>
+                    <summary style="cursor:pointer;font-size:12px">Reject (forbidden flags)</summary>
+                    <div id="cut-reject-list" style="padding:4px 0;display:flex;flex-direction:column;gap:2px;font-size:12px"></div>
+                </details>
+                <div style="font-size:11px;color:var(--dim);margin-top:4px">
+                    Empty = no constraint. Accept: peak's set bits must be a subset of accepted flags. Reject: peak fails if any rejected flag is set.
+                </div>
+            </div>
+        </fieldset>
+        <div class="elog-form-actions">
+            <button id="cut-cancel">Cancel</button>
+            <button id="cut-reset">Reset</button>
+            <button id="cut-apply-btn" class="report-btn">Apply</button>
+        </div>
+        <div class="elog-status" id="cut-status-msg"></div>
+    </div>
+</div>
+
 <!-- file browser dialog -->
 <div class="backdrop" id="file-backdrop"></div>
 <div class="file-dialog" id="file-dialog">
@@ -226,16 +286,9 @@
                 <span class="range-btn" id="range-max-btn" title="Edit max">✎</span>
             </div>
             <div class="tcut-bar">
-                <input type="checkbox" id="time-cut">
-                <label for="time-cut">Time Cut</label>
-                <span class="range-val" id="tcut-min-show">0</span>
-                <input class="range-edit" id="tcut-min" type="number" step="any">
-                <span class="range-btn" id="tcut-min-btn" title="Edit min">✎</span>
-                <span style="color:var(--dim)">–</span>
-                <span class="range-val" id="tcut-max-show">0</span>
-                <input class="range-edit" id="tcut-max" type="number" step="any">
-                <span class="range-btn" id="tcut-max-btn" title="Edit max">✎</span>
-                <span style="color:var(--dim);font-size:10px">ns</span>
+                <button id="cut-settings-btn" title="Edit peak filter ranges">Cut Settings…</button>
+                <label title="Apply the filter on the server (affects all clients)"><input type="checkbox" id="cut-apply"> apply</label>
+                <label title="Show cut-range overlays on histograms and the waveform plot"><input type="checkbox" id="cut-show" checked> show</label>
                 <label style="margin-left:8px" title="Peak height threshold for clustering / integral view">Thr</label>
                 <span class="range-val" id="thr-show">0</span>
                 <input class="range-edit" id="thr-edit" type="number" step="any">
@@ -564,6 +617,7 @@ function refShapes(key){ return linesToShapes(refLines[key]); }
 <script src="online.js"></script>
 <script src="filebrowser.js"></script>
 <script src="filter_dialog.js"></script>
+<script src="cut_dialog.js"></script>
 <script src="config.js"></script>
 <script src="viewer.js"></script>
 </body>

@@ -116,7 +116,7 @@ struct LmsEntry {
     float  integral;    // peak integral within timing cut (or raw ADC for ADC1881M)
 };
 
-// --- Peak extraction helper -------------------------------------------------
+// --- Peak extraction helpers ------------------------------------------------
 // Find best peak integral within time window. Returns -1 if no peak found.
 inline float bestPeakInWindow(const fdec::WaveResult &wres,
                                float threshold, float time_min, float time_max)
@@ -127,6 +127,19 @@ inline float bestPeakInWindow(const fdec::WaveResult &wres,
         if (pk.height < threshold) continue;
         if (pk.time >= time_min && pk.time <= time_max)
             if (pk.integral > best) best = pk.integral;
+    }
+    return best;
+}
+
+// Same as bestPeakInWindow but without the time-cut — used by clustering after
+// the per-tab time-cut decoupling (clustering re-acquires its own cut later).
+inline float bestPeakAboveThreshold(const fdec::WaveResult &wres, float threshold)
+{
+    float best = -1;
+    for (int p = 0; p < wres.npeaks; ++p) {
+        auto &pk = wres.peaks[p];
+        if (pk.height < threshold) continue;
+        if (pk.integral > best) best = pk.integral;
     }
     return best;
 }
