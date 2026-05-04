@@ -263,18 +263,52 @@ struct EpicsArrival {
     std::map<std::string, double>   updates;            // sparse
 };
 
-double live_ratio_from(const ScalerRow &r, const LivetimeCut &cfg)
+// Extract the (gated, ungated) pair the cut targets.  These are cumulative
+// counters: the DSC2 increments them since run-start without resetting at
+// each readout, so a single row gives the run-average live fraction, not
+// the live fraction over the most recent slice.
+inline std::pair<uint32_t, uint32_t>
+select_scaler_pair(const ScalerRow &r, const LivetimeCut &cfg)
 {
-    uint32_t g = 0, u = 0;
-    if (cfg.source == "ref") {
-        g = r.ref_gated; u = r.ref_ungated;
-    } else if (cfg.source == "trg" || cfg.source == "tdc") {
-        int c = std::clamp(cfg.channel, 0, 15);
-        if (cfg.source == "trg") { g = r.trg_gated[c]; u = r.trg_ungated[c]; }
-        else                     { g = r.tdc_gated[c]; u = r.tdc_ungated[c]; }
+    if (cfg.source == "ref") return {r.ref_gated, r.ref_ungated};
+    int c = std::clamp(cfg.channel, 0, 15);
+    if (cfg.source == "trg") return {r.trg_gated[c], r.trg_ungated[c]};
+    if (cfg.source == "tdc") return {r.tdc_gated[c], r.tdc_ungated[c]};
+    return {0, 0};
+}
+
+// Per-row delta-livetime in percent, indexed by load-order position.
+// Walks the rows in event-number order and divides the *change* in gated
+// over the change in ungated since the previous reading — i.e. the live
+// fraction over the slice between adjacent scaler readouts.  This is what
+// quality cuts need: the run-cumulative ratio dilutes a recent dropout
+// behind several minutes of good livetime.
+//
+// The implicit predecessor at run-start is (0, 0), so the first row's
+// "delta" equals the cumulative readout over (run_start, first_readout].
+// If the counter ever moves backward (DSC2 reset / wrap), the previous
+// is rebased to (0, 0) at that row and the delta is taken from there.
+// Slots where ungated did not advance return -1 (cannot compute).
+std::vector<double>
+compute_delta_live_pct(const std::vector<ScalerRow> &scalers,
+                       const std::vector<size_t>    &sc_order,
+                       const LivetimeCut            &cfg)
+{
+    std::vector<double> out(scalers.size(), -1.0);
+    uint32_t prev_g = 0, prev_u = 0;
+    for (size_t k = 0; k < sc_order.size(); ++k) {
+        const size_t orig = sc_order[k];
+        const auto [g, u] = select_scaler_pair(scalers[orig], cfg);
+        // Counter went backward — treat as a reset and rebase the baseline.
+        if (g < prev_g || u < prev_u) { prev_g = 0; prev_u = 0; }
+        const uint32_t dg = g - prev_g;
+        const uint32_t du = u - prev_u;
+        if (du > 0 && dg <= du)
+            out[orig] = static_cast<double>(dg) / static_cast<double>(du) * 100.0;
+        prev_g = g;
+        prev_u = u;
     }
-    if (u == 0) return -1.0;
-    return static_cast<double>(g) / static_cast<double>(u) * 100.0;
+    return out;
 }
 
 // ── Tree readers ─────────────────────────────────────────────────────────
@@ -495,6 +529,14 @@ int run(const std::vector<std::string> &input_files,
     if (run_number < 0 && !scalers.empty())    run_number = (int)scalers.front().run_number;
     if (run_number < 0 && !epics_rows.empty()) run_number = (int)epics_rows.front().run_number;
 
+    // Sort scalers once and precompute delta livetime per row.  Cuts evaluate
+    // and report against the slice-local live fraction (Δgated / Δungated),
+    // not the run-cumulative ratio cached on each row.
+    auto sc_order = sort_index_by_event(scalers);
+    std::vector<double> delta_live_pct;
+    if (cuts.livetime.enabled)
+        delta_live_pct = compute_delta_live_pct(scalers, sc_order, cuts.livetime);
+
     // ---------- Phase 2: robust stats for rel_rms cuts ----------
     // Ungated channels first (stats from all values), then gated channels
     // (stats restricted to rows where the named gating channel's cut
@@ -519,8 +561,8 @@ int run(const std::vector<std::string> &input_files,
     if (cuts.livetime.enabled && cuts.livetime.cut.has_rel_rms) {
         std::vector<double> xs;
         xs.reserve(scalers.size());
-        for (const auto &s : scalers) {
-            double v = live_ratio_from(s, cuts.livetime);
+        for (size_t i = 0; i < scalers.size(); ++i) {
+            double v = delta_live_pct[i];
             if (v >= 0) xs.push_back(v);
         }
         fill_stats(cuts.livetime.cut, xs);
@@ -623,8 +665,8 @@ int run(const std::vector<std::string> &input_files,
 
     // ---------- Phase 4: walk merged timeline, mark good/bad ----------
     // Iterate via index permutations so the parallel verdict vectors stay
-    // aligned with the load-order vectors (used in phase 6).
-    auto sc_order = sort_index_by_event(scalers);
+    // aligned with the load-order vectors (used in phase 6).  sc_order was
+    // built earlier so the delta-livetime precompute could share it.
     auto ep_order = sort_index_by_event(epics_rows);
 
     std::vector<bool> scaler_verdict(scalers.size(),  false);
@@ -661,7 +703,10 @@ int run(const std::vector<std::string> &input_files,
             orig = sc_order[i_sc++];
             const auto &s = scalers[orig];
             cp_evn = s.event_number;
-            cur_lt = live_ratio_from(s, cuts.livetime);
+            // Slice-local live fraction (Δgated / Δungated) — see
+            // compute_delta_live_pct for why the cumulative row value is
+            // not used.  The first row's predecessor is (0, 0).
+            cur_lt = cuts.livetime.enabled ? delta_live_pct[orig] : -1.0;
             // Scaler's cached unix_time is intentionally ignored — it lags
             // by up to a SYNC interval and confuses alignment.  Charts that
             // need absolute time should use the EPICS unix_time pins.
