@@ -422,6 +422,8 @@ bool Replay::Process(const std::string &input_evio, const std::string &output_ro
 
     std::cerr << "\rReplay: " << total << " events written to " << output_root << "\n";
     tree->Write();
+    scalers_tree->Write();
+    epics_tree->Write();
     delete outfile;
     return true;
 }

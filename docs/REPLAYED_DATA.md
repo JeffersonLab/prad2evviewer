@@ -1,11 +1,19 @@
 # Replayed Data Trees
 
-Two ROOT trees are produced by the replay tools:
+Each replay tool writes one main per-event tree plus two slow-control side
+trees in the same ROOT file:
 
-| Tool | Tree name | Contents |
-|---|---|---|
-| `prad2ana_replay_rawdata` | `events` | Raw FADC250 waveforms + GEM strip data + optional per-channel peak analysis |
-| `prad2ana_replay_recon`   | `recon`  | HyCal clusters + GEM hits (lab frame) + HyCal↔GEM matches |
+| Tool | Main tree | Side trees | Contents |
+|---|---|---|---|
+| `prad2ana_replay_rawdata` | `events` | `scalers`, `epics` | Raw FADC250 waveforms + GEM strip data + optional per-channel peak analysis |
+| `prad2ana_replay_recon`   | `recon`  | `scalers`, `epics` | HyCal clusters + GEM hits (lab frame) + HyCal↔GEM matches |
+| `prad2ana_replay_filter`  | `events` *or* `recon` | `scalers`, `epics` (with `good`) | Subset of the input main tree retained by slow-control cuts; full slow streams concatenated and tagged |
+
+The two side trees fire on a different cadence than the main tree
+(typically once every 1–2 s versus per-trigger), so they share no row
+indexing with `events`/`recon`.  Join them by `event_number`
+(`event_number_at_arrival` for `epics`) — see the per-tree sections
+below.
 
 # `events` tree (raw)
 
@@ -216,6 +224,70 @@ waveforms live in the `events` tree, not here.
 | `lms_npeaks`        | `int[lms_nch]`     | Soft peaks found |
 | `lms_peak_time`     | `float[lms_nch][8]` | Peak time (ns) |
 | `lms_peak_integral` | `float[lms_nch][8]` | Peak integral |
+
+# `scalers` tree (DSC2 livetime)
+
+Written by every replay tool.  One row per DSC2 SYNC readout (~once per
+SYNC interval, typically 1–2 s).  Counts accumulate from the GO
+transition and are not reset between rows; instantaneous quantities
+require the difference between two consecutive entries.  See
+[`docs/rols/banktags.md`](rols/banktags.md) §0xE115 and
+`prad2dec/include/Dsc2Decoder.h` for the bank format and the in-DAQ
+gating convention (Group A counts during live; Group B is free-running).
+
+Join key: a scaler row is emitted inside a particular physics event;
+its `event_number` matches that physics event's `event_num` in the
+main tree.
+
+| Branch | Type | Meaning |
+|---|---|---|
+| `event_number`  | `int`     | Physics event number this DSC2 read lives inside |
+| `ti_ticks`      | `int64`   | TI 48-bit timestamp at this read (250 MHz ticks) |
+| `unix_time`     | `uint32`  | Most recent EPICS unix_time observed at this read (0 before any EPICS arrived) |
+| `sync_counter`  | `uint32`  | Most recent EPICS HEAD-bank counter |
+| `run_number`    | `uint32`  | CODA run number |
+| `trigger_type`  | `uint8`   | Trigger type of the carrying physics event |
+| `slot`          | `int`     | DSC2 slot in its VME crate |
+| `gated`         | `uint32`  | Selected source counter, group A (live) |
+| `ungated`       | `uint32`  | Selected source counter, group B (total) |
+| `live_ratio`    | `float`   | `gated / ungated` — cumulative live fraction at this read; -1 if `ungated == 0` |
+| `source`        | `uint8`   | Selection: `0` = ref, `1` = trg, `2` = tdc (matches `daq_config.json:dsc_scaler.source`) |
+| `channel`       | `uint8`   | Selected channel index 0–15; ignored when `source == ref` |
+| `ref_gated`     | `uint32`  | DSC2 reference counter, group A |
+| `ref_ungated`   | `uint32`  | DSC2 reference counter, group B |
+| `trg_gated`     | `uint32[16]` | Per-channel TRG counter, group A |
+| `trg_ungated`   | `uint32[16]` | Per-channel TRG counter, group B |
+| `tdc_gated`     | `uint32[16]` | Per-channel TDC counter, group A |
+| `tdc_ungated`   | `uint32[16]` | Per-channel TDC counter, group B |
+| `good`          | `bool`    | **Only in `replay_filter` output** — overall slow-control verdict at this checkpoint (all configured cuts passed) |
+
+# `epics` tree (slow control)
+
+Written by every replay tool.  One row per EPICS event (top-level EVIO
+tag `0x001F`); each row carries the channel/value pairs from a single
+0xE114 string bank parsed via `epics::ParseEpicsText`.  Channel names
+are heterogeneous between rows: only those that updated in this EPICS
+event are listed.  Persistent run-wide channel registry and snapshot
+indexing live in `epics::EpicsStore` (monitor-server side, not in the
+replay tree).
+
+Join key: `event_number_at_arrival` is the most recent physics
+`event_num` observed by the decoder at the time this EPICS event
+arrived (`-1` for EPICS that arrived before any physics event).
+
+| Branch | Type | Meaning |
+|---|---|---|
+| `event_number_at_arrival` | `int`               | Most recent physics `event_num` at EPICS arrival; `-1` if none |
+| `unix_time`               | `uint32`            | Absolute Unix seconds (from the 0xE112 HEAD bank) |
+| `sync_counter`            | `uint32`            | Monotonic HEAD-bank counter |
+| `run_number`              | `uint32`            | CODA run number |
+| `channel`                 | `vector<string>`    | Channel names that updated in this EPICS event |
+| `value`                   | `vector<double>`    | Parallel values; `value[i]` is `channel[i]`'s reading |
+| `good`                    | `bool`              | **Only in `replay_filter` output** — overall slow-control verdict at this checkpoint |
+
+ROOT vector branches require a stable pointer-to-pointer for
+`SetBranchAddress`; see `prad2det/include/EventData_io.h` ::
+`SetEpicsReadBranches` for the canonical reader skeleton.
 
 # Run example
 

@@ -1,0 +1,1101 @@
+//=============================================================================
+// replay_filter.cpp — slow-control filter for replayed ROOT files
+//
+// Reads one or more replayed ROOT files (raw or recon), applies user-defined
+// cuts on the slow streams (DSC2 livetime + EPICS values), and writes a
+// single output ROOT file containing:
+//   * the events / recon tree with only the physics events bracketed by
+//     two adjacent "good" slow-event checkpoints,
+//   * the scalers and epics trees concatenated from every input file (no
+//     filtering — they are small and useful as run-wide context),
+// plus a JSON report with one entry per (cut-channel, slow-event) point so
+// downstream tools can plot per-channel value traces with pass/fail status
+// and the cut acceptance band.
+//
+// Cuts JSON schema:
+//   {
+//     "livetime": {
+//       "source":  "ref",            // "ref" | "trg" | "tdc"
+//       "channel": 0,                // ignored for "ref"
+//       "abs":     { "min": 90, "max": 100 },
+//       "rel_rms": 3
+//     },
+//     "epics": {
+//       "<channel_name>": { "abs": {...}, "rel_rms": 3 },
+//       ...
+//     }
+//   }
+//
+// `rel_rms: N` accepts points within N · σ̂ of the channel's median, where
+// σ̂ = 1.4826 · MAD (median absolute deviation).  MAD is robust to heavy
+// outliers (one bad reading does not pull the centre or width).
+//
+// Output ROOT file:
+//   * events / recon — same schema as input, only kept events
+//   * scalers / epics — concatenated from every input plus an extra
+//     `good` boolean branch per row reflecting that checkpoint's
+//     overall verdict (all cuts pass)
+// JSON report: see Phase 6 in the source for the full layout.
+//=============================================================================
+
+#include "EventData.h"
+#include "EventData_io.h"
+#include "ConfigSetup.h"     // analysis::get_run_int
+
+#include <TFile.h>
+#include <TTree.h>
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <map>
+#include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <getopt.h>
+
+using json = nlohmann::json;
+
+namespace {
+
+// ── Cut configuration ────────────────────────────────────────────────────
+
+struct AbsCut {
+    bool   has_min = false;
+    double min_val = 0;
+    bool   has_max = false;
+    double max_val = 0;
+};
+
+struct ChannelCut {
+    AbsCut       abs;
+    bool         has_rel_rms = false;
+    double       rel_rms_n   = 0;
+    // Optional: condition this channel's robust median/MAD on points where
+    // every named gating channel's cut passed.  Use when the channel of
+    // interest is physically meaningful only in a particular regime —
+    // e.g. beam position is only meaningful when current is above some
+    // floor.  Accepts either a single string or an array of strings in
+    // the JSON; multiple gates are ANDed (a row's value is included in
+    // the stats only if ALL listed gating channels passed).  All listed
+    // channels must also be configured.  One level of gating is
+    // supported (the gating channels themselves use ungated stats).
+    // EPICS-on-EPICS only for now.
+    std::vector<std::string> gated_by;
+
+    // Robust statistics (filled in phase 2 if has_rel_rms).
+    // `center` is the median; `sigma` = 1.4826 · MAD (consistent estimator
+    // for a normal distribution, so `rel_rms: N` keeps its intuitive
+    // "N standard deviations" meaning).  `n_used` is the input point count
+    // (MAD doesn't iterate-and-drop); `n_clipped` is points outside
+    // [center − N·sigma, center + N·sigma], reported for traceability.
+    bool   stats_valid = false;
+    double robust_center = 0;   // median
+    double robust_sigma  = 0;   // 1.4826 * MAD
+    double mad           = 0;
+    int    n_used        = 0;
+    int    n_clipped     = 0;
+};
+
+struct LivetimeCut {
+    bool        enabled = false;
+    std::string source  = "ref";
+    int         channel = 0;
+    ChannelCut  cut;
+};
+
+struct CutConfig {
+    LivetimeCut                       livetime;
+    std::map<std::string, ChannelCut> epics;
+    json                              raw;            // echoed in the report
+};
+
+void parse_abs(const json &j, AbsCut &a)
+{
+    if (!j.is_object()) return;
+    if (j.contains("min") && j["min"].is_number()) {
+        a.has_min = true; a.min_val = j["min"].get<double>();
+    }
+    if (j.contains("max") && j["max"].is_number()) {
+        a.has_max = true; a.max_val = j["max"].get<double>();
+    }
+}
+
+void parse_channel_cut(const json &j, ChannelCut &c)
+{
+    if (j.contains("abs")) parse_abs(j["abs"], c.abs);
+    if (j.contains("rel_rms") && j["rel_rms"].is_number()) {
+        c.has_rel_rms = true;
+        c.rel_rms_n   = j["rel_rms"].get<double>();
+    }
+    if (j.contains("gated_by")) {
+        const auto &g = j["gated_by"];
+        if (g.is_string()) {
+            c.gated_by.push_back(g.get<std::string>());
+        } else if (g.is_array()) {
+            for (const auto &item : g) {
+                if (item.is_string()) c.gated_by.push_back(item.get<std::string>());
+            }
+        }
+    }
+}
+
+bool load_cuts(const std::string &path, CutConfig &cfg)
+{
+    std::ifstream f(path);
+    if (!f) {
+        std::cerr << "replay_filter: cannot open cuts file: " << path << "\n";
+        return false;
+    }
+    json j;
+    try {
+        j = json::parse(f, nullptr, true, /*allow_comments=*/true);
+    } catch (json::parse_error &e) {
+        std::cerr << "replay_filter: cuts JSON parse error: " << e.what() << "\n";
+        return false;
+    }
+    cfg.raw = j;
+
+    if (j.contains("livetime")) {
+        const auto &lj = j["livetime"];
+        cfg.livetime.enabled = true;
+        if (lj.contains("source"))  cfg.livetime.source  = lj["source"].get<std::string>();
+        if (lj.contains("channel")) cfg.livetime.channel = lj["channel"].get<int>();
+        parse_channel_cut(lj, cfg.livetime.cut);
+    }
+
+    if (j.contains("epics") && j["epics"].is_object()) {
+        for (auto it = j["epics"].begin(); it != j["epics"].end(); ++it) {
+            ChannelCut c;
+            parse_channel_cut(it.value(), c);
+            cfg.epics[it.key()] = c;
+        }
+    }
+    return true;
+}
+
+// ── Robust statistics: median + MAD ──────────────────────────────────────
+//
+// Uses median absolute deviation (Hampel 1974).  More robust to heavy
+// outliers than iterative sigma clipping: a single bad reading shifts the
+// median negligibly and inflates MAD only via its own contribution.  The
+// 1.4826 factor makes σ̂ a consistent estimator of stddev for a normal
+// distribution, so cut thresholds in `rel_rms: N` keep their intuitive
+// "N standard deviations" meaning.
+
+struct RobustStats {
+    double median    = 0;
+    double mad       = 0;        // raw MAD
+    double sigma     = 0;        // 1.4826 * MAD
+    int    n_used    = 0;
+    int    n_clipped = 0;        // points outside the cut band (informational)
+};
+
+double median_inplace(std::vector<double> &xs)
+{
+    if (xs.empty()) return 0;
+    size_t n = xs.size();
+    auto mid = xs.begin() + n / 2;
+    std::nth_element(xs.begin(), mid, xs.end());
+    double m = *mid;
+    if ((n & 1u) == 0) {
+        // even count: average mid with the largest of the lower half
+        auto max_lo = std::max_element(xs.begin(), mid);
+        m = 0.5 * (m + *max_lo);
+    }
+    return m;
+}
+
+RobustStats robust_mad(const std::vector<double> &xs, double n_sigma_for_clip_count)
+{
+    RobustStats r;
+    if (xs.empty()) return r;
+    r.n_used = static_cast<int>(xs.size());
+
+    std::vector<double> tmp = xs;
+    r.median = median_inplace(tmp);
+
+    std::vector<double> dev;
+    dev.reserve(xs.size());
+    for (double x : xs) dev.push_back(std::fabs(x - r.median));
+    r.mad   = median_inplace(dev);
+    r.sigma = 1.4826 * r.mad;
+
+    if (r.sigma > 0 && n_sigma_for_clip_count > 0) {
+        for (double x : xs)
+            if (std::fabs(x - r.median) > n_sigma_for_clip_count * r.sigma)
+                ++r.n_clipped;
+    }
+    return r;
+}
+
+// ── In-memory slow-event rows ────────────────────────────────────────────
+
+struct ScalerRow {
+    int32_t  event_number   = 0;
+    int64_t  ti_ticks       = 0;
+    int64_t  unix_time      = 0;     // 0 if no SYNC seen yet
+    uint32_t sync_counter   = 0;
+    uint32_t run_number     = 0;
+    uint32_t ref_gated      = 0;
+    uint32_t ref_ungated    = 0;
+    uint32_t trg_gated[16]   = {};
+    uint32_t trg_ungated[16] = {};
+    uint32_t tdc_gated[16]   = {};
+    uint32_t tdc_ungated[16] = {};
+};
+
+struct EpicsArrival {
+    int32_t                         event_number = 0;   // event_number_at_arrival
+    int64_t                         unix_time    = 0;
+    uint32_t                        sync_counter = 0;
+    uint32_t                        run_number   = 0;
+    std::map<std::string, double>   updates;            // sparse
+};
+
+double live_ratio_from(const ScalerRow &r, const LivetimeCut &cfg)
+{
+    uint32_t g = 0, u = 0;
+    if (cfg.source == "ref") {
+        g = r.ref_gated; u = r.ref_ungated;
+    } else if (cfg.source == "trg" || cfg.source == "tdc") {
+        int c = std::clamp(cfg.channel, 0, 15);
+        if (cfg.source == "trg") { g = r.trg_gated[c]; u = r.trg_ungated[c]; }
+        else                     { g = r.tdc_gated[c]; u = r.tdc_ungated[c]; }
+    }
+    if (u == 0) return -1.0;
+    return static_cast<double>(g) / static_cast<double>(u) * 100.0;
+}
+
+// ── Tree readers ─────────────────────────────────────────────────────────
+
+// load_*() preserves the input-file order; sorting is done downstream via an
+// index permutation so phase-5 re-reads (which iterate in input order) can
+// look up each row's verdict by its load-order index.
+bool load_scalers(const std::vector<std::string> &files, std::vector<ScalerRow> &out)
+{
+    prad2::RawScalerData sc;
+    for (const auto &path : files) {
+        std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
+        if (!f || f->IsZombie()) {
+            std::cerr << "replay_filter: cannot open " << path << "\n";
+            return false;
+        }
+        TTree *t = dynamic_cast<TTree *>(f->Get("scalers"));
+        if (!t) continue;
+        prad2::SetScalerReadBranches(t, sc);
+        Long64_t n = t->GetEntries();
+        out.reserve(out.size() + n);
+        for (Long64_t i = 0; i < n; ++i) {
+            t->GetEntry(i);
+            ScalerRow r;
+            r.event_number = sc.event_number;
+            r.ti_ticks     = sc.ti_ticks;
+            r.unix_time    = sc.unix_time;
+            r.sync_counter = sc.sync_counter;
+            r.run_number   = sc.run_number;
+            r.ref_gated    = sc.ref_gated;
+            r.ref_ungated  = sc.ref_ungated;
+            std::memcpy(r.trg_gated,   sc.trg_gated,   16 * sizeof(uint32_t));
+            std::memcpy(r.trg_ungated, sc.trg_ungated, 16 * sizeof(uint32_t));
+            std::memcpy(r.tdc_gated,   sc.tdc_gated,   16 * sizeof(uint32_t));
+            std::memcpy(r.tdc_ungated, sc.tdc_ungated, 16 * sizeof(uint32_t));
+            out.push_back(r);
+        }
+    }
+    return true;
+}
+
+bool load_epics(const std::vector<std::string> &files, std::vector<EpicsArrival> &out)
+{
+    for (const auto &path : files) {
+        std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
+        if (!f || f->IsZombie()) {
+            std::cerr << "replay_filter: cannot open " << path << "\n";
+            return false;
+        }
+        TTree *t = dynamic_cast<TTree *>(f->Get("epics"));
+        if (!t) continue;
+
+        prad2::RawEpicsData ep;
+        std::vector<std::string> *cp = &ep.channel;
+        std::vector<double>      *vp = &ep.value;
+        t->SetBranchAddress("event_number_at_arrival", &ep.event_number_at_arrival);
+        t->SetBranchAddress("unix_time",    &ep.unix_time);
+        t->SetBranchAddress("sync_counter", &ep.sync_counter);
+        t->SetBranchAddress("run_number",   &ep.run_number);
+        t->SetBranchAddress("channel", &cp);
+        t->SetBranchAddress("value",   &vp);
+
+        Long64_t n = t->GetEntries();
+        out.reserve(out.size() + n);
+        for (Long64_t i = 0; i < n; ++i) {
+            t->GetEntry(i);
+            EpicsArrival a;
+            a.event_number = ep.event_number_at_arrival;
+            a.unix_time    = ep.unix_time;
+            a.sync_counter = ep.sync_counter;
+            a.run_number   = ep.run_number;
+            size_t k_max = std::min(ep.channel.size(), ep.value.size());
+            for (size_t k = 0; k < k_max; ++k)
+                a.updates[ep.channel[k]] = ep.value[k];
+            out.push_back(std::move(a));
+        }
+    }
+    return true;
+}
+
+// Index permutation that orders the input vector by event_number.
+template <class T>
+std::vector<size_t> sort_index_by_event(const std::vector<T> &v)
+{
+    std::vector<size_t> idx(v.size());
+    for (size_t i = 0; i < idx.size(); ++i) idx[i] = i;
+    std::sort(idx.begin(), idx.end(),
+              [&](size_t a, size_t b) { return v[a].event_number < v[b].event_number; });
+    return idx;
+}
+
+// Pre-scan the events/recon tree across all input files and build a
+// lookup event_num → ti_ticks (the 48-bit TI timestamp).  Only `event_num`
+// and `timestamp` branches are activated, so this is fast even on
+// millions-of-event runs.  Used to pin each report point to the TI tick
+// of the physics event it is associated with.
+bool build_evn_to_ticks(const std::vector<std::string> &files,
+                        const std::string              &tree_name,
+                        std::map<int32_t, int64_t>     &out)
+{
+    int       event_num = 0;
+    long long timestamp = 0;
+    for (const auto &path : files) {
+        std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
+        if (!f || f->IsZombie()) {
+            std::cerr << "replay_filter: cannot open " << path << "\n";
+            return false;
+        }
+        TTree *t = dynamic_cast<TTree *>(f->Get(tree_name.c_str()));
+        if (!t) continue;
+
+        // Activate just the two branches we need.
+        t->SetBranchStatus("*", 0);
+        if (auto *b = t->GetBranch("event_num")) {
+            t->SetBranchStatus("event_num", 1);
+            t->SetBranchAddress("event_num", &event_num);
+        } else {
+            std::cerr << "replay_filter: '" << tree_name
+                      << "' has no event_num branch in " << path << "\n";
+            return false;
+        }
+        if (auto *b = t->GetBranch("timestamp")) {
+            t->SetBranchStatus("timestamp", 1);
+            t->SetBranchAddress("timestamp", &timestamp);
+        } else {
+            std::cerr << "replay_filter: '" << tree_name
+                      << "' has no timestamp branch in " << path << "\n";
+            return false;
+        }
+
+        Long64_t n = t->GetEntries();
+        for (Long64_t i = 0; i < n; ++i) {
+            t->GetEntry(i);
+            // First-write-wins: in case of duplicate event_num across files
+            // (shouldn't happen for a single run), keep the earliest tick.
+            out.emplace(event_num, static_cast<int64_t>(timestamp));
+        }
+    }
+    return true;
+}
+
+// ── Cut evaluation ───────────────────────────────────────────────────────
+
+bool eval_channel_cut(const ChannelCut &c, double value)
+{
+    if (c.abs.has_min && !(value >= c.abs.min_val)) return false;
+    if (c.abs.has_max && !(value <= c.abs.max_val)) return false;
+    if (c.has_rel_rms && c.stats_valid && c.robust_sigma > 0) {
+        if (std::fabs(value - c.robust_center) > c.rel_rms_n * c.robust_sigma)
+            return false;
+    }
+    return true;
+}
+
+// ── Report point ─────────────────────────────────────────────────────────
+//
+// Each report point carries:
+//   * `associated_evn` — the physics event the slow row is anchored to.
+//     Scaler rows: their own event_number (the SYNC physics event whose
+//     readout included the scaler bank).  EPICS rows: event_number_at_-
+//     arrival (the most recent physics event seen at the time of the
+//     EPICS event).  Both are integer keys into the events/recon tree.
+//   * `associated_timestamp` (relative seconds) — the TI 48-bit tick of
+//     the physics event with event_num == associated_evn, in seconds
+//     since the earliest looked-up TI tick.  Looked up once per unique
+//     event_number from the events/recon tree, so it is the *exact* time
+//     of the physics event the slow row is tied to (no forward-fill /
+//     SYNC-interval lag).  null when no physics event matches (e.g.
+//     event_number_at_arrival = -1 — EPICS arrived before any physics).
+//   * `unix_time` (absolute Unix seconds) — from the 0xE112 HEAD bank.
+//     Native for EPICS rows.  Explicitly null for scaler rows: the
+//     scaler's cached unix_time can be a SYNC interval old, and emitting
+//     it would invite mis-alignment.  Charts that need absolute time
+//     should plot associated_timestamp and use any EPICS unix_time as
+//     the absolute anchor (one EPICS pin is enough for the whole run).
+struct ReportPoint {
+    std::string channel;
+    bool        pass;
+    int32_t     event_number;     // = associated_evn
+    bool        has_assoc_t;
+    double      assoc_t_rel;      // seconds since the run's earliest event
+    bool        has_unix_time;
+    int64_t     unix_time;
+    double      value;            // NaN ⇒ value not yet seen
+};
+
+// ── Main pipeline ────────────────────────────────────────────────────────
+
+bool detect_event_tree(const std::string &path, std::string &name)
+{
+    std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
+    if (!f || f->IsZombie()) return false;
+    if (f->Get("events")) { name = "events"; return true; }
+    if (f->Get("recon"))  { name = "recon";  return true; }
+    return false;
+}
+
+int run(const std::vector<std::string> &input_files,
+        const std::string &output_path,
+        const std::string &cuts_path,
+        const std::string &report_path,
+        int run_number_override)
+{
+    CutConfig cuts;
+    if (!load_cuts(cuts_path, cuts)) return 1;
+
+    // ---------- Phase 1: load slow streams into memory ----------
+    std::vector<ScalerRow>    scalers;
+    std::vector<EpicsArrival> epics_rows;
+    if (!load_scalers(input_files, scalers))   return 1;
+    if (!load_epics  (input_files, epics_rows)) return 1;
+    std::cerr << "replay_filter: loaded " << scalers.size() << " scaler + "
+              << epics_rows.size() << " epics rows from "
+              << input_files.size() << " file(s)\n";
+
+    int run_number = run_number_override;
+    if (run_number < 0) run_number = analysis::get_run_int(input_files.front());
+    if (run_number < 0 && !scalers.empty())    run_number = (int)scalers.front().run_number;
+    if (run_number < 0 && !epics_rows.empty()) run_number = (int)epics_rows.front().run_number;
+
+    // ---------- Phase 2: robust stats for rel_rms cuts ----------
+    // Ungated channels first (stats from all values), then gated channels
+    // (stats restricted to rows where the named gating channel's cut
+    // passed).  Gating is one-level: the gating channel itself uses its
+    // own ungated stats — gating chains are intentionally not supported
+    // to keep the JSON unambiguous.
+    auto fill_stats = [&](ChannelCut &c, const std::vector<double> &xs) {
+        auto rs = robust_mad(xs, c.rel_rms_n);
+        c.stats_valid   = (rs.n_used > 1) && rs.sigma > 0;
+        c.robust_center = rs.median;
+        c.robust_sigma  = rs.sigma;
+        c.mad           = rs.mad;
+        c.n_used        = rs.n_used;
+        c.n_clipped     = rs.n_clipped;
+    };
+
+    // Walk EPICS rows in event-number order so forward-fill of the gating
+    // channel reflects the actual time sequence.
+    auto ep_order_for_stats = sort_index_by_event(epics_rows);
+
+    // 1. livetime (independent of EPICS).
+    if (cuts.livetime.enabled && cuts.livetime.cut.has_rel_rms) {
+        std::vector<double> xs;
+        xs.reserve(scalers.size());
+        for (const auto &s : scalers) {
+            double v = live_ratio_from(s, cuts.livetime);
+            if (v >= 0) xs.push_back(v);
+        }
+        fill_stats(cuts.livetime.cut, xs);
+    }
+
+    // 2. ungated EPICS channels (stats from all observed values).
+    for (auto &kv : cuts.epics) {
+        if (!kv.second.has_rel_rms) continue;
+        if (!kv.second.gated_by.empty()) continue;
+        std::vector<double> xs;
+        for (size_t oi : ep_order_for_stats) {
+            auto it = epics_rows[oi].updates.find(kv.first);
+            if (it != epics_rows[oi].updates.end()) xs.push_back(it->second);
+        }
+        fill_stats(kv.second, xs);
+    }
+
+    // 3. gated EPICS channels (stats from rows where every gate's cut passed).
+    for (auto &kv : cuts.epics) {
+        if (!kv.second.has_rel_rms) continue;
+        if (kv.second.gated_by.empty()) continue;
+
+        // Resolve every gating channel.  If any is missing, fall back to
+        // ungated stats (and log) — partial gating would be misleading.
+        std::vector<const ChannelCut *> gates;
+        gates.reserve(kv.second.gated_by.size());
+        bool gates_ok = true;
+        for (const auto &gname : kv.second.gated_by) {
+            auto it = cuts.epics.find(gname);
+            if (it == cuts.epics.end()) {
+                std::cerr << "replay_filter: channel '" << kv.first
+                          << "' is gated_by '" << gname
+                          << "' which is not configured — falling back to ungated stats\n";
+                gates_ok = false;
+                break;
+            }
+            if (!it->second.gated_by.empty()) {
+                std::cerr << "replay_filter: channel '" << kv.first
+                          << "' gated_by '" << gname
+                          << "' which is itself gated — chains not supported, "
+                             "ignoring the inner gating\n";
+            }
+            gates.push_back(&it->second);
+        }
+        if (!gates_ok) {
+            std::vector<double> xs;
+            for (size_t oi : ep_order_for_stats) {
+                auto it = epics_rows[oi].updates.find(kv.first);
+                if (it != epics_rows[oi].updates.end()) xs.push_back(it->second);
+            }
+            fill_stats(kv.second, xs);
+            continue;
+        }
+
+        std::vector<double> xs;
+        std::map<std::string, double> cur_eps;        // forward-fill across rows
+        for (size_t oi : ep_order_for_stats) {
+            const auto &row = epics_rows[oi];
+            for (const auto &up : row.updates) cur_eps[up.first] = up.second;
+
+            auto val_it = row.updates.find(kv.first);
+            if (val_it == row.updates.end()) continue;
+
+            bool all_pass = true;
+            for (size_t gi = 0; gi < gates.size(); ++gi) {
+                auto gv_it = cur_eps.find(kv.second.gated_by[gi]);
+                if (gv_it == cur_eps.end()
+                    || !eval_channel_cut(*gates[gi], gv_it->second)) {
+                    all_pass = false;
+                    break;
+                }
+            }
+            if (!all_pass) continue;
+            xs.push_back(val_it->second);
+        }
+        fill_stats(kv.second, xs);
+    }
+
+    // ---------- Phase 3: lookup event_num → TI ticks ----------
+    // Detect the events tree name (events / recon) once; the same name is
+    // used again for the physics-filter pass in phase 5.
+    std::string ev_tree_name;
+    if (!detect_event_tree(input_files.front(), ev_tree_name)) {
+        std::cerr << "replay_filter: no events/recon tree in "
+                  << input_files.front() << "\n";
+        return 1;
+    }
+    std::map<int32_t, int64_t> evn_to_ticks;
+    if (!build_evn_to_ticks(input_files, ev_tree_name, evn_to_ticks)) return 1;
+
+    // Anchor for relative time: the earliest TI tick we have.  We use the
+    // smallest looked-up timestamp so EPICS rows tied to events earlier
+    // than the first scaler still get a non-negative associated_timestamp.
+    int64_t  ti_anchor    = 0;
+    bool     anchor_set   = false;
+    for (const auto &kv : evn_to_ticks) {
+        if (!anchor_set || kv.second < ti_anchor) { ti_anchor = kv.second; anchor_set = true; }
+    }
+    constexpr double TI_TICK_SEC = 4.0e-9;
+
+    // ---------- Phase 4: walk merged timeline, mark good/bad ----------
+    // Iterate via index permutations so the parallel verdict vectors stay
+    // aligned with the load-order vectors (used in phase 6).
+    auto sc_order = sort_index_by_event(scalers);
+    auto ep_order = sort_index_by_event(epics_rows);
+
+    std::vector<bool> scaler_verdict(scalers.size(),  false);
+    std::vector<bool> epics_verdict (epics_rows.size(), false);
+
+    struct Checkpoint {
+        int32_t event_number;
+        int64_t unix_time;
+        bool    overall_pass;
+    };
+    std::vector<Checkpoint>  timeline;
+    std::vector<ReportPoint> report_points;
+
+    // Forward-fill state for cut evaluation only.
+    double                            cur_lt    = -1.0;   // % livetime
+    std::map<std::string, double>     cur_eps;
+    int64_t                           last_unix = 0;
+
+    size_t i_sc = 0, i_ep = 0;
+    while (i_sc < sc_order.size() || i_ep < ep_order.size()) {
+        const bool take_sc =
+            (i_sc < sc_order.size()) &&
+            (i_ep >= ep_order.size() ||
+             scalers[sc_order[i_sc]].event_number <=
+             epics_rows[ep_order[i_ep]].event_number);
+
+        int32_t cp_evn  = 0;
+        int64_t cp_unix = 0;
+        size_t  orig    = 0;
+        bool    is_sc   = take_sc;
+
+        bool emit_unix = false;     // true only for EPICS rows
+        if (take_sc) {
+            orig = sc_order[i_sc++];
+            const auto &s = scalers[orig];
+            cp_evn = s.event_number;
+            cur_lt = live_ratio_from(s, cuts.livetime);
+            // Scaler's cached unix_time is intentionally ignored — it lags
+            // by up to a SYNC interval and confuses alignment.  Charts that
+            // need absolute time should use the EPICS unix_time pins.
+            cp_unix = last_unix;
+        } else {
+            orig = ep_order[i_ep++];
+            const auto &e = epics_rows[orig];
+            cp_evn = e.event_number;
+            for (const auto &kv : e.updates) cur_eps[kv.first] = kv.second;
+            if (e.unix_time > 0) last_unix = e.unix_time;
+            cp_unix    = last_unix;
+            emit_unix  = (e.unix_time > 0);
+        }
+
+        // associated_timestamp: the TI tick of the physics event whose
+        // event_num matches our `cp_evn`, in seconds since the run's
+        // earliest looked-up tick.  Looked up once per unique event_num.
+        bool   pt_has_t = false;
+        double pt_t     = 0.0;
+        if (anchor_set && cp_evn >= 0) {
+            auto it = evn_to_ticks.find(cp_evn);
+            if (it != evn_to_ticks.end()) {
+                pt_has_t = true;
+                pt_t     = (it->second - ti_anchor) * TI_TICK_SEC;
+            }
+        }
+        bool   pt_has_unix = emit_unix;
+        int64_t pt_unix    = emit_unix ? (int64_t)last_unix : 0;
+
+        // Per-channel report points with forward-filled values (dense traces
+        // for plotting).
+        if (cuts.livetime.enabled) {
+            bool has  = (cur_lt >= 0);
+            double v  = has ? cur_lt : std::numeric_limits<double>::quiet_NaN();
+            bool pass = has && eval_channel_cut(cuts.livetime.cut, cur_lt);
+            report_points.push_back({"livetime", pass, cp_evn,
+                                     pt_has_t, pt_t,
+                                     pt_has_unix, pt_unix, v});
+        }
+        for (const auto &kv : cuts.epics) {
+            auto   it   = cur_eps.find(kv.first);
+            bool   has  = (it != cur_eps.end());
+            double v    = has ? it->second
+                              : std::numeric_limits<double>::quiet_NaN();
+            bool   pass = has && eval_channel_cut(kv.second, v);
+            report_points.push_back({"epics:" + kv.first, pass, cp_evn,
+                                     pt_has_t, pt_t,
+                                     pt_has_unix, pt_unix, v});
+        }
+
+        // Overall verdict at this checkpoint = AND of every configured cut.
+        // Channels that haven't reported yet count as "fail" — the user's
+        // spec says events bracketed by an undefined endpoint are dropped.
+        bool overall = true;
+        if (cuts.livetime.enabled) {
+            if (cur_lt < 0 || !eval_channel_cut(cuts.livetime.cut, cur_lt))
+                overall = false;
+        }
+        for (const auto &kv : cuts.epics) {
+            auto it = cur_eps.find(kv.first);
+            if (it == cur_eps.end() || !eval_channel_cut(kv.second, it->second)) {
+                overall = false;
+            }
+        }
+        timeline.push_back({cp_evn, cp_unix, overall});
+        if (is_sc) scaler_verdict[orig] = overall;
+        else       epics_verdict [orig] = overall;
+    }
+
+    // ---------- Phase 4: build keep-intervals (lo, hi] ----------
+    std::vector<std::pair<int32_t, int32_t>> keep;
+    for (size_t i = 1; i < timeline.size(); ++i) {
+        if (timeline[i - 1].overall_pass && timeline[i].overall_pass) {
+            keep.emplace_back(timeline[i - 1].event_number,
+                              timeline[i    ].event_number);
+        }
+    }
+    auto is_kept = [&](int32_t evn) -> bool {
+        if (keep.empty()) return false;
+        auto it = std::upper_bound(
+            keep.begin(), keep.end(), evn,
+            [](int32_t e, const std::pair<int32_t, int32_t> &p) { return e < p.first; });
+        if (it == keep.begin()) return false;
+        --it;
+        return evn > it->first && evn <= it->second;
+    };
+
+    // ---------- Phase 6: write the output ROOT file ----------
+    // ev_tree_name was detected in phase 3 above.
+    const bool is_recon = (ev_tree_name == "recon");
+
+    std::unique_ptr<TFile> out(TFile::Open(output_path.c_str(), "RECREATE"));
+    if (!out || out->IsZombie()) {
+        std::cerr << "replay_filter: cannot create " << output_path << "\n";
+        return 1;
+    }
+
+    int64_t n_in = 0, n_out = 0;
+
+    // Filter the events/recon tree.  We use the existing
+    // SetRaw{Read,Write}Branches helpers so the output schema matches.
+    if (!is_recon) {
+        prad2::RawEventData    ev;
+        prad2::RawReadStatus   first_status;
+        {
+            std::unique_ptr<TFile> f0(TFile::Open(input_files.front().c_str(), "READ"));
+            TTree *t0 = dynamic_cast<TTree *>(f0->Get("events"));
+            first_status = prad2::SetRawReadBranches(t0, ev);
+        }
+        out->cd();
+        TTree *out_ev = new TTree("events", "PRad2 filtered replay (raw)");
+        prad2::SetRawWriteBranches(out_ev, ev, first_status.has_peaks);
+
+        for (const auto &path : input_files) {
+            std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
+            TTree *t = dynamic_cast<TTree *>(f->Get("events"));
+            if (!t) continue;
+            prad2::SetRawReadBranches(t, ev);
+            std::vector<uint32_t> *p_ssp = &ev.ssp_raw;
+            if (t->GetBranch("ssp_raw")) t->SetBranchAddress("ssp_raw", &p_ssp);
+            Long64_t n = t->GetEntries();
+            n_in += n;
+            for (Long64_t i = 0; i < n; ++i) {
+                ev.ssp_raw.clear();
+                t->GetEntry(i);
+                if (is_kept(ev.event_num)) {
+                    out->cd();
+                    out_ev->Fill();
+                    ++n_out;
+                }
+            }
+        }
+        out->cd();
+        out_ev->Write();
+    } else {
+        prad2::ReconEventData ev;
+        out->cd();
+        TTree *out_ev = new TTree("recon", "PRad2 filtered replay (recon)");
+        prad2::SetReconWriteBranches(out_ev, ev);
+
+        for (const auto &path : input_files) {
+            std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
+            TTree *t = dynamic_cast<TTree *>(f->Get("recon"));
+            if (!t) continue;
+            prad2::SetReconReadBranches(t, ev);
+            std::vector<uint32_t> *p_ssp = &ev.ssp_raw;
+            if (t->GetBranch("ssp_raw")) t->SetBranchAddress("ssp_raw", &p_ssp);
+            Long64_t n = t->GetEntries();
+            n_in += n;
+            for (Long64_t i = 0; i < n; ++i) {
+                ev.ssp_raw.clear();
+                t->GetEntry(i);
+                if (is_kept(ev.event_num)) {
+                    out->cd();
+                    out_ev->Fill();
+                    ++n_out;
+                }
+            }
+        }
+        out->cd();
+        out_ev->Write();
+    }
+
+    // Concatenate scalers tree from every input.  Adds a `good` boolean
+    // (per-checkpoint overall verdict from phase 3) so downstream tools can
+    // colour the run's livetime trace by pass/fail without recomputing.
+    {
+        prad2::RawScalerData sc;
+        bool                 good = false;
+        out->cd();
+        TTree *out_sc = new TTree("scalers", "PRad2 DSC2 scaler readouts (concatenated)");
+        prad2::SetScalerWriteBranches(out_sc, sc);
+        out_sc->Branch("good", &good, "good/O");
+
+        size_t seq = 0;
+        for (const auto &path : input_files) {
+            std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
+            TTree *t = dynamic_cast<TTree *>(f->Get("scalers"));
+            if (!t) continue;
+            prad2::SetScalerReadBranches(t, sc);
+            Long64_t n = t->GetEntries();
+            for (Long64_t i = 0; i < n; ++i) {
+                t->GetEntry(i);
+                good = (seq < scaler_verdict.size()) ? scaler_verdict[seq] : false;
+                ++seq;
+                out->cd();
+                out_sc->Fill();
+            }
+        }
+        out_sc->Write();
+    }
+
+    // Concatenate epics tree from every input, tagged the same way.
+    {
+        prad2::RawEpicsData ep;
+        std::vector<std::string> *cp = &ep.channel;
+        std::vector<double>      *vp = &ep.value;
+        bool good = false;
+        out->cd();
+        TTree *out_ep = new TTree("epics", "PRad2 EPICS slow control (concatenated)");
+        prad2::SetEpicsWriteBranches(out_ep, ep);
+        out_ep->Branch("good", &good, "good/O");
+
+        size_t seq = 0;
+        for (const auto &path : input_files) {
+            std::unique_ptr<TFile> f(TFile::Open(path.c_str(), "READ"));
+            TTree *t = dynamic_cast<TTree *>(f->Get("epics"));
+            if (!t) continue;
+            t->SetBranchAddress("event_number_at_arrival", &ep.event_number_at_arrival);
+            t->SetBranchAddress("unix_time",    &ep.unix_time);
+            t->SetBranchAddress("sync_counter", &ep.sync_counter);
+            t->SetBranchAddress("run_number",   &ep.run_number);
+            t->SetBranchAddress("channel", &cp);
+            t->SetBranchAddress("value",   &vp);
+            Long64_t n = t->GetEntries();
+            for (Long64_t i = 0; i < n; ++i) {
+                t->GetEntry(i);
+                good = (seq < epics_verdict.size()) ? epics_verdict[seq] : false;
+                ++seq;
+                out->cd();
+                out_ep->Fill();
+            }
+        }
+        out_ep->Write();
+    }
+
+    out->Close();
+
+    // ---------- Phase 6: write the JSON report ----------
+    auto to_json_or_null = [](bool valid, double v) -> json {
+        return valid ? json(v) : json(nullptr);
+    };
+    auto stats_for = [&](const ChannelCut &c) -> json {
+        json s = {
+            {"abs_min", c.abs.has_min ? json(c.abs.min_val) : json(nullptr)},
+            {"abs_max", c.abs.has_max ? json(c.abs.max_val) : json(nullptr)},
+        };
+        if (c.has_rel_rms) {
+            s["rel_rms"]       = c.rel_rms_n;
+            s["robust_center"] = to_json_or_null(c.stats_valid, c.robust_center);
+            s["robust_sigma"]  = to_json_or_null(c.stats_valid, c.robust_sigma);
+            s["mad"]           = to_json_or_null(c.stats_valid, c.mad);
+            // n_used is the count *after* gating (if any) — useful for
+            // sanity-checking that the gating restriction left enough data
+            // to compute meaningful stats.
+            s["n_used"]        = c.n_used;
+            s["n_clipped"]     = c.n_clipped;
+            if (!c.gated_by.empty()) {
+                // Always emit as array — even single-gate cases — so
+                // downstream tools can iterate without checking type.
+                s["gated_by"] = c.gated_by;
+            }
+        }
+        return s;
+    };
+
+    json report;
+    report["run_number"]   = run_number;
+    report["input_files"]  = input_files;
+    report["output_file"]  = output_path;
+    report["cuts"]         = cuts.raw;
+    report["robust_method"] = "mad";   // 1.4826 * MAD as σ̂
+
+    json stats = json::object();
+    if (cuts.livetime.enabled) {
+        json s = stats_for(cuts.livetime.cut);
+        s["source"]  = cuts.livetime.source;
+        s["channel"] = cuts.livetime.channel;
+        stats["livetime"] = std::move(s);
+    }
+    for (const auto &kv : cuts.epics)
+        stats["epics:" + kv.first] = stats_for(kv.second);
+    report["stats"] = std::move(stats);
+
+    int n_pass_cp = 0, n_fail_cp = 0;
+    for (const auto &cp : timeline) (cp.overall_pass ? n_pass_cp : n_fail_cp)++;
+    json keep_intervals = json::array();
+    for (const auto &p : keep) keep_intervals.push_back({p.first, p.second});
+
+    // Per-channel breakdown — number of slow-event checkpoints where this
+    // channel's cut accepted vs rejected the value.  Helps the user see
+    // immediately which cut is doing the rejecting (e.g. "beam current
+    // killed 80% of points, livetime barely matters").
+    std::map<std::string, std::pair<int, int>> per_channel;   // ch → {pass, fail}
+    for (const auto &p : report_points) {
+        auto &c = per_channel[p.channel];
+        if (p.pass) ++c.first; else ++c.second;
+    }
+    json per_channel_json = json::object();
+    for (const auto &kv : per_channel) {
+        int pass = kv.second.first, fail = kv.second.second;
+        int tot  = pass + fail;
+        per_channel_json[kv.first] = {
+            {"n_pass",    pass},
+            {"n_fail",    fail},
+            {"pass_rate", tot > 0 ? double(pass) / double(tot) : 0.0},
+        };
+    }
+
+    const int64_t n_in_total  = n_in;
+    const int64_t n_pass_phys = n_out;
+    const int64_t n_rej_phys  = n_in_total - n_pass_phys;
+    const int     n_slow      = static_cast<int>(timeline.size());
+
+    report["summary"] = {
+        // Slow-event checkpoint counts.
+        {"n_slow_events",      n_slow},
+        {"n_slow_pass",        n_pass_cp},
+        {"n_slow_reject",      n_fail_cp},
+        {"slow_pass_rate",     n_slow > 0 ? double(n_pass_cp) / double(n_slow) : 0.0},
+        // Physics-event counts.
+        {"n_physics_in",       n_in_total},
+        {"n_physics_pass",     n_pass_phys},
+        {"n_physics_reject",   n_rej_phys},
+        {"physics_pass_rate",  n_in_total > 0
+                                ? double(n_pass_phys) / double(n_in_total) : 0.0},
+        // Keep-interval count (each is a (lo, hi] range of accepted events).
+        {"n_keep_intervals",   (int)keep.size()},
+        // Per-cut breakdown — which channel rejected how often.
+        {"per_channel",        per_channel_json},
+    };
+    report["keep_intervals"] = std::move(keep_intervals);
+
+    json pts = json::array();
+    pts.get_ptr<json::array_t *>()->reserve(report_points.size());
+    for (const auto &p : report_points) {
+        json e = {
+            {"channel",              p.channel},
+            {"status",               p.pass ? "pass" : "fail"},
+            {"associated_evn",       p.event_number},
+            // TI ticks of the associated physics event, in seconds since the
+            // run's earliest event.  Null when no physics event matches
+            // (associated_evn=-1, or input has no events tree).
+            {"associated_timestamp", p.has_assoc_t ? json(p.assoc_t_rel) : json(nullptr)},
+            // Native EPICS unix_time on EPICS rows; null on scaler rows.
+            {"unix_time",            p.has_unix_time ? json(p.unix_time) : json(nullptr)},
+            {"value",                std::isnan(p.value) ? json(nullptr) : json(p.value)},
+        };
+        pts.push_back(std::move(e));
+    }
+    report["points"] = std::move(pts);
+
+    std::ofstream of(report_path);
+    if (!of) {
+        std::cerr << "replay_filter: cannot write " << report_path << "\n";
+        return 1;
+    }
+    of << report.dump(2) << "\n";
+
+    std::cerr << "replay_filter: report written to " << report_path << "\n";
+    std::cerr << "replay_filter: output ROOT     " << output_path << "\n";
+    auto fmt_pct = [](double r) {
+        std::ostringstream o;
+        o << std::fixed << std::setprecision(2) << (r * 100.0) << "%";
+        return o.str();
+    };
+    std::cerr << "  slow events  : " << n_slow
+              << "  pass=" << n_pass_cp << "  reject=" << n_fail_cp
+              << "  rate=" << fmt_pct(n_slow > 0 ? double(n_pass_cp) / n_slow : 0)
+              << "\n";
+    std::cerr << "  keep intervals: " << keep.size() << "\n";
+    std::cerr << "  physics      : in=" << n_in_total
+              << "  pass="  << n_pass_phys
+              << "  reject=" << n_rej_phys
+              << "  rate=" << fmt_pct(n_in_total > 0
+                                       ? double(n_pass_phys) / n_in_total : 0)
+              << "\n";
+    if (!per_channel.empty()) {
+        std::cerr << "  per-channel reject:\n";
+        for (const auto &kv : per_channel) {
+            std::cerr << "    " << kv.first << ": "
+                      << kv.second.second << " / "
+                      << (kv.second.first + kv.second.second)
+                      << " ("
+                      << fmt_pct(double(kv.second.second) /
+                                 std::max(1, kv.second.first + kv.second.second))
+                      << ")\n";
+        }
+    }
+    return 0;
+}
+
+void usage(const char *prog)
+{
+    std::cerr <<
+        "Usage: " << prog << " <input.root> [more.root ...]\n"
+        "       -o <output.root>  -c <cuts.json> [-j <report.json>] [-r <run_num>]\n"
+        "\n"
+        "Filters replayed ROOT files by slow-control cuts (DSC2 livetime\n"
+        "+ EPICS).  Writes a single ROOT file with the kept physics events\n"
+        "and the full scaler/epics streams concatenated, plus a JSON report\n"
+        "with per-(cut, slow-event) pass/fail status for chart plotting.\n"
+        "\n"
+        "Cut JSON example:\n"
+        "  {\n"
+        "    \"livetime\": { \"source\": \"ref\", \"abs\": { \"min\": 90 } },\n"
+        "    \"epics\": {\n"
+        "      \"hallb_IPM2C21A_CUR\":  { \"abs\": { \"min\": 3 } },\n"
+        "      \"hallb_IPM2C21A_XPOS\": { \"rel_rms\": 3 },\n"
+        "      \"hallb_IPM2C21A_YPOS\": { \"rel_rms\": 3 }\n"
+        "    }\n"
+        "  }\n";
+}
+
+} // anonymous namespace
+
+int main(int argc, char *argv[])
+{
+    std::vector<std::string> inputs;
+    std::string output, cuts_path, report_path;
+    int run_override = -1;
+
+    int opt;
+    while ((opt = getopt(argc, argv, "o:c:j:r:h")) != -1) {
+        switch (opt) {
+        case 'o': output       = optarg;           break;
+        case 'c': cuts_path    = optarg;           break;
+        case 'j': report_path  = optarg;           break;
+        case 'r': run_override = std::atoi(optarg); break;
+        case 'h': usage(argv[0]); return 0;
+        default:  usage(argv[0]); return 1;
+        }
+    }
+    for (int i = optind; i < argc; ++i) inputs.push_back(argv[i]);
+
+    if (inputs.empty() || output.empty() || cuts_path.empty()) {
+        usage(argv[0]);
+        return 1;
+    }
+    if (report_path.empty()) {
+        auto dot = output.rfind('.');
+        report_path = (dot == std::string::npos)
+            ? output + ".report.json"
+            : output.substr(0, dot) + ".report.json";
+    }
+    return run(inputs, output, cuts_path, report_path, run_override);
+}

@@ -58,6 +58,73 @@ prad2ana_replay_recon <evio_or_dir> [more...] -o <output_dir> \
   the zero-suppression sigma threshold.
 - See [REPLAYED_DATA.md](../docs/REPLAYED_DATA.md) for the full branch list.
 
+**replay_filter** — applies slow-control quality cuts to a replayed run
+and writes a single ROOT file containing only the physics events
+bracketed by two adjacent passing slow-event checkpoints.
+
+```bash
+prad2ana_replay_filter <input.root> [more.root ...] \
+    -o <output.root> -c <cuts.json> [-j <report.json>] [-r <run_num>]
+```
+
+Inputs may be either `replay_rawdata` (`events`) or `replay_recon`
+(`recon`) outputs; the tree name is auto-detected and preserved.  All
+input files for a run can be passed in one invocation.
+
+Algorithm.  The DSC2 livetime (from the `scalers` tree) and EPICS
+slow-control values (from the `epics` tree) form a merged timeline of
+checkpoints, ordered by event number.  At each checkpoint, configured
+cuts are evaluated; a checkpoint is accepted only when every cut
+passes.  Physics events with `event_num` strictly inside the half-open
+interval `(ev_i, ev_{i+1}]` between two adjacent accepted checkpoints
+are written to the output `events`/`recon` tree; events bracketed by a
+rejected endpoint (or by an undefined endpoint at the run boundaries)
+are discarded.  The `scalers` and `epics` trees are concatenated
+verbatim from the inputs and tagged with an additional `good` boolean
+that records each row's overall verdict.
+
+Cut JSON (see [`cuts/prad2_default.json`](cuts/prad2_default.json) for
+a checked-in template):
+```json
+{
+  "livetime": {
+    "source":  "ref",                      // ref | trg | tdc
+    "channel": 0,                           // ignored for ref
+    "abs":     { "min": 90, "max": 100 }
+  },
+  "epics": {
+    "hallb_IPM2C21A_CUR":  { "abs": { "min": 0.3 } },
+    "hallb_IPM2C21A_XPOS": { "rel_rms": 3,
+                             "gated_by": "hallb_IPM2C21A_CUR" },
+    "hallb_IPM2C21A_YPOS": { "rel_rms": 3,
+                             "gated_by": "hallb_IPM2C21A_CUR" }
+  }
+}
+```
+
+- `abs.min` / `abs.max` — hard thresholds, either bound optional.
+- `rel_rms: N` — accept points within `N · σ̂` of the channel's robust
+  centre, where the centre is the median and `σ̂ = 1.4826 · MAD` (the
+  consistent estimator of standard deviation under a Gaussian, robust
+  to outliers).  The robust statistics are computed once per run from
+  the channel's full slow-control history.
+- `gated_by` — restrict the median/MAD computation to checkpoints
+  where the named channel's cut passed (single string or array of
+  strings, ANDed).  Useful for channels meaningful only in a specific
+  regime — e.g. beam position is well defined only when current is
+  above a floor.  The cut itself still applies to every checkpoint;
+  only the statistics are conditioned.  EPICS-on-EPICS, one level
+  deep.
+
+Report (`-j`, default `<output_stem>.report.json`).  One JSON entry
+per (cut channel, checkpoint), each with `associated_evn`, the TI-tick
+relative `associated_timestamp`, the EPICS-native `unix_time` (only
+on EPICS rows), the cut's `value`, and a `pass`/`fail` `status`.  The
+top level carries a `summary` with overall and per-channel pass/fail
+counts and rates, plus a `stats` block listing each rel_rms cut's
+robust centre, σ̂, MAD, gating channels, and post-gate sample count.
+Suitable for direct ingestion into a per-run quality dashboard.
+
 ### Calibration
 
 **epCalib** — Elastic e-p calibration. Fits the elastic peak per module from rawdata ROOT files (peak mode) and writes gain correction constants.
