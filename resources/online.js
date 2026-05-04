@@ -75,7 +75,7 @@ function pollMonitorStatus(){
                 ltEl.style.display='';
                 const parts=[];
                 if(ts!=null)   parts.push(ts.toFixed(1)+livetimeUnit+' (TS)');
-                if(meas!=null) parts.push(meas.toFixed(1)+livetimeUnit+' (Meas.)');
+                if(meas!=null) parts.push(meas.toFixed(1)+livetimeUnit+' (DSC)');
                 ltEl.textContent='DAQ Livetime: '+parts.join(' / ');
                 // Color by the worse of the two so a sick channel still flags red.
                 const worst=Math.min(ts??meas, meas??ts);

@@ -266,9 +266,15 @@ struct AppState {
     ShellMetric beam_current_status;
 
     // Measured DAQ livetime from DSC2 scalers in the EVIO stream
-    // (1 - gated/ungated).  Bank tag, slot, source, channel live in
-    // daq_cfg.dsc_scaler so the decoder/format details stay in prad2dec.
-    std::atomic<double> measured_livetime{-1.0};
+    // (gated / ungated, expressed as percent).  Bank tag, slot, source,
+    // channel live in daq_cfg.dsc_scaler so the decoder/format details stay
+    // in prad2dec.  dsc_prev_* hold the gated/ungated values from the
+    // previous SYNC so the displayed live time reflects the most recent
+    // ~2 s window (DSC2 counts accumulate; ratio of cumulative values
+    // averages over the whole run).
+    std::atomic<double>   measured_livetime{-1.0};
+    std::atomic<uint32_t> dsc_prev_gated{0};
+    std::atomic<uint32_t> dsc_prev_ungated{0};
 
     // online refresh rates (ms), served to frontend
     int refresh_event_ms = 200;

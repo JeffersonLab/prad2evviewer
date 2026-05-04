@@ -42,22 +42,26 @@ using namespace evc;
 #define DATABASE_DIR "."
 #endif
 
-// ---- DSC2 scaler data layout (dsc2ReadScalers with rflag=0xFF) ----
+// ---- DSC2 scaler data layout ----------------------------------------------
 //
-// Grp1 = externally gated (gate source = BUSY signal -> counts dead time)
-// Grp2 = ungated (gate source = constant -> counts all time)
+// 67-word payload (per slot):
+//   [0]      header
+//   [1..16]  TRG Grp1 — 16 channels
+//   [17..32] TDC Grp1 — 16 channels
+//   [33..48] TRG Grp2 — 16 channels
+//   [49..64] TDC Grp2 — 16 channels
+//   [65]     Ref Grp1
+//   [66]     Ref Grp2
 //
-// Per slot: 67 words
-//   [0]      header  0xDCA00000 | (slot<<8) | rflag
-//   [1..16]  TRG  Grp1 (gated/busy)  — 16 channels
-//   [17..32] TDC  Grp1 (gated/busy)  — 16 channels
-//   [33..48] TRG  Grp2 (ungated)     — 16 channels
-//   [49..64] TDC  Grp2 (ungated)     — 16 channels
-//   [65]     Ref  Grp1 (gated/busy)  — 125 MHz clock
-//   [66]     Ref  Grp2 (ungated)     — 125 MHz clock
+// In PRad-II, Grp1 ("gated") is enabled while NOT busy and so counts LIVE
+// time; Grp2 ("ungated") is free-running.  Live time = gated/ungated.
+//
+// Two physical bank formats are observed:
+//   • Legacy: 67 words, payload at offset 0, slot in 0xDCA0... magic.
+//   • Run 024246 (rflag=1): 72 words, 3-word JLab BLKHDR/EVTHDR/TRGTIME
+//     prefix, 67-word payload at offset 2, 2-word FILLER/BLKTLR trailer;
+//     slot lives in BLKHDR bits 26:22.
 
-static constexpr uint32_t DSC2_HEADER_MASK = 0xFFFF0000;
-static constexpr uint32_t DSC2_HEADER_ID   = 0xDCA00000;
 static constexpr int DSC2_WORDS_PER_SLOT   = 67;
 static constexpr int DSC2_NCH              = 16;
 
@@ -71,25 +75,41 @@ struct Dsc2Slot {
     uint32_t ref_ungated;
 };
 
+static bool fill_payload(const uint32_t *data, size_t nwords, size_t off, Dsc2Slot &s)
+{
+    if (off + DSC2_WORDS_PER_SLOT > nwords) return false;
+    const uint32_t *p = &data[off + 1];
+    std::memcpy(s.trg_gated,   p,      DSC2_NCH * 4);
+    std::memcpy(s.tdc_gated,   p + 16, DSC2_NCH * 4);
+    std::memcpy(s.trg_ungated, p + 32, DSC2_NCH * 4);
+    std::memcpy(s.tdc_ungated, p + 48, DSC2_NCH * 4);
+    s.ref_gated   = p[64];
+    s.ref_ungated = p[65];
+    return s.ref_ungated > 0 && s.ref_ungated >= s.ref_gated;
+}
+
 static std::vector<Dsc2Slot> parse_dsc2_bank(const uint32_t *data, size_t nwords)
 {
     std::vector<Dsc2Slot> slots;
-    size_t pos = 0;
-    while (pos + DSC2_WORDS_PER_SLOT <= nwords) {
-        uint32_t hdr = data[pos];
-        if ((hdr & DSC2_HEADER_MASK) != DSC2_HEADER_ID)
-            break;
-        Dsc2Slot s{};
-        s.slot = (hdr >> 8) & 0xFF;
-        const uint32_t *p = &data[pos + 1];
-        std::memcpy(s.trg_gated,   p,      DSC2_NCH * 4);
-        std::memcpy(s.tdc_gated,   p + 16, DSC2_NCH * 4);
-        std::memcpy(s.trg_ungated, p + 32, DSC2_NCH * 4);
-        std::memcpy(s.tdc_ungated, p + 48, DSC2_NCH * 4);
-        s.ref_gated   = p[64];
-        s.ref_ungated = p[65];
-        slots.push_back(s);
-        pos += DSC2_WORDS_PER_SLOT;
+    if (nwords == 0 || data == nullptr) return slots;
+
+    static const size_t kOffsets[] = {0, 2};
+    Dsc2Slot s{};
+    for (size_t off : kOffsets) {
+        if (off + DSC2_WORDS_PER_SLOT > nwords) continue;
+        uint32_t hdr = data[off];
+        if ((hdr & 0xFFFF0000u) == 0xDCA00000u) {
+            if (!fill_payload(data, nwords, off, s)) continue;
+            s.slot = (hdr >> 8) & 0xFF;
+            slots.push_back(s);
+            return slots;
+        }
+        if (off >= 1 && (data[0] >> 27) == 0x10u) {  // BLKHDR
+            if (!fill_payload(data, nwords, off, s)) continue;
+            s.slot = (data[0] >> 22) & 0x1F;
+            slots.push_back(s);
+            return slots;
+        }
     }
     return slots;
 }
@@ -308,11 +328,12 @@ int main(int argc, char *argv[])
     // emit one periodic row
     std::string current_file;
     auto print_row = [&](double elapsed) {
-        // cumulative DSC2 live time (from latest SYNC)
+        // cumulative DSC2 live time (from latest SYNC) — gated/ungated
+        // (Grp1 "gated" counts during live; ratio is the live fraction).
         double lt_dsc2 = -1;
         if (!dsc2_data.empty() && dsc2_data[0].ref_ungated > 0) {
-            lt_dsc2 = (1.0 - static_cast<double>(dsc2_data[0].ref_gated)
-                           / dsc2_data[0].ref_ungated) * 100.0;
+            lt_dsc2 = static_cast<double>(dsc2_data[0].ref_gated)
+                    / dsc2_data[0].ref_ungated * 100.0;
         }
         // cumulative pulser live time
         double lt_pulser = -1;
@@ -456,10 +477,9 @@ int main(int argc, char *argv[])
     if (dsc2_data.empty()) {
         std::cout << "(no DSC2 scaler bank 0xE115 found)\n";
     } else {
-        static constexpr double DSC2_REF_FREQ = 125.0e6;
         for (auto &s : dsc2_data) {
             double lt = (s.ref_ungated > 0)
-                ? (1.0 - static_cast<double>(s.ref_gated) / s.ref_ungated) * 100.0
+                ? static_cast<double>(s.ref_gated) / s.ref_ungated * 100.0
                 : 0.0;
             std::cout << std::fixed << std::setprecision(2);
             std::cout << "  DSC2 slot " << s.slot
@@ -471,11 +491,11 @@ int main(int argc, char *argv[])
             for (int c = 0; c < DSC2_NCH; ++c) {
                 if (s.trg_ungated[c] == 0) continue;
                 if (!any) {
-                    std::cout << "    TRG ch  gated(busy)  ungated(total)  live%\n";
+                    std::cout << "    TRG ch  gated(live)  ungated(total)  live%\n";
                     any = true;
                 }
-                double cl = (1.0 - static_cast<double>(s.trg_gated[c])
-                                 / s.trg_ungated[c]) * 100.0;
+                double cl = static_cast<double>(s.trg_gated[c])
+                          / s.trg_ungated[c] * 100.0;
                 std::cout << "      " << std::setw(2) << c
                           << std::setw(13) << s.trg_gated[c]
                           << std::setw(16) << s.trg_ungated[c]

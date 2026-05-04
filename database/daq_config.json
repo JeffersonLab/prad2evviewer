@@ -152,10 +152,10 @@
     },
 
     "dsc_scaler": {
-        "_comment": "DSC2 scaler bank — used for measured DAQ livetime (1 - gated/ungated). Disabled until slot/channel are confirmed: leave bank_tag<0 or slot<0. When enabled, source ∈ 'ref' (125 MHz reference clock — time-based livetime), 'trg' (TRG input), 'tdc' (TDC input); channel 0..15 (ignored for ref).",
-        "bank_tag": -1,
-        "slot":     -1,
-        "source":   "",
+        "_comment": "DSC2 scaler bank — emitted by trig0.c on SYNC events (~every 1-2 s) inside the TI master crate (parent ROC tag 0x0027). Counts accumulate from the GO transition and are not reset by reads, so realtime livetime should be computed as a delta between consecutive SYNCs. Bank layout in run 024246: 72 words = 3-word JLab BLKHDR/EVTHDR/TRGTIME prefix, 67-word DSC2 payload, 2-word FILLER+BLKTLR trailer; slot is read from BLKHDR bits 26:22 (= 18 in this run, confirmed by tools/dsc_scan). Convention: gated/ungated ratio is ~0.99 — gated counts LIVE time, so live_time = gated/ungated (NOT 1 - gated/ungated). source ∈ 'ref' (DSC2 ref counter pair, channel ignored), 'trg' (TRG input), 'tdc' (TDC input).",
+        "bank_tag": "0xE115",
+        "slot":     18,
+        "source":   "ref",
         "channel":  0
     },
 
