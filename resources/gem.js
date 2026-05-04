@@ -172,11 +172,13 @@ function updateGemEfficiency(data) {
         const info = document.getElementById('gem-eff-info');
         if (info) info.textContent = '';
         plotGemEffEmpty();
+        plotGemZTargetHist(null);
         return;
     }
     gemEffData = data;
     renderGemEffCards();
     renderGemEffSnapshot();
+    plotGemZTargetHist(data.z_target_hist);
 }
 
 function renderGemEffCards() {
@@ -234,9 +236,17 @@ function renderGemEffSnapshot() {
                 : `color:${c};opacity:0.35`;
             return `<span style="${style}">GEM${i}${ok ? '✓' : '✗'}</span>`;
         }).join(' ');
-        info.innerHTML = `Event #${snap.event_id} &nbsp; χ²/dof=${chi2} &nbsp; ${flags}`;
+        // Projected target z = closest approach of the fit line to the lab
+        // z-axis (server-computed, only present when (bx²+by²) > 0).
+        let zt = '';
+        if (typeof snap.z_target_offset === 'number') {
+            const sign = snap.z_target_offset >= 0 ? '+' : '−';
+            zt = ` &nbsp; z<sub>t</sub>=${sign}${Math.abs(snap.z_target_offset).toFixed(1)} mm`;
+        }
+        info.innerHTML = `Event #${snap.event_id} &nbsp; χ²/dof=${chi2}${zt} &nbsp; ${flags}`;
     }
     plotGemEffView(snap);
+    plotGemZTargetHist(gemEffData.z_target_hist);
 }
 
 // Empty wrapper used when /api/gem/efficiency hasn't been fetched yet.
@@ -391,10 +401,35 @@ function plotGemEffView(snap) {
                 });
             }
         });
+
+        // Closest-approach point of the fit line to the lab z-axis — the
+        // inferred interaction vertex.  Drawn as a diamond marker on XY (near
+        // origin if the track came from the target).
+        if (typeof snap.z_target_lab === 'number') {
+            const fit = snap.fit || {};
+            const zt  = snap.z_target_lab;
+            const xt  = (fit.ax || 0) + (fit.bx || 0) * zt;
+            const yt  = (fit.ay || 0) + (fit.by || 0) * zt;
+            tracesXY.push({
+                x: [xt], y: [yt],
+                mode: 'markers', type: 'scatter', name: 'Vertex',
+                marker: { symbol: 'diamond-open', color: THEME.text, size: 10,
+                          line: { color: THEME.text, width: 1.5 } },
+                hovertemplate: `Vertex (DOCA)<br>x=%{x:.2f}<br>y=%{y:.2f}<br>z=${zt.toFixed(1)}<extra></extra>`,
+            });
+        }
     }
 
     const ranges = gemEffViewRanges();
     const { shapesXY, shapesZY } = gemEffViewShapes();
+    // Vertical dashed line on the side view at the inferred vertex z.
+    if (snap && typeof snap.z_target_lab === 'number') {
+        shapesZY.push({
+            type: 'line', xref: 'x', yref: 'paper',
+            x0: snap.z_target_lab, x1: snap.z_target_lab, y0: 0, y1: 1,
+            line: { color: THEME.text, width: 1.2, dash: 'dot' },
+        });
+    }
 
     Plotly.react('gem-eff-xy', tracesXY, Object.assign({}, PL_GEM_EFF(), {
         title: { text: 'Front view (X–Y)', font: { size: 10, color: THEME.text } },
@@ -414,13 +449,53 @@ function plotGemEffView(snap) {
     }), { responsive: true, displayModeBar: false });
 }
 
+// --- projected-target-z histogram (right of the 2×2 efficiency cards) ------
+// Shows DOCA-to-z-axis minus target_z, accumulated server-side; the current
+// snapshot's value is drawn as a dotted vertical guide line.
+function plotGemZTargetHist(hist) {
+    const div = document.getElementById('gem-eff-zhist');
+    if (!div) return;
+    const layout = Object.assign({}, PL_GEM_EFF(), {
+        title: { text: 'Projected vertex z − target z (mm)',
+                 font: { size: 10, color: THEME.text } },
+        margin: { l: 42, r: 8, t: 22, b: 32 },
+        xaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
+                 ticks: 'outside', ticklen: 3 },
+        yaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
+                 ticks: 'outside', ticklen: 3 },
+        bargap: 0.05,
+    });
+    if (!hist || !hist.bins || !hist.bins.length) {
+        Plotly.react(div, [], layout, { responsive: true, displayModeBar: false });
+        return;
+    }
+    const min = hist.min, step = hist.step;
+    const x = hist.bins.map((_, i) => min + (i + 0.5) * step);
+    const trace = {
+        x: x, y: hist.bins, type: 'bar',
+        marker: { color: THEME.accent || '#3aa0ff', line: { width: 0 } },
+        hovertemplate: 'z=%{x:.1f} mm<br>count=%{y}<extra></extra>',
+    };
+    layout.xaxis.range = [hist.min, hist.max];
+    const snap = gemEffData && gemEffData.snapshot;
+    if (snap && typeof snap.z_target_offset === 'number') {
+        layout.shapes = [{
+            type: 'line', xref: 'x', yref: 'paper',
+            x0: snap.z_target_offset, x1: snap.z_target_offset,
+            y0: 0, y1: 1,
+            line: { color: THEME.text, width: 1.2, dash: 'dot' },
+        }];
+    }
+    Plotly.react(div, [trace], layout, { responsive: true, displayModeBar: false });
+}
+
 // --- resize -----------------------------------------------------------------
 
 function resizeGem() {
     GEM_OCC_IDS.forEach(id => {
         try { Plotly.Plots.resize(id); } catch (e) {}
     });
-    ['gem-eff-xy', 'gem-eff-zy'].forEach(id => {
+    ['gem-eff-xy', 'gem-eff-zy', 'gem-eff-zhist'].forEach(id => {
         try { Plotly.Plots.resize(id); } catch (e) {}
     });
 }

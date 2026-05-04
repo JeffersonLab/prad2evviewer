@@ -480,8 +480,21 @@ struct AppState {
             float resid_dx = 0.f, resid_dy = 0.f; // hit_local - predicted_local (only if used_in_fit)
         };
         Det dets[GEM_EFF_MAX_DETS];
+        // Closest approach of the fit line to the lab z-axis: minimizes
+        // r²(z)=x(z)²+y(z)², so z_lab = -(ax·bx + ay·by) / (bx² + by²).
+        // z_offset = z_lab - target_z is the inferred vertex displacement
+        // from nominal target z; this is what the histogram accumulates.
+        float z_target_lab    = 0.f;
+        float z_target_offset = 0.f;
+        bool  z_target_valid  = false;
     };
     GemEffSnapshot gem_eff_snapshot;
+    // Inferred vertex-z spread (DOCA to z-axis − target_z), one entry per
+    // matched event.  100 bins × 1 mm = ±50 mm = ±5 cm.
+    Histogram gem_eff_z_target_hist;
+    static constexpr float gem_eff_z_target_min  = -50.f;
+    static constexpr float gem_eff_z_target_max  =  50.f;
+    static constexpr float gem_eff_z_target_step =   1.f;
     int         moller_events = 0;
     int       cluster_events_processed = 0;
 

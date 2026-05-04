@@ -1239,6 +1239,9 @@ void AppState::initGemEfficiency()
     gem_eff_num.assign(n_gem, 0);
     gem_eff_den.assign(n_gem, 0);
     gem_eff_snapshot = GemEffSnapshot{};
+    int nbins = (int)std::lround((gem_eff_z_target_max - gem_eff_z_target_min)
+                                  / gem_eff_z_target_step);
+    gem_eff_z_target_hist.init(nbins);
 }
 
 void AppState::clearGemEfficiency()
@@ -1252,6 +1255,7 @@ void AppState::clearGemEfficiency()
         gem_eff_diag_pass_resid[d] = 0;
     }
     gem_eff_snapshot = GemEffSnapshot{};
+    gem_eff_z_target_hist.clear();
 }
 
 void AppState::runGemEfficiency(int event_id,
@@ -1540,7 +1544,23 @@ void AppState::runGemEfficiency(int event_id,
         }
         any_valid = true;
     }
-    (void)any_valid;
+    if (any_valid) {
+        // Closest approach of the fit line to the lab z-axis:
+        //   minimize r²(z)=(ax+bx·z)²+(ay+by·z)² → z = -(ax·bx + ay·by)/(bx²+by²)
+        // Using the LAST valid LOO anchor's fit as the per-event representative.
+        const float bx = snap.bx, by = snap.by;
+        const float den = bx*bx + by*by;
+        if (den > 1e-12f) {
+            const float z_lab    = -(snap.ax*bx + snap.ay*by) / den;
+            const float z_offset = z_lab - target_z;
+            snap.z_target_lab    = z_lab;
+            snap.z_target_offset = z_offset;
+            snap.z_target_valid  = true;
+            gem_eff_z_target_hist.fill(z_offset,
+                                       gem_eff_z_target_min,
+                                       gem_eff_z_target_step);
+        }
+    }
 }
 
 nlohmann::json AppState::gemEffSnapshotJson() const
@@ -1563,13 +1583,18 @@ nlohmann::json AppState::gemEffSnapshotJson() const
         if (d.hit_present) e["hit_lab"] = json::array({d.hit_lab_x, d.hit_lab_y, d.hit_lab_z});
         dets.push_back(e);
     }
-    return json{
+    json out = json{
         {"event_id",     s.event_id},
         {"hycal_lab",    json::array({s.hycal_x, s.hycal_y, s.hycal_z})},
         {"chi2_per_dof", s.chi2_per_dof},
         {"fit",          {{"ax", s.ax}, {"bx", s.bx}, {"ay", s.ay}, {"by", s.by}}},
         {"dets",         dets},
     };
+    if (s.z_target_valid) {
+        out["z_target_lab"]    = s.z_target_lab;
+        out["z_target_offset"] = s.z_target_offset;
+    }
+    return out;
 }
 
 //=============================================================================

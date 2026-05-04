@@ -189,6 +189,11 @@ json AppState::apiGemEfficiency() const
         {"diag",      diag},
         {"snapshot",  gemEffSnapshotJson()},
         {"hycal_z",   hycal_transform.z},
+        {"target_z",  target_z},
+        {"z_target_hist", histToJson(gem_eff_z_target_hist,
+                                     gem_eff_z_target_min,
+                                     gem_eff_z_target_max,
+                                     gem_eff_z_target_step)},
         {"config", {
             {"loo_mode",              loo_mode_name(gem_eff_loo_mode)},
             {"min_cluster_energy",    gem_eff_min_cluster_energy},

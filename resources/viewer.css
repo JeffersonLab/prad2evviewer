@@ -484,10 +484,22 @@ body { font-family:'Consolas','SF Mono',monospace; background:var(--bg); color:v
 .gem-col-title { text-align:center; font-size:11px; color:var(--dim); padding:2px 0; }
 .gem-occ-grid { flex:1; min-height:0; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:2px; }
 .gem-occ-cell { min-height:0; position:relative; }
-.gem-eff-cards {
-    flex:none; height:80px;
-    display:grid; grid-template-columns:repeat(4, 1fr); gap:6px;
+.gem-eff-top {
+    flex:none; height:170px;
+    display:grid; grid-template-columns:1fr 1fr; gap:6px;
     padding:4px 6px;
+}
+.gem-eff-cards {
+    display:grid;
+    grid-template-columns:repeat(2, 1fr);
+    grid-template-rows:repeat(2, 1fr);
+    gap:6px;
+    min-width:0; min-height:0;
+}
+.gem-eff-zhist {
+    min-width:0; min-height:0; position:relative;
+    border:1px solid var(--border); border-radius:3px;
+    background:var(--canvas);
 }
 .gem-eff-card {
     position:relative; overflow:hidden;
