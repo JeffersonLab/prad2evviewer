@@ -15,16 +15,11 @@
 //   keep one-script-only helpers private to that script.
 //============================================================================
 
-#include "DaqConfig.h"
-
-#include <nlohmann/json.hpp>
-
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
-#include <map>
 #include <regex>
 #include <string>
 #include <system_error>
@@ -44,8 +39,9 @@ inline std::string resolve_db_path(const std::string &p)
 }
 
 // Sniff the run number out of a path like "prad_NNNNNN.evio.*".  Returns
-// -1 if no plausible match is found, in which case LoadRunConfig falls
-// back to the largest known runinfo entry (with a warning).
+// -1 if no plausible match is found.  Used internally by
+// discover_split_files; the per-script run-number resolution now goes
+// through prad2::PipelineBuilder::set_run_number_from_evio.
 inline int extract_run_number_from_path(const std::string &path)
 {
     static const std::regex pat(R"((?:prad|run)_0*(\d+))",
@@ -55,72 +51,6 @@ inline int extract_run_number_from_path(const std::string &path)
         try { return std::stoi(m[1].str()); } catch (...) {}
     }
     return -1;
-}
-
-// Read database/reconstruction_config.json (under PRAD2_DATABASE_DIR or
-// ./database) and return the resolved runinfo path, or "" if the pointer
-// is missing / malformed.
-inline std::string discover_runinfo_path()
-{
-    const char *db = std::getenv("PRAD2_DATABASE_DIR");
-    std::string db_dir = db ? db : "database";
-    std::ifstream f(db_dir + "/reconstruction_config.json");
-    if (!f) return {};
-    auto j = nlohmann::json::parse(f, nullptr, false, true);
-    if (j.is_discarded() || !j.contains("runinfo") || !j["runinfo"].is_string())
-        return {};
-    return resolve_db_path(j["runinfo"].get<std::string>());
-}
-
-// Load the "matching" section from database/reconstruction_config.json.
-// Out-params are written only when the corresponding JSON key is present
-// and well-formed; otherwise they're left untouched (so the caller can
-// pre-seed them with sensible defaults).  Returns true if the config file
-// could be opened — even if the matching section was absent — so the caller
-// can warn separately on missing files vs missing sections.
-//
-//   hycal_pos_res = [A, B, C]   coefficients for HyCalSystem::PositionResolution
-//   gem_pos_res   = [σ0, σ1, …]  per-detector sigma in mm
-inline bool load_matching_config(float &A, float &B, float &C,
-                                 std::vector<float> &gem_pos_res)
-{
-    const char *db = std::getenv("PRAD2_DATABASE_DIR");
-    std::string db_dir = db ? db : "database";
-    std::ifstream f(db_dir + "/reconstruction_config.json");
-    if (!f) return false;
-    auto j = nlohmann::json::parse(f, nullptr, false, true);
-    if (j.is_discarded() || !j.contains("matching")) return true;
-    const auto &m = j["matching"];
-    if (m.contains("hycal_pos_res") && m["hycal_pos_res"].is_array()
-            && m["hycal_pos_res"].size() >= 3) {
-        A = m["hycal_pos_res"][0].get<float>();
-        B = m["hycal_pos_res"][1].get<float>();
-        C = m["hycal_pos_res"][2].get<float>();
-    }
-    if (m.contains("gem_pos_res") && m["gem_pos_res"].is_array()) {
-        gem_pos_res.clear();
-        for (const auto &v : m["gem_pos_res"]) gem_pos_res.push_back(v.get<float>());
-    }
-    return true;
-}
-
-// EVIO bank-tag → logical-crate index (every ROC type).  Mirrors the
-// roc_to_crate map in src/app_state_init.cpp / analysis/src/Replay.cpp.
-inline std::map<int, int> build_full_crate_remap(const evc::DaqConfig &cfg)
-{
-    std::map<int, int> remap;
-    for (const auto &re : cfg.roc_tags)
-        remap[(int)re.tag] = re.crate;
-    return remap;
-}
-
-// Same shape but only GEM ROCs — for GemSystem::LoadPedestals().
-inline std::map<int, int> build_gem_crate_remap(const evc::DaqConfig &cfg)
-{
-    std::map<int, int> remap;
-    for (const auto &re : cfg.roc_tags)
-        if (re.type == "gem") remap[(int)re.tag] = re.crate;
-    return remap;
 }
 
 // Resolve an EVIO input path to the list of files to process.

@@ -1,6 +1,7 @@
 #include "app_state.h"
 #include "data_source.h"
 #include "load_daq_config.h"
+#include "PipelineBuilder.h"
 #include "RunInfoConfig.h"
 
 #include <fstream>
@@ -10,13 +11,6 @@
 #include <cstdlib>
 
 using json = nlohmann::json;
-
-static void setTransform(DetectorTransform &t,
-                         float x, float y, float z,
-                         float rx, float ry, float rz)
-{
-    t.set(x, y, z, rx, ry, rz);
-}
 
 //=============================================================================
 // Initialization
@@ -190,49 +184,60 @@ void AppState::init(const std::string &db_dir,
                   << " " << waveform_trigger << "\n";
     }
 
-    // --- HyCal system ------------------------------------------------------
+    // --- detector pipeline (HyCal + GEM, runinfo, recon config) -----------
+    // PipelineBuilder consolidates HyCal/GEM Init + LoadCalibration +
+    // LoadPedestals + LoadCommonModeRange + per-detector ClusterConfig +
+    // DetectorTransform construction + matching parameters into one call.
+    // We hand it our already-loaded daq_cfg (the legacy ADC pedestal +
+    // NNLS template store steps above need it earlier than the builder).
+    // findFile is wired in as the path resolver so the multi-dir search
+    // semantics are preserved for non-default file locations.
     {
-        const std::string map_name = daq_cfg.hycal_map_file.empty()
-            ? std::string("hycal_map.json") : daq_cfg.hycal_map_file;
-        std::string map_file = findFile(map_name, db_dir);
-        if (!map_file.empty()) {
-            if (hycal.Init(map_file))
-                std::cerr << "HyCal     : " << hycal.module_count() << " modules\n";
-            else
-                std::cerr << "Warning: HyCal system initialization failed\n";
-        }
-    }
+        // Capture daq_cfg-sourced overrides before the std::move below.
+        std::string hycal_map_override = daq_cfg.hycal_map_file;
+        std::string gem_map_override   = daq_cfg.gem_map_file;
 
-    // --- GEM system (optional) --------------------------------------------
-    if (!daq_cfg.gem_map_file.empty()) {
-        std::string gem_map_file = findFile(daq_cfg.gem_map_file, db_dir);
-        if (!gem_map_file.empty()) {
-            gem_sys.Init(gem_map_file);
-            gem_enabled = (gem_sys.GetNDetectors() > 0);
-            if (gem_enabled) {
-                std::cerr << "GEM       : " << gem_sys.GetNDetectors() << " detectors\n"
-                          << "[GEMSYS] common_mode_thr=" << gem_sys.GetCommonModeThreshold()
-                          << " zero_sup_thr="    << gem_sys.GetZeroSupThreshold()
-                          << " cross_talk_thr="  << gem_sys.GetCrossTalkThreshold()
-                          << " min_peak="        << gem_sys.GetMinPeakAdc()
-                          << " min_sum="         << gem_sys.GetMinSumAdc()
-                          << " rej_first="       << (int)gem_sys.GetRejectFirstTimebin()
-                          << " rej_last="        << (int)gem_sys.GetRejectLastTimebin()
-                          << "\n";
-                int ndet = gem_sys.GetNDetectors();
-                gem_transforms.resize(ndet);
-                // No eager prepare() here — fields are still defaults; the
-                // runinfo block below calls set(...) to write the real pose
-                // and rebuild the cache.  Pre-preparing with default zeros
-                // would lock in an identity matrix that set() couldn't undo
-                // before the API was hardened (was a real bug — see
-                // DetectorTransform.h::set).
-                gem_occupancy.resize(ndet);
-                for (auto &h : gem_occupancy) h.init(GEM_OCC_NX, GEM_OCC_NY);
-                // Pedestals + common-mode ranges are loaded from runinfo
-                // (per-run calibration) below.
-            }
+        prad2::Pipeline pipeline = prad2::PipelineBuilder()
+            .set_database_dir(db_dir)
+            .set_loaded_daq_config(std::move(daq_cfg))
+            .set_daq_config(daq_cfg_path)            // logging only
+            .set_recon_config(recon_path)
+            .set_hycal_map(std::move(hycal_map_override))
+            .set_gem_map(std::move(gem_map_override))
+            .set_path_resolver(
+                [&](const std::string &p) { return findFile(p, db_dir); })
+            .set_log_stream(&std::cerr)
+            .build();
+
+        // Move pipeline contents into AppState members.
+        daq_cfg              = std::move(pipeline.daq_cfg);
+        hycal                = std::move(pipeline.hycal);
+        gem_sys              = std::move(pipeline.gem);
+        cluster_cfg          = pipeline.hycal_cluster_cfg;
+        hycal_transform      = pipeline.hycal_transform;
+        gem_transforms.assign(pipeline.gem_transforms.begin(),
+                              pipeline.gem_transforms.end());
+        gem_pos_res          = std::move(pipeline.gem_pos_res);
+
+        beam_energy_runinfo  = pipeline.run_cfg.Ebeam;
+        beam_energy.store(pipeline.run_cfg.Ebeam);
+        target_x             = pipeline.run_cfg.target_x;
+        target_y             = pipeline.run_cfg.target_y;
+        target_z             = pipeline.run_cfg.target_z;
+        adc_to_mev           = pipeline.run_cfg.default_adc2mev;
+
+        gem_eff_target_sigma_x = pipeline.target_pos_res[0];
+        gem_eff_target_sigma_y = pipeline.target_pos_res[1];
+        gem_eff_target_sigma_z = pipeline.target_pos_res[2];
+
+        gem_enabled = (gem_sys.GetNDetectors() > 0);
+        if (gem_enabled) {
+            gem_occupancy.assign(gem_sys.GetNDetectors(), Histogram2D{});
+            for (auto &h : gem_occupancy) h.init(GEM_OCC_NX, GEM_OCC_NY);
         }
+        std::cerr << "HyCal     : " << hycal.module_count() << " modules\n";
+        if (gem_enabled)
+            std::cerr << "GEM       : " << gem_sys.GetNDetectors() << " detectors\n";
     }
 
     // --- crate_roc map (directly from daq_cfg.roc_tags) -------------------
@@ -515,232 +520,12 @@ void AppState::init(const std::string &db_dir,
     }
 
     std::cerr << "Monitor   : " << (monitor_path.empty() ? "(none)" : monitor_path) << "\n";
-
-    // --- reconstruction config: runinfo + hycal reco knobs + gem per-det --
-    json rcfg = json::object();
-    if (!recon_path.empty()) {
-        std::string s = readFile(recon_path);
-        if (!s.empty()) {
-            auto j = json::parse(s, nullptr, false);
-            if (!j.is_discarded()) rcfg = std::move(j);
-        }
-    }
-
-    // HyCal cluster-reco knobs
-    if (rcfg.contains("hycal")) {
-        auto &hc = rcfg["hycal"];
-        if (hc.contains("min_module_energy"))  cluster_cfg.min_module_energy  = hc["min_module_energy"];
-        if (hc.contains("min_center_energy"))  cluster_cfg.min_center_energy  = hc["min_center_energy"];
-        if (hc.contains("min_cluster_energy")) cluster_cfg.min_cluster_energy = hc["min_cluster_energy"];
-        if (hc.contains("min_cluster_size"))   cluster_cfg.min_cluster_size   = hc["min_cluster_size"];
-        if (hc.contains("corner_conn"))        cluster_cfg.corner_conn        = hc["corner_conn"];
-        if (hc.contains("split_iter"))         cluster_cfg.split_iter         = hc["split_iter"];
-        if (hc.contains("least_split"))        cluster_cfg.least_split        = hc["least_split"];
-        if (hc.contains("log_weight_thres"))   cluster_cfg.log_weight_thres   = hc["log_weight_thres"];
-    }
     std::cerr << "Clustering: min_mod=" << cluster_cfg.min_module_energy
               << " min_center=" << cluster_cfg.min_center_energy
               << " min_cluster=" << cluster_cfg.min_cluster_energy
               << " " << cluster_trigger
               << " hist=[" << cl_hist_min << "," << cl_hist_max
               << "]/" << cl_hist_step << "\n";
-
-    // runinfo: a path string to a runinfo file with a "configurations" array.
-    bool runinfo_loaded = false;
-    if (rcfg.contains("runinfo") && rcfg["runinfo"].is_string()) {
-        std::string ri_file = findFile(rcfg["runinfo"].get<std::string>(), db_dir);
-        if (ri_file.empty()) {
-            std::cerr << "Warning: runinfo file '"
-                      << rcfg["runinfo"].get<std::string>()
-                      << "' not found in " << db_dir << "\n";
-        } else {
-            runinfo_loaded = true;
-            // Run number isn't known at init time (no event yet) — pick the
-            // entry with the largest run_number ("latest").
-            prad2::RunConfig rc = prad2::LoadRunConfig(ri_file, /*run_num=*/-1);
-
-            beam_energy_runinfo = rc.Ebeam;
-            beam_energy.store(rc.Ebeam);
-            target_x = rc.target_x;
-            target_y = rc.target_y;
-            target_z = rc.target_z;
-            adc_to_mev = rc.default_adc2mev;
-            setTransform(hycal_transform,
-                         rc.hycal_x, rc.hycal_y, rc.hycal_z,
-                         rc.hycal_tilt_x, rc.hycal_tilt_y, rc.hycal_tilt_z);
-
-            if (!rc.energy_calib_file.empty()) {
-                std::string calib_file = findFile(rc.energy_calib_file, db_dir);
-                if (calib_file.empty()) {
-                    std::cerr << "Warning: calibration file '"
-                              << rc.energy_calib_file
-                              << "' not found in " << db_dir << "\n";
-                } else {
-                    int nmatched = hycal.LoadCalibration(calib_file);
-                    if (nmatched >= 0)
-                        std::cerr << "Calibration: " << calib_file
-                                  << " (" << nmatched << " modules)\n";
-                }
-            }
-            std::cerr << "RunInfo   : beam=" << beam_energy.load()
-                      << "MeV default_adc2mev=" << adc_to_mev
-                      << " target=(" << target_x << "," << target_y << "," << target_z
-                      << ") HyCal=(" << hycal_transform.x << ","
-                      << hycal_transform.y << "," << hycal_transform.z << ")\n";
-
-            if (gem_enabled) {
-                int n = std::min<int>(4, (int)gem_transforms.size());
-                for (int id = 0; id < n; ++id) {
-                    setTransform(gem_transforms[id],
-                                 rc.gem_x[id], rc.gem_y[id], rc.gem_z[id],
-                                 rc.gem_tilt_x[id], rc.gem_tilt_y[id], rc.gem_tilt_z[id]);
-                }
-                std::cerr << "GEM geom  : " << gem_transforms.size()
-                          << " detectors configured\n";
-
-                // hardware-crate -> logical-crate remap from daq_cfg.roc_tags
-                // so upstream pedestal/CM files (keyed by EVIO bank tag, e.g.
-                // 146/147) line up with gem_map.json (logical 1/2).
-                std::map<int, int> gem_crate_remap;
-                for (const auto &re : daq_cfg.roc_tags) {
-                    if (re.type == "gem")
-                        gem_crate_remap[(int)re.tag] = re.crate;
-                }
-
-                if (!rc.gem_pedestal_file.empty()) {
-                    std::string ped = findFile(rc.gem_pedestal_file, db_dir);
-                    if (ped.empty())
-                        std::cerr << "Warning: gem pedestal file '"
-                                  << rc.gem_pedestal_file
-                                  << "' not found in " << db_dir << "\n";
-                    else
-                        gem_sys.LoadPedestals(ped, gem_crate_remap);
-                }
-                if (!rc.gem_common_mode_file.empty()) {
-                    std::string cm = findFile(rc.gem_common_mode_file, db_dir);
-                    if (cm.empty())
-                        std::cerr << "Warning: gem common-mode file '"
-                                  << rc.gem_common_mode_file
-                                  << "' not found in " << db_dir << "\n";
-                    else
-                        gem_sys.LoadCommonModeRange(cm, gem_crate_remap);
-                }
-                // Pedestal checksum — diff against Python audit's [PEDSUM]
-                // line to prove identical loaded values.
-                int n_apvs = gem_sys.GetNApvs();
-                double sum_noise = 0.0, sum_off = 0.0;
-                long n_strips = 0;
-                for (int ai = 0; ai < n_apvs; ++ai) {
-                    const auto &apv = gem_sys.GetApvConfig(ai);
-                    for (int ch = 0; ch < 128; ++ch) {
-                        sum_noise += apv.pedestal[ch].noise;
-                        sum_off   += apv.pedestal[ch].offset;
-                        ++n_strips;
-                    }
-                }
-                std::cerr << "[PEDSUM] n_apvs=" << n_apvs
-                          << " n_strips=" << n_strips
-                          << " sum_noise=" << std::fixed << std::setprecision(6)
-                          << sum_noise
-                          << " sum_offset=" << sum_off
-                          << std::defaultfloat << "\n";
-            }
-        }
-    } else if (rcfg.contains("runinfo")) {
-        std::cerr << "Warning: 'runinfo' must be a path string to a "
-                     "configurations-format JSON file\n";
-    }
-
-    if (!runinfo_loaded) {
-        std::cerr << "Warning: no runinfo loaded — target=("
-                  << target_x << "," << target_y << "," << target_z
-                  << "), HyCal/GEM geometry at code defaults, no per-run "
-                     "calibration.  Tracking and matching plots will be "
-                     "wrong.  Set 'runinfo' in reconstruction_config.json "
-                     "to a configurations-format JSON file to fix.\n";
-    }
-
-    // GEM per-detector ClusterConfig (default + per-id overrides).  Empty
-    // section / missing detector key falls through to library defaults.
-    if (gem_enabled && rcfg.contains("gem")) {
-        auto &gemr = rcfg["gem"];
-        auto applyOne = [](const json &j, gem::ClusterConfig &cfg) {
-            if (j.contains("min_cluster_hits"))    cfg.min_cluster_hits    = j["min_cluster_hits"];
-            if (j.contains("max_cluster_hits"))    cfg.max_cluster_hits    = j["max_cluster_hits"];
-            if (j.contains("consecutive_thres"))   cfg.consecutive_thres   = j["consecutive_thres"];
-            if (j.contains("split_thres"))         cfg.split_thres         = j["split_thres"];
-            if (j.contains("cross_talk_width"))    cfg.cross_talk_width    = j["cross_talk_width"];
-            if (j.contains("charac_dists") && j["charac_dists"].is_array()) {
-                cfg.charac_dists.clear();
-                for (auto &v : j["charac_dists"]) cfg.charac_dists.push_back(v.get<float>());
-            }
-            if (j.contains("match_mode"))          cfg.match_mode          = j["match_mode"];
-            if (j.contains("match_adc_asymmetry")) cfg.match_adc_asymmetry = j["match_adc_asymmetry"];
-            if (j.contains("match_time_diff"))     cfg.match_time_diff     = j["match_time_diff"];
-            if (j.contains("match_ts_period"))     cfg.ts_period           = j["match_ts_period"];
-        };
-        gem::ClusterConfig def;  // library defaults
-        if (gemr.contains("default")) applyOne(gemr["default"], def);
-        std::vector<gem::ClusterConfig> per(gem_sys.GetNDetectors(), def);
-        for (int d = 0; d < gem_sys.GetNDetectors(); ++d) {
-            std::string key = std::to_string(d);
-            if (gemr.contains(key)) applyOne(gemr[key], per[d]);
-        }
-        // Print the resolved per-detector configs before move so we can
-        // diff against the Python audit's [GEMCFG] block.
-        for (int d = 0; d < (int)per.size(); ++d) {
-            const auto &c = per[d];
-            std::cerr << "[GEMCFG] d" << d
-                      << " min_hits=" << c.min_cluster_hits
-                      << " max_hits=" << c.max_cluster_hits
-                      << " consec="   << c.consecutive_thres
-                      << " split="    << c.split_thres
-                      << " xtalk="    << c.cross_talk_width
-                      << " match_mode=" << c.match_mode
-                      << " asym="     << c.match_adc_asymmetry
-                      << " tdiff="    << c.match_time_diff
-                      << " tperiod="  << c.ts_period
-                      << "\n";
-        }
-        gem_sys.SetReconConfigs(std::move(per));
-        std::cerr << "GEM reco  : " << gem_sys.GetNDetectors()
-                  << " per-detector ClusterConfig(s) installed\n";
-    }
-
-    // HyCal-GEM matching: position-resolution inputs.  hycal_pos_res = [A,B,C]
-    // feeds HyCalSystem::PositionResolution(E); gem_pos_res is a per-detector
-    // sigma (mm) consumed by analysis tools that build the matching window.
-    if (rcfg.contains("matching")) {
-        auto &m = rcfg["matching"];
-        if (m.contains("hycal_pos_res") && m["hycal_pos_res"].is_array()
-                && m["hycal_pos_res"].size() >= 3) {
-            float A = m["hycal_pos_res"][0].get<float>();
-            float B = m["hycal_pos_res"][1].get<float>();
-            float C = m["hycal_pos_res"][2].get<float>();
-            hycal.SetPositionResolutionParams(A, B, C);
-        }
-        if (m.contains("gem_pos_res") && m["gem_pos_res"].is_array()) {
-            gem_pos_res.clear();
-            for (auto &v : m["gem_pos_res"]) gem_pos_res.push_back(v.get<float>());
-        }
-        if (m.contains("target_pos_res") && m["target_pos_res"].is_array()
-                && m["target_pos_res"].size() >= 3) {
-            gem_eff_target_sigma_x = m["target_pos_res"][0].get<float>();
-            gem_eff_target_sigma_y = m["target_pos_res"][1].get<float>();
-            gem_eff_target_sigma_z = m["target_pos_res"][2].get<float>();
-        }
-        std::cerr << "Matching  : HyCal sigma(E)=sqrt((" << hycal.GetPositionResolutionA()
-                  << "/sqrt(E_GeV))^2+(" << hycal.GetPositionResolutionB()
-                  << "/E_GeV)^2+" << hycal.GetPositionResolutionC() << "^2) mm"
-                  << "  GEM sigma=[";
-        for (size_t i = 0; i < gem_pos_res.size(); ++i)
-            std::cerr << (i ? "," : "") << gem_pos_res[i];
-        std::cerr << "] mm  target sigma=("
-                  << gem_eff_target_sigma_x << ","
-                  << gem_eff_target_sigma_y << ","
-                  << gem_eff_target_sigma_z << ") mm\n";
-    }
-
     std::cerr << "Reco      : " << (recon_path.empty() ? "(none)" : recon_path)
               << " (adc_to_mev=" << adc_to_mev << ")\n";
 

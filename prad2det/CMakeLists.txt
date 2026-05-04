@@ -38,6 +38,7 @@ add_library(prad2det STATIC
     src/GemSystem.cpp
     src/GemCluster.cpp
     src/GemPedestal.cpp
+    src/PipelineBuilder.cpp
 )
 
 # PIC so the archive can be pulled into shared objects (pybind11 module,
@@ -52,9 +53,13 @@ target_include_directories(prad2det
 
 target_link_libraries(prad2det PUBLIC nlohmann_json::nlohmann_json)
 
-# GemSystem needs SspData.h from prad2dec (include dirs only, not linking)
+# PipelineBuilder calls evc::load_daq_config (declared inline in
+# prad2dec/include/load_daq_config.h), so prad2det now needs prad2dec at
+# link time too — promoted from PRIVATE to PUBLIC so any caller of
+# prad2det that uses the builder also gets prad2dec transitively.
+# (GemSystem also needs SspData.h from prad2dec; this covers it.)
 if(TARGET prad2dec)
-    target_link_libraries(prad2det PRIVATE prad2dec)
+    target_link_libraries(prad2det PUBLIC prad2dec)
 endif()
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,8 @@
 #include "HyCalCluster.h"
 #include "DetectorTransform.h"
 #include "EpicsStore.h"
+#include "PipelineBuilder.h"
+#include "RunInfoConfig.h"
 #include "SspData.h"
 
 #include <cstring>
@@ -929,6 +931,160 @@ static void bind_epics(py::module_ &m)
 }
 
 // -------------------------------------------------------------------------
+// PipelineBuilder bindings — one-stop wiring of HyCal + GEM detectors.
+// -------------------------------------------------------------------------
+//
+// Mirrors the C++ side at prad2det/include/PipelineBuilder.h: the builder
+// loads daq_config + reconstruction_config + runinfo, initializes both
+// detectors with calibration / pedestals / per-detector cluster configs,
+// and constructs the lab-frame DetectorTransforms.  Replaces ~100 LOC of
+// JSON parsing + Init/Load* orchestration in analysis/pyscripts/_common.py.
+//
+// Usage (Python):
+//
+//   from prad2py import det
+//   p = (det.PipelineBuilder()
+//          .set_run_number_from_evio(evio_path)
+//          .build())
+//   hc = det.HyCalCluster(p.hycal); hc.set_config(p.hycal_cluster_cfg)
+//   gem_cl = det.GemCluster()
+//   wa = dec.WaveAnalyzer(p.daq_cfg.wave_cfg)
+//   # ... per-event loop using p.hycal, p.gem, p.hycal_transform, ...
+static void bind_pipeline(py::module_ &m)
+{
+    // RunConfig — geometry + per-run calibration metadata produced by
+    // LoadRunConfig().  Bound as a small read-only view; Python builds
+    // its own lab transforms via Pipeline.hycal_transform / gem_transforms
+    // rather than touching these fields directly.
+    py::class_<prad2::RunConfig>(m, "RunConfig",
+        "Run-period geometry + calibration paths.  Read off Pipeline.run_cfg.")
+        .def(py::init<>())
+        .def_readonly("energy_calib_file",    &prad2::RunConfig::energy_calib_file)
+        .def_readonly("default_adc2mev",      &prad2::RunConfig::default_adc2mev)
+        .def_readonly("Ebeam",                &prad2::RunConfig::Ebeam)
+        .def_readonly("target_x",             &prad2::RunConfig::target_x)
+        .def_readonly("target_y",             &prad2::RunConfig::target_y)
+        .def_readonly("target_z",             &prad2::RunConfig::target_z)
+        .def_readonly("hycal_x",              &prad2::RunConfig::hycal_x)
+        .def_readonly("hycal_y",              &prad2::RunConfig::hycal_y)
+        .def_readonly("hycal_z",              &prad2::RunConfig::hycal_z)
+        .def_readonly("hycal_tilt_x",         &prad2::RunConfig::hycal_tilt_x)
+        .def_readonly("hycal_tilt_y",         &prad2::RunConfig::hycal_tilt_y)
+        .def_readonly("hycal_tilt_z",         &prad2::RunConfig::hycal_tilt_z)
+        .def_property_readonly("gem_x",
+            [](const prad2::RunConfig &r) {
+                return std::vector<float>(r.gem_x, r.gem_x + 4);
+            })
+        .def_property_readonly("gem_y",
+            [](const prad2::RunConfig &r) {
+                return std::vector<float>(r.gem_y, r.gem_y + 4);
+            })
+        .def_property_readonly("gem_z",
+            [](const prad2::RunConfig &r) {
+                return std::vector<float>(r.gem_z, r.gem_z + 4);
+            })
+        .def_readonly("gem_pedestal_file",    &prad2::RunConfig::gem_pedestal_file)
+        .def_readonly("gem_common_mode_file", &prad2::RunConfig::gem_common_mode_file)
+        .def_readonly("hc_time_win_lo",       &prad2::RunConfig::hc_time_win_lo)
+        .def_readonly("hc_time_win_hi",       &prad2::RunConfig::hc_time_win_hi);
+
+    // Pipeline — result bundle.  Owned by Python.  HyCalSystem and GemSystem
+    // are exposed by reference (their lifetime is tied to Pipeline) so the
+    // user can pass them directly into HyCalCluster / GEM reconstruction.
+    py::class_<prad2::Pipeline>(m, "Pipeline",
+        "Wired-up HyCal + GEM detectors plus the resolved configs.  Returned "
+        "by PipelineBuilder.build().  Move-only on the C++ side; on the "
+        "Python side a Pipeline owns its detectors and you typically hold one "
+        "per analysis script.")
+        .def_readonly("daq_cfg",            &prad2::Pipeline::daq_cfg,
+                      py::return_value_policy::reference_internal)
+        .def_readonly("run_cfg",            &prad2::Pipeline::run_cfg,
+                      py::return_value_policy::reference_internal)
+        .def_readonly("run_number",         &prad2::Pipeline::run_number)
+        .def_readonly("hycal",              &prad2::Pipeline::hycal,
+                      py::return_value_policy::reference_internal)
+        .def_readonly("gem",                &prad2::Pipeline::gem,
+                      py::return_value_policy::reference_internal)
+        .def_readonly("hycal_cluster_cfg",  &prad2::Pipeline::hycal_cluster_cfg)
+        .def_readonly("hycal_transform",    &prad2::Pipeline::hycal_transform,
+                      py::return_value_policy::reference_internal)
+        .def_property_readonly("gem_transforms",
+            [](const prad2::Pipeline &p) {
+                return std::vector<DetectorTransform>(p.gem_transforms.begin(),
+                                                      p.gem_transforms.end());
+            },
+            "Per-detector lab transforms (list of 4 DetectorTransform).")
+        .def_property_readonly("hycal_pos_res",
+            [](const prad2::Pipeline &p) {
+                return std::vector<float>(p.hycal_pos_res.begin(),
+                                          p.hycal_pos_res.end());
+            },
+            "[A, B, C] coefficients of HyCal-face position resolution.")
+        .def_readonly("gem_pos_res",        &prad2::Pipeline::gem_pos_res)
+        .def_property_readonly("target_pos_res",
+            [](const prad2::Pipeline &p) {
+                return std::vector<float>(p.target_pos_res.begin(),
+                                          p.target_pos_res.end());
+            },
+            "[sigma_x, sigma_y, sigma_z] of the target gas distribution.")
+        .def_readonly("gem_crate_remap",    &prad2::Pipeline::gem_crate_remap,
+                      "Hardware crate ID -> logical crate ID for GEM (from "
+                      "daq_cfg.roc_tags entries with type=='gem').")
+        .def_readonly("daq_config_path",    &prad2::Pipeline::daq_config_path)
+        .def_readonly("recon_config_path",  &prad2::Pipeline::recon_config_path)
+        .def_readonly("runinfo_path",       &prad2::Pipeline::runinfo_path)
+        .def_readonly("hycal_map_path",     &prad2::Pipeline::hycal_map_path)
+        .def_readonly("gem_map_path",       &prad2::Pipeline::gem_map_path)
+        .def_readonly("hycal_calib_path",   &prad2::Pipeline::hycal_calib_path)
+        .def_readonly("gem_pedestal_path",  &prad2::Pipeline::gem_pedestal_path)
+        .def_readonly("gem_common_mode_path", &prad2::Pipeline::gem_common_mode_path);
+
+    // PipelineBuilder — fluent setters return *this so calls chain.
+    // pybind11 needs reference_internal to keep the chain working from
+    // Python (otherwise each setter would copy a fresh builder).
+    py::class_<prad2::PipelineBuilder>(m, "PipelineBuilder",
+        "Fluent builder.  Empty path strings fall back to defaults; relative "
+        "paths resolve via PRAD2_DATABASE_DIR (or set_database_dir override). "
+        "build() throws on missing daq_config; missing runinfo / hycal_map / "
+        "gem_map / calibration / pedestals warn and proceed.")
+        .def(py::init<>())
+        .def("set_database_dir",     &prad2::PipelineBuilder::set_database_dir,
+             py::arg("path"), py::return_value_policy::reference_internal)
+        .def("set_daq_config",       &prad2::PipelineBuilder::set_daq_config,
+             py::arg("path"), py::return_value_policy::reference_internal)
+        .def("set_recon_config",     &prad2::PipelineBuilder::set_recon_config,
+             py::arg("path"), py::return_value_policy::reference_internal)
+        .def("set_runinfo",          &prad2::PipelineBuilder::set_runinfo,
+             py::arg("path"), py::return_value_policy::reference_internal)
+        .def("set_hycal_map",        &prad2::PipelineBuilder::set_hycal_map,
+             py::arg("path"), py::return_value_policy::reference_internal)
+        .def("set_gem_map",          &prad2::PipelineBuilder::set_gem_map,
+             py::arg("path"), py::return_value_policy::reference_internal)
+        .def("set_hycal_calib",      &prad2::PipelineBuilder::set_hycal_calib,
+             py::arg("path"), py::return_value_policy::reference_internal)
+        .def("set_gem_pedestal",     &prad2::PipelineBuilder::set_gem_pedestal,
+             py::arg("path"), py::return_value_policy::reference_internal)
+        .def("set_gem_common_mode",  &prad2::PipelineBuilder::set_gem_common_mode,
+             py::arg("path"), py::return_value_policy::reference_internal)
+        .def("set_run_number",       &prad2::PipelineBuilder::set_run_number,
+             py::arg("n"), py::return_value_policy::reference_internal)
+        .def("set_run_number_from_evio",
+             &prad2::PipelineBuilder::set_run_number_from_evio,
+             py::arg("evio_path"), py::return_value_policy::reference_internal)
+        .def("set_log_pedestal_checksum",
+             &prad2::PipelineBuilder::set_log_pedestal_checksum,
+             py::arg("enabled"), py::return_value_policy::reference_internal)
+        .def("build",
+            [](prad2::PipelineBuilder &self) {
+                py::gil_scoped_release rel;
+                return self.build();
+            },
+            "Run all the wiring; returns a Pipeline.  Releases the GIL "
+            "during the (potentially slow) Init/LoadCalibration/LoadPedestals "
+            "calls so Python threads can keep running.");
+}
+
+// -------------------------------------------------------------------------
 // Submodule entry point — called from prad2py.cpp
 // -------------------------------------------------------------------------
 void register_det(py::module_ &m)
@@ -941,4 +1097,5 @@ void register_det(py::module_ &m)
     bind_hycal(det);     // 2b
     bind_transform(det); // 2c
     bind_epics(det);     // 2c
+    bind_pipeline(det);  // 2d — one-stop wiring (PipelineBuilder)
 }

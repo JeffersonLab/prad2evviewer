@@ -528,6 +528,33 @@ def best_track_unbiased(hcx: float, hcy: float, hcz: float, sigma_hc: float,
 # ---------------------------------------------------------------------------
 
 @dataclass
+class CapturedEvent:
+    """One full LOO test snapshot, kept for the eff/ineff single-event plots.
+    Lab-frame coordinates; positions are mm.  `matched_hits[d]` is the hit
+    selected from GEM d when it was an anchor (None for the test detector
+    and any non-anchor GEM); `test_hit` is the (matched) hit at the test
+    detector if the LOO call counted as efficient, else None."""
+    test_d:         int
+    is_matched:     bool
+    chi2_per_dof:   float
+    hcx:            float
+    hcy:            float
+    hcz:            float
+    target_x:       float
+    target_y:       float
+    target_z:       float
+    all_hits:       List[List[Tuple[float, float, float]]]
+    matched_hits:   List[Optional[Tuple[float, float, float]]]
+    test_hit:       Optional[Tuple[float, float, float]]
+    pred_x:         float
+    pred_y:         float
+    pred_z:         float
+    fit:            Tuple[float, float, float, float]
+    match_nsigma:   float
+    sigma_gem_test: float
+
+
+@dataclass
 class LooStats:
     name:           str
     n_attempted:    List[int]         = field(default_factory=lambda: [0]*4)
@@ -542,6 +569,10 @@ class LooStats:
     eff_local_y:    List[List[float]] = field(default_factory=lambda: [[],[],[],[]])
     ineff_local_x:  List[List[float]] = field(default_factory=lambda: [[],[],[],[]])
     ineff_local_y:  List[List[float]] = field(default_factory=lambda: [[],[],[],[]])
+    # Up to N captured single-event snapshots per bucket (eff/ineff), for
+    # event-display plots.  Capacity gated by `--n-event-plots`.
+    captured_eff:   List["CapturedEvent"] = field(default_factory=list)
+    captured_ineff: List["CapturedEvent"] = field(default_factory=list)
 
 
 def _record_loo(stats: "LooStats", test_d: int,
@@ -549,14 +580,22 @@ def _record_loo(stats: "LooStats", test_d: int,
                 hits_by_det: List[List[Tuple[float, float, float]]],
                 gem_z: Sequence[float],
                 params: TrackingParams,
-                test_xform) -> None:
+                test_xform,
+                hc_lab: Optional[Tuple[float, float, float]] = None,
+                target_lab: Optional[Tuple[float, float, float]] = None,
+                n_event_plots: int = 0) -> None:
     """Bookkeeping for a single LOO test attempt.  If `track` is None the
     anchor failed (3-GEM fit didn't pass χ²/residual gates); we don't
     increment any counter — denominator only counts events where the
     OTHER 3 GEMs delivered a clean anchor.  `test_xform` is the test
     detector's DetectorTransform, used to convert the predicted hit
     position (lab) to detector-local for the efficiency / inefficiency
-    histograms."""
+    histograms.
+
+    When `hc_lab` and `target_lab` are supplied and `n_event_plots > 0`,
+    the first `n_event_plots` eff and `n_event_plots` ineff outcomes are
+    snapshotted into `stats.captured_eff` / `stats.captured_ineff` for
+    the single-event display plots."""
     if track is None:
         return
     stats.chi2_list.append(track.chi2_per_dof)
@@ -581,6 +620,33 @@ def _record_loo(stats: "LooStats", test_d: int,
     else:
         stats.ineff_local_x[test_d].append(pred_lx)
         stats.ineff_local_y[test_d].append(pred_ly)
+
+    # Optional: snapshot first N eff and N ineff events for display plots.
+    if hc_lab is not None and target_lab is not None and n_event_plots > 0:
+        is_matched = (idx >= 0)
+        bucket = stats.captured_eff if is_matched else stats.captured_ineff
+        if len(bucket) < n_event_plots:
+            test_hit = hits_by_det[test_d][idx] if is_matched else None
+            bucket.append(CapturedEvent(
+                test_d         = test_d,
+                is_matched     = is_matched,
+                chi2_per_dof   = track.chi2_per_dof,
+                hcx            = hc_lab[0],
+                hcy            = hc_lab[1],
+                hcz            = hc_lab[2],
+                target_x       = target_lab[0],
+                target_y       = target_lab[1],
+                target_z       = target_lab[2],
+                all_hits       = [list(hd) for hd in hits_by_det],
+                matched_hits   = list(track.cand),
+                test_hit       = test_hit,
+                pred_x         = pred_x,
+                pred_y         = pred_y,
+                pred_z         = zd,
+                fit            = track.fit,
+                match_nsigma   = params.match_nsigma,
+                sigma_gem_test = s_gem,
+            ))
 
 
 # ---------------------------------------------------------------------------
@@ -627,6 +693,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "reconstruction_config.json.")
     ap.add_argument("--n-dets",           type=int,   default=4,
                     help="Number of GEM detectors to consider (default 4).")
+    ap.add_argument("--n-event-plots",    type=int,   default=2,
+                    help="Save up to N eff and N ineff single-event display "
+                         "plots per LOO mode.  Each plot shows GEM hits + "
+                         "HyCal cluster + fit line on the X-Y (top-down) "
+                         "and Z-Y (side) planes in lab coords.  0 disables. "
+                         "Default 2 → up to 12 single-event PNGs total.")
     args = ap.parse_args(argv)
 
     out_dir = Path(args.out_path)
@@ -644,7 +716,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         hc_map_file   = args.hc_map_file,
     )
 
-    (pr_A, pr_B, pr_C), gem_pos_res, target_pos_res = C.load_matching_config()
+    (pr_A, pr_B, pr_C), gem_pos_res, target_pos_res = C.load_matching_config(p)
     if args.sigma_gem is not None:
         gem_pos_res = [args.sigma_gem] * 4
     cfg_tgt_x, cfg_tgt_y, cfg_tgt_z = target_pos_res
@@ -776,6 +848,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                     sigma_hc = C.hycal_pos_resolution(pr_A, pr_B, pr_C, energy)
                     n_used += 1
 
+                    hc_lab_pt     = (hcx, hcy, hcz)
+                    target_lab_pt = (p.geo.target_x, p.geo.target_y,
+                                     p.geo.target_z)
+
                     # Three LOO variants run per HyCal cluster, per test
                     # detector D.  The OTHER 3 GEMs anchor the fit; D is
                     # excluded from both the candidate matching and the fit,
@@ -797,7 +873,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 candidate_dets=others,
                                 params=params, min_match=3)
                             _record_loo(loo, test_d, track,
-                                        hits_by_det, gem_z, params, test_xform)
+                                        hits_by_det, gem_z, params, test_xform,
+                                        hc_lab=hc_lab_pt,
+                                        target_lab=target_lab_pt,
+                                        n_event_plots=args.n_event_plots)
 
                         # --- loo-target-in: GEM-seeded, target in fit ---
                         if seeds_for_loo:
@@ -814,7 +893,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                                 sigma_target_y=sigma_target_y,
                                 sigma_target_z=sigma_target_z)
                             _record_loo(loo_target_in, test_d, track,
-                                        hits_by_det, gem_z, params, test_xform)
+                                        hits_by_det, gem_z, params, test_xform,
+                                        hc_lab=hc_lab_pt,
+                                        target_lab=target_lab_pt,
+                                        n_event_plots=args.n_event_plots)
 
                         # --- loo-target-seed: target→HyCal seed, no target in fit ---
                         track = best_track_target_seed(hcx, hcy, hcz,
@@ -823,7 +905,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                             min_match=3, candidate_dets=others,
                             diag=diag_target_seed, test_d=test_d)
                         _record_loo(loo_target_seed, test_d, track,
-                                    hits_by_det, gem_z, params, test_xform)
+                                    hits_by_det, gem_z, params, test_xform,
+                                    hc_lab=hc_lab_pt,
+                                    target_lab=target_lab_pt,
+                                    n_event_plots=args.n_event_plots)
 
             if done:
                 break
@@ -850,7 +935,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     write_outputs(out_dir, loo_modes, params,
                   n_phys, n_events_filter_pass, n_used,
-                  args.min_cluster_energy, det_half)
+                  args.min_cluster_energy, det_half, gem_z)
     return 0
 
 
@@ -869,7 +954,8 @@ def write_outputs(out_dir: Path,
                   params: TrackingParams,
                   n_phys: int, n_events_filter_pass: int, n_used: int,
                   min_cluster_energy: float,
-                  det_half: Sequence[Tuple[float, float]]
+                  det_half: Sequence[Tuple[float, float]],
+                  gem_z: Sequence[float]
                   ) -> None:
 
     # ---- text summary (stdout) --------------------------------------------
@@ -924,6 +1010,13 @@ def write_outputs(out_dir: Path,
         _plot_residuals(plt, mode, out_dir / f"residuals_{slug}.png")
         _plot_eff_ineff_local(plt, mode, det_half,
                               out_dir / f"eff_ineff_{slug}.png")
+        # Single-event displays: a few eff and ineff snapshots per mode.
+        for kind, bucket in (("eff",   mode.captured_eff),
+                              ("ineff", mode.captured_ineff)):
+            for k, ev in enumerate(bucket):
+                out_path = (out_dir
+                            / f"event_{slug}_{kind}_{k:02d}_test{ev.test_d}.png")
+                _plot_single_event(plt, ev, gem_z, slug, kind, k, out_path)
 
 
 def _import_pyplot():
@@ -1048,12 +1141,16 @@ def _plot_eff_ineff_local(plt, loo: LooStats,
     Bottom row: inefficiency map — predicted positions where it didn't.
     Columns are GEM 0..3.  Axes are shared within columns (x) and within
     rows (y) so the eight panels pack tight; colorbars sit at the right
-    edge of each row."""
+    edge of each row.
+
+    Color scale is log per row, with a single LogNorm shared across all
+    four detectors so colors compare directly across GEMs."""
     has_eff   = any(loo.eff_local_x[d]   for d in range(4))
     has_ineff = any(loo.ineff_local_x[d] for d in range(4))
     if not (has_eff or has_ineff):
         return
     import numpy as np
+    from matplotlib.colors import LogNorm
     fig, axes = plt.subplots(
         2, 4, figsize=(13, 11), sharex="col", sharey="row",
         gridspec_kw={"wspace": 0.02, "hspace": 0.10,
@@ -1066,17 +1163,33 @@ def _plot_eff_ineff_local(plt, loo: LooStats,
          lambda d: loo.ineff_local_x[d], lambda d: loo.ineff_local_y[d]),
     )
     for row, (kind, blurb, cmap, get_x, get_y) in enumerate(row_meta):
-        last_im = None
+        # Pre-pass: compute per-detector bins and the global max count for
+        # this row so all four panels share one LogNorm and colors compare
+        # directly across GEMs.
+        panel_specs = []
+        row_max = 0
         for d in range(4):
             xmax, ymax = (det_half[d] if d < len(det_half) else (300.0, 300.0))
             bins_x = np.linspace(-xmax, xmax, 60)
             bins_y = np.linspace(-ymax, ymax, 60)
-            ax = axes[row, d]
             xs, ys = get_x(d), get_y(d)
+            if xs:
+                H, _, _ = np.histogram2d(xs, ys, bins=[bins_x, bins_y])
+                if H.size:
+                    row_max = max(row_max, int(H.max()))
+            panel_specs.append((bins_x, bins_y, xmax, ymax, xs, ys))
+        # vmin=1 masks empty bins (count 0) — they show through as the
+        # axes background, not as the lowest cmap color.  vmax floored at 2
+        # so vmin<vmax even when a row has at most one count anywhere.
+        norm = LogNorm(vmin=1, vmax=max(row_max, 2))
+        last_im = None
+        for d in range(4):
+            bins_x, bins_y, xmax, ymax, xs, ys = panel_specs[d]
+            ax = axes[row, d]
             n = len(xs)
             if n > 0:
                 _, _, _, im = ax.hist2d(xs, ys, bins=[bins_x, bins_y],
-                                        cmap=cmap)
+                                        cmap=cmap, norm=norm)
                 last_im = im
             else:
                 ax.text(0.5, 0.5, "no data", ha="center", va="center",
@@ -1096,9 +1209,126 @@ def _plot_eff_ineff_local(plt, loo: LooStats,
         if last_im is not None:
             cax = fig.add_axes([0.945, axes[row, -1].get_position().y0,
                                 0.012, axes[row, -1].get_position().height])
-            fig.colorbar(last_im, cax=cax)
+            fig.colorbar(last_im, cax=cax, label="counts (log)")
     fig.suptitle(f"LOO predicted hit positions at the test detector  "
                  f"[{loo.name.split()[0]}]", fontsize=11, y=0.98)
+    fig.savefig(out, dpi=120)
+    plt.close(fig)
+    print(f"[plot] {out}")
+
+
+def _plot_single_event(plt, ev: "CapturedEvent",
+                       gem_z: Sequence[float],
+                       mode_short: str, kind: str, idx: int,
+                       out: Path) -> None:
+    """One LOO snapshot rendered in lab coords on two panels:
+
+      * X-Y (top-down): all GEM hits per detector, anchor matches squared,
+        HyCal star, target ×, fit-line projection, predicted position at
+        the test detector (red plus), and the test-detector hit (red
+        diamond) when the LOO call was efficient.  A dashed circle of
+        radius `match_nsigma · σ_GEM[test_d]` around the prediction
+        visualizes the matching window.
+      * Z-Y (side):  same primitives, with z on the horizontal axis so the
+        full lever arm from target through GEMs to HyCal is visible.
+
+    GEMs are color-coded C0..C3; the test detector's data is highlighted
+    in red regardless of detector index."""
+    import numpy as np
+    fig, (ax_xy, ax_zy) = plt.subplots(1, 2, figsize=(14, 6))
+
+    a_x, b_x, a_y, b_y = ev.fit
+    zs_ref = [ev.target_z, ev.hcz] + list(gem_z)
+    z_min  = min(zs_ref) - 50.0
+    z_max  = max(zs_ref) + 50.0
+    z_arr  = np.linspace(z_min, z_max, 200)
+    line_x = a_x + b_x * z_arr
+    line_y = a_y + b_y * z_arr
+
+    n_dets_ev = len(ev.all_hits)
+
+    # ----- X-Y (top-down) -------------------------------------------------
+    seen_det = set()
+    for d in range(n_dets_ev):
+        for h in ev.all_hits[d]:
+            lab = f"GEM{d} hits" if d not in seen_det else None
+            ax_xy.plot(h[0], h[1], 'o', color=f"C{d}",
+                       markersize=4, alpha=0.4, label=lab)
+            seen_det.add(d)
+    seen_anchor = set()
+    for d in range(n_dets_ev):
+        if d == ev.test_d:
+            continue
+        m = ev.matched_hits[d]
+        if m is None:
+            continue
+        lab = "anchor match" if "anchor" not in seen_anchor else None
+        ax_xy.plot(m[0], m[1], 's', color=f"C{d}",
+                   markersize=12, mfc='none', mew=2, label=lab)
+        seen_anchor.add("anchor")
+    ax_xy.plot(ev.hcx, ev.hcy, '*', color='black',
+               markersize=16, label='HyCal cluster')
+    ax_xy.plot(ev.target_x, ev.target_y, 'x', color='black',
+               markersize=12, mew=2, label='target')
+    ax_xy.plot(line_x, line_y, '--', color='red', lw=1.2,
+               alpha=0.7, label='fit')
+    ax_xy.plot(ev.pred_x, ev.pred_y, 'P', color='red',
+               markersize=14, mfc='none', mew=2,
+               label=f'pred @ GEM{ev.test_d}')
+    if ev.test_hit is not None:
+        ax_xy.plot(ev.test_hit[0], ev.test_hit[1], 'D', color='red',
+                   markersize=10, label=f'GEM{ev.test_d} hit')
+    cut_radius = ev.match_nsigma * ev.sigma_gem_test
+    circle = plt.Circle((ev.pred_x, ev.pred_y), cut_radius,
+                        facecolor='none', edgecolor='red',
+                        linestyle=':', lw=1.0, alpha=0.6,
+                        label=f'{ev.match_nsigma:g}σ match window')
+    ax_xy.add_patch(circle)
+    ax_xy.set_xlabel('lab x (mm)')
+    ax_xy.set_ylabel('lab y (mm)')
+    ax_xy.set_title('X-Y (top-down)')
+    ax_xy.set_aspect('equal', adjustable='datalim')
+    ax_xy.grid(True, alpha=0.3)
+    ax_xy.legend(loc='best', fontsize=7, framealpha=0.85)
+
+    # ----- Z-Y (side view) ------------------------------------------------
+    for d in range(n_dets_ev):
+        for h in ev.all_hits[d]:
+            ax_zy.plot(h[2], h[1], 'o', color=f"C{d}",
+                       markersize=4, alpha=0.4)
+    for d in range(n_dets_ev):
+        if d == ev.test_d:
+            continue
+        m = ev.matched_hits[d]
+        if m is None:
+            continue
+        ax_zy.plot(m[2], m[1], 's', color=f"C{d}",
+                   markersize=12, mfc='none', mew=2)
+    ax_zy.plot(ev.hcz, ev.hcy, '*', color='black', markersize=16)
+    ax_zy.plot(ev.target_z, ev.target_y, 'x', color='black',
+               markersize=12, mew=2)
+    ax_zy.plot(z_arr, line_y, '--', color='red', lw=1.2, alpha=0.7)
+    ax_zy.plot(ev.pred_z, ev.pred_y, 'P', color='red',
+               markersize=14, mfc='none', mew=2)
+    if ev.test_hit is not None:
+        ax_zy.plot(ev.test_hit[2], ev.test_hit[1], 'D', color='red',
+                   markersize=10)
+    # Dashed verticals at the GEM planes — orient the eye to where each
+    # detector lives along z.
+    for d, zd in enumerate(gem_z):
+        ax_zy.axvline(zd, color=f"C{d}", ls=':', lw=0.6, alpha=0.4)
+    ax_zy.axvline(ev.hcz, color='black', ls=':', lw=0.6, alpha=0.4)
+    ax_zy.set_xlabel('lab z (mm)')
+    ax_zy.set_ylabel('lab y (mm)')
+    ax_zy.set_title('Z-Y (side view)')
+    ax_zy.grid(True, alpha=0.3)
+
+    flag = "matched" if ev.is_matched else "unmatched"
+    title = (f"[{mode_short}] {kind} event #{idx} — "
+             f"test_d=GEM{ev.test_d} ({flag})  "
+             f"χ²/dof={ev.chi2_per_dof:.2f}")
+    fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
     fig.savefig(out, dpi=120)
     plt.close(fig)
     print(f"[plot] {out}")

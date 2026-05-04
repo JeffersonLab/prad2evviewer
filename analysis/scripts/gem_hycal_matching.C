@@ -26,7 +26,7 @@
 //   σ_total   = sqrt(σ_hc@gem² + σ_gem²)
 //
 // (A, B, C) and gem_pos_res are read from
-// reconstruction_config.json:matching via load_matching_config().
+// reconstruction_config.json:matching via the PipelineBuilder.
 //
 // Defaults: N = 3 (3-sigma).  The actual residual is stored in the tree so
 // downstream cuts can be tightened or loosened without re-running.
@@ -120,9 +120,9 @@
 #include "RunInfoConfig.h"
 
 #include "PhysicsTools.h"
-#include "ConfigSetup.h"      // BuildLabTransforms, gRunConfig
-#include "script_helpers.h"   // resolve_db_path, extract_run_number_from_path,
-                              // discover_runinfo_path, build_*_crate_remap
+#include "ConfigSetup.h"      // analysis::ApplyToLab
+#include "PipelineBuilder.h"  // prad2::PipelineBuilder — one-stop wiring
+#include "script_helpers.h"   // discover_split_files, resolve_db_path
 
 #include <TError.h>          // Printf() — line-flushed message output
 #include <TFile.h>
@@ -420,112 +420,55 @@ int gem_hycal_matching(const char *evio_path,
            evio_path ? evio_path : "(null)",
            out_path  ? out_path  : "(null)");
 
-    //---- DAQ config ---------------------------------------------------------
-    std::string daq_path = blank(daq_config)
-        ? resolve_db_path("daq_config.json") : std::string(daq_config);
-    DaqConfig cfg;
-    if (!load_daq_config(daq_path, cfg)) {
-        Printf("[ERROR] cannot load DAQ config %s", daq_path.c_str());
+    //---- detector pipeline (DAQ config, runinfo, HyCal, GEM) ----------------
+    // One call wires daq_config + reconstruction_config + runinfo +
+    // HyCalSystem (Init + LoadCalibration + position-resolution) + GemSystem
+    // (Init + LoadPedestals + LoadCommonModeRange + per-detector configs)
+    // + DetectorTransforms.  Crate-remap derivation, JSON parsing, and
+    // [GEMSYS]/[GEMCFG]/[PEDSUM] diagnostic prints all live inside.
+    prad2::Pipeline pipeline;
+    try {
+        pipeline = prad2::PipelineBuilder()
+            .set_daq_config(blank(daq_config)        ? "" : daq_config)
+            .set_hycal_calib(blank(hc_calib_file)    ? "" : hc_calib_file)
+            .set_gem_pedestal(blank(gem_ped_file)    ? "" : gem_ped_file)
+            .set_gem_common_mode(blank(gem_cm_file)  ? "" : gem_cm_file)
+            .set_hycal_map(blank(hc_map_file)        ? "" : hc_map_file)
+            .set_gem_map(blank(gem_map_file)         ? "" : gem_map_file)
+            .set_run_number(run_num > 0 ? run_num : -1)
+            .set_run_number_from_evio(evio_path ? evio_path : "")
+            .build();
+    } catch (const std::exception &e) {
+        Printf("[ERROR] %s", e.what());
         return 1;
     }
-    Printf("[setup] DAQ config : %s", daq_path.c_str());
 
-    //---- runinfo (geometry + calibration paths) -----------------------------
-    std::string ri_path = discover_runinfo_path();
-    if (ri_path.empty()) {
-        Printf("[ERROR] no runinfo pointer in database/reconstruction_config.json"
-               " — cannot resolve calibration / geometry.");
-        return 1;
-    }
-    // If the caller didn't pass an explicit run number, sniff it out of
-    // the EVIO filename so LoadRunConfig picks the right runinfo entry
-    // (instead of always falling back to the largest known run).
-    int eff_run = run_num;
-    if (eff_run <= 0) {
-        int sniff = extract_run_number_from_path(evio_path ? evio_path : "");
-        if (sniff > 0) {
-            eff_run = sniff;
-            Printf("[setup] Run number : %d (extracted from filename)", eff_run);
-        }
-    } else {
-        Printf("[setup] Run number : %d (caller-provided)", eff_run);
-    }
-    analysis::gRunConfig = prad2::LoadRunConfig(ri_path, eff_run);
-    auto &geo = analysis::gRunConfig;
-    auto xforms = analysis::BuildLabTransforms(geo);
-    Printf("[setup] RunInfo    : %s  beam=%.0f MeV  hycal_z=%.1f mm",
-           ri_path.c_str(), geo.Ebeam, geo.hycal_z);
+    auto &cfg            = pipeline.daq_cfg;
+    auto &geo            = pipeline.run_cfg;
+    auto &hycal          = pipeline.hycal;
+    auto &gem_sys        = pipeline.gem;
+    auto &gem_pos_res    = pipeline.gem_pos_res;
+    auto &hycal_xform    = pipeline.hycal_transform;
+    auto &gem_xforms     = pipeline.gem_transforms;
 
-    //---- HyCal --------------------------------------------------------------
-    std::string hc_map = blank(hc_map_file)
-        ? resolve_db_path("hycal_map.json") : std::string(hc_map_file);
-    fdec::HyCalSystem hycal;
-    hycal.Init(hc_map);
+    // Mirror into gRunConfig for any out-of-tree code that reads the
+    // analysis-side global (kept behind the same alias path as before).
+    analysis::gRunConfig = geo;
 
-    std::string hc_calib = blank(hc_calib_file)
-        ? resolve_db_path(geo.energy_calib_file)
-        : resolve_db_path(hc_calib_file);
-    if (!hc_calib.empty()) {
-        int n = hycal.LoadCalibration(hc_calib);
-        Printf("[setup] HC calib   : %s (%d modules)", hc_calib.c_str(), n);
-    } else {
-        Printf("[WARN] no HyCal calibration file — energies will be wrong.");
-    }
+    // Bank-tag → logical-crate map.  Only the HyCal channel walk uses it
+    // (one lookup per FADC channel); GEM-side crate remap is already inside
+    // the builder via pipeline.gem_crate_remap.
+    std::map<int, int> crate_map;
+    for (const auto &re : cfg.roc_tags) crate_map[(int)re.tag] = re.crate;
 
+    // HyCal cluster + GEM cluster + WaveAnalyzer all hold per-event scratch,
+    // so they live outside the pipeline (one per event loop, not one per
+    // run).  HyCalCluster needs the wired-up HyCalSystem reference.
     fdec::HyCalCluster hc_clusterer(hycal);
-    fdec::ClusterConfig hc_cfg;
-    hc_clusterer.SetConfig(hc_cfg);
-
-    //---- matching config (HyCal sigma(E) + per-detector GEM sigma) ---------
-    // Defaults match the historical formula (face sigma = 2.6/sqrt(E/GeV))
-    // and 0.1 mm GEM resolution; reconstruction_config.json:matching can
-    // override either independently.
-    float pr_A = 2.6f, pr_B = 0.f, pr_C = 0.f;
-    std::vector<float> gem_pos_res = {0.1f, 0.1f, 0.1f, 0.1f};
-    load_matching_config(pr_A, pr_B, pr_C, gem_pos_res);
-    hycal.SetPositionResolutionParams(pr_A, pr_B, pr_C);
-    Printf("[setup] HC sigma(E)= sqrt((%.3f/sqrt(E_GeV))^2+(%.3f/E_GeV)^2+%.3f^2) mm",
-           pr_A, pr_B, pr_C);
-    {
-        TString g = "[";
-        for (size_t i = 0; i < gem_pos_res.size(); ++i)
-            g += TString::Format("%s%.3f", i ? "," : "", gem_pos_res[i]);
-        g += "]";
-        Printf("[setup] GEM sigma  : %s mm", g.Data());
-    }
-
-    //---- GEM ----------------------------------------------------------------
-    std::string gem_map = blank(gem_map_file)
-        ? resolve_db_path("gem_map.json") : std::string(gem_map_file);
-    gem::GemSystem  gem_sys;
+    hc_clusterer.SetConfig(pipeline.hycal_cluster_cfg);
     gem::GemCluster gem_clusterer;
-    gem_sys.Init(gem_map);
-    Printf("[setup] GEM map    : %s  (%d detectors)",
-           gem_map.c_str(), gem_sys.GetNDetectors());
-
-    auto remap     = build_gem_crate_remap(cfg);
-    auto crate_map = build_full_crate_remap(cfg);
-    std::string ped_path = blank(gem_ped_file)
-        ? resolve_db_path(geo.gem_pedestal_file)
-        : resolve_db_path(gem_ped_file);
-    std::string cm_path = blank(gem_cm_file)
-        ? resolve_db_path(geo.gem_common_mode_file)
-        : resolve_db_path(gem_cm_file);
-    if (!ped_path.empty()) {
-        gem_sys.LoadPedestals(ped_path, remap);
-        Printf("[setup] GEM peds   : %s", ped_path.c_str());
-    } else {
-        Printf("[WARN] no GEM pedestal file — full-readout data reconstructs empty.");
-    }
-    if (!cm_path.empty()) {
-        gem_sys.LoadCommonModeRange(cm_path, remap);
-        Printf("[setup] GEM CM     : %s", cm_path.c_str());
-    }
 
     //---- EVIO discovery -----------------------------------------------------
-    // Auto-discover all split files for this run sitting alongside the
-    // user-supplied path (`prad_NNNNNN.evio.NNNNN`).  Falls back to the
-    // single file if no run number can be parsed.
     EvChannel ch;
     ch.SetConfig(cfg);
     auto evio_files = discover_split_files(evio_path ? evio_path : "");
@@ -641,7 +584,7 @@ int gem_hycal_matching(const char *evio_path,
             hc_clusterer.ReconstructHits(hc_hits_raw);
 
             // Convert HyCal cluster list to HCHit so we can apply the
-            // shared lab transform via xforms.hycal.toLab().
+            // shared lab transform via hycal_xform.toLab().
             std::vector<analysis::HCHit> hc_hits;
             hc_hits.reserve(hc_hits_raw.size());
             for (const auto &h : hc_hits_raw) {
@@ -654,7 +597,7 @@ int gem_hycal_matching(const char *evio_path,
                 hc_hits.push_back(hh);
             }
             // detector-frame  →  lab/target-centered frame
-            for (auto &h : hc_hits) analysis::ApplyToLab(xforms.hycal, h);
+            for (auto &h : hc_hits) analysis::ApplyToLab(hycal_xform, h);
 
             // ---------- GEM: pedestal → CM → ZS → 1D + 2D ----------
             gem_sys.Clear();
@@ -673,7 +616,7 @@ int gem_hycal_matching(const char *evio_path,
                     gh.det_id = d;
                     gem_lab[d].push_back(gh);
                 }
-                for (auto &h : gem_lab[d]) analysis::ApplyToLab(xforms.gem[d], h);
+                for (auto &h : gem_lab[d]) analysis::ApplyToLab(gem_xforms[d], h);
             }
 
             // ---------- record HyCal clusters in tree ----------
