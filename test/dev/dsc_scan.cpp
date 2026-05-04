@@ -251,23 +251,6 @@ int main(int argc, char *argv[])
 
             ++scanned;
             auto et = ch.GetEventType();
-
-            // record EPICS sightings too — useful for slow-tree design.
-            if (et == EventType::Epics) {
-                static int epics_dumped = 0;
-                if (epics_dumped < 3) {
-                    ++epics_dumped;
-                    const auto &si = ch.Sync();
-                    std::cerr << "EPICS ev#" << scanned
-                              << "  top tag=0x" << std::hex << ch.GetEvHeader().tag
-                              << "  sync.unix_time=" << std::dec << si.unix_time
-                              << "  sync.sync_counter=" << si.sync_counter
-                              << "  sync.run_number="  << si.run_number
-                              << "  sync.event_tag=0x" << std::hex << si.event_tag
-                              << std::dec << "\n";
-                }
-            }
-
             if (et != EventType::Sync && et != EventType::Physics) continue;
 
             // O(1) lookup of every 0xE115 node in this event.
@@ -275,24 +258,6 @@ int main(int argc, char *argv[])
             if (idxs.empty()) continue;
             ++with_dsc;
             if (et == EventType::Sync) ++sync_count;
-
-            // Per-DSC2-event timestamp dump (first 3 sightings).
-            static int dsc_dumped = 0;
-            if (dsc_dumped < 3) {
-                ++dsc_dumped;
-                const auto &si = ch.Sync();
-                ch.SelectEvent(0);
-                const auto &info = ch.Info();
-                std::cerr << "DSC ev#" << scanned
-                          << "  top tag=0x" << std::hex << ch.GetEvHeader().tag
-                          << std::dec
-                          << "  ev_num=" << info.event_number
-                          << "  TI_ticks=" << info.timestamp
-                          << "  sync.unix=" << si.unix_time
-                          << "  sync.cnt=" << si.sync_counter
-                          << "  sync.run=" << si.run_number
-                          << "\n";
-            }
 
             const auto &nodes = ch.GetNodes();
             for (int idx : idxs) {

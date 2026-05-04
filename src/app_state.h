@@ -513,7 +513,7 @@ struct AppState {
 
     // ---- EPICS data (guarded by epics_mtx) ----------------------------------
     mutable std::mutex epics_mtx;
-    fdec::EpicsStore epics;
+    epics::EpicsStore epics;
     std::atomic<int> epics_events{0};
 
     // ---- GEM calibration revision -------------------------------------------

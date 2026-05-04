@@ -1,16 +1,21 @@
 #pragma once
 //=============================================================================
-// EpicsData.h — decoded EPICS slow-control event
+// EpicsData.h — single-event EPICS slow-control record
 //
 // EPICS events (top-level tag 0x001F) carry a string bank (0xE114) of
 // "value channel_name\n" lines plus a 0xE112 HEAD bank with the absolute
 // unix_time and a monotonic sync_counter (see SyncData.h).
 //
-// Two helpers populate this struct:
-//   * EvChannel::Epics() — lazy accessor on EvChannel; runs the parser when
-//     the channel is positioned on an EPICS event and caches the result.
-//   * Use ParseEpicsText(text, out) directly if you already have the text
-//     payload (e.g. from EvChannel::ExtractEpicsText()).
+// `EpicsRecord` is the per-event POD: parser output (sparse parallel
+// name+value vectors) plus the absolute-time / event-anchor metadata.
+// It is what EvChannel::Epics() returns and what offline tools write into
+// the "epics" TTree (one row per EPICS event).
+//
+// For the run-scoped accumulator (channel registry, persistent values
+// across snapshots, O(log N) lookup by event_number) see EpicsStore.h —
+// they share `ParseEpicsText` but represent the data differently because
+// per-event sparse storage and run-wide indexed storage have different
+// access patterns.
 //=============================================================================
 
 #include <cstdint>

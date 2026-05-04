@@ -7,8 +7,9 @@
 //   prad2py.det.StripHit / StripCluster / GEMHit   (per-event outputs)
 //   prad2py.det.ApvConfig / PlaneConfig / DetectorConfig / ApvPedestal
 //
-// Phases 2b (HyCal) and 2c (DetectorTransform + EpicsStore) will plug in
-// alongside these — each gets its own `py::class_<...>` block below.
+// Phase 2b (HyCal) and 2c (DetectorTransform) plug in alongside these —
+// each gets its own `py::class_<...>` block below.  EpicsStore moved to
+// the dec submodule (prad2py.dec.EpicsStore) when it migrated to prad2dec.
 //
 // Usage sketch (matches the C++ driver in test/gem_dump.cpp):
 //
@@ -43,7 +44,6 @@
 #include "HyCalSystem.h"
 #include "HyCalCluster.h"
 #include "DetectorTransform.h"
-#include "EpicsStore.h"
 #include "PipelineBuilder.h"
 #include "RunInfoConfig.h"
 #include "SspData.h"
@@ -877,59 +877,6 @@ static void bind_transform(py::module_ &m)
 #undef PRAD2_BIND_TRANSFORM_AXIS
 }
 
-static void bind_epics(py::module_ &m)
-{
-    py::class_<fdec::EpicsStore::Snapshot>(m, "EpicsSnapshot",
-        "One EPICS snapshot (event number + timestamp + channel values).")
-        .def_readonly("event_number", &fdec::EpicsStore::Snapshot::event_number)
-        .def_readonly("timestamp",    &fdec::EpicsStore::Snapshot::timestamp)
-        .def_readonly("values",       &fdec::EpicsStore::Snapshot::values);
-
-    py::class_<fdec::EpicsStore>(m, "EpicsStore",
-        "Accumulator for EPICS slow-control snapshots.  Feed it raw EPICS "
-        "text via feed() whenever an EPICS event arrives (channel discovery "
-        "is automatic), then query get_value() for any subsequent physics "
-        "event — returns the most recent snapshot at or before that event.")
-        .def(py::init<>())
-        .def("feed", &fdec::EpicsStore::Feed,
-             py::arg("event_number"), py::arg("timestamp"), py::arg("text"),
-             "Parse a raw EPICS payload and store a snapshot.  Text format: "
-             "one `value  channel_name` line per channel.")
-        .def("get_value",
-            [](const fdec::EpicsStore &self, int32_t event_number,
-               const std::string &channel) -> py::object {
-                float v = 0.f;
-                if (self.GetValue(event_number, channel, v))
-                    return py::float_(v);
-                return py::none();
-            },
-            py::arg("event_number"), py::arg("channel"),
-            "Return the most recent value of `channel` at or before "
-            "`event_number`, or None if unknown / not yet seen.")
-        .def("find_snapshot",
-            [](const fdec::EpicsStore &self, int32_t event_number)
-                -> const fdec::EpicsStore::Snapshot* {
-                return self.FindSnapshot(event_number);
-            },
-            py::arg("event_number"),
-            py::return_value_policy::reference_internal,
-            "Return the whole snapshot at or before `event_number`, or None.")
-        .def("get_channel_count", &fdec::EpicsStore::GetChannelCount)
-        .def("get_channel_id",    &fdec::EpicsStore::GetChannelId,
-             py::arg("name"),
-             "Return the integer id assigned to `name`, or -1 if unknown.")
-        .def("get_channel_name",  &fdec::EpicsStore::GetChannelName,
-             py::arg("id"), py::return_value_policy::reference_internal)
-        .def("get_channel_names", &fdec::EpicsStore::GetChannelNames,
-             py::return_value_policy::reference_internal)
-        .def("get_snapshot_count", &fdec::EpicsStore::GetSnapshotCount)
-        .def("get_snapshot",       &fdec::EpicsStore::GetSnapshot,
-             py::arg("index"), py::return_value_policy::reference_internal)
-        .def("trim", &fdec::EpicsStore::Trim, py::arg("max_count"),
-             "Drop oldest snapshots so at most `max_count` remain.")
-        .def("clear", &fdec::EpicsStore::Clear);
-}
-
 // -------------------------------------------------------------------------
 // PipelineBuilder bindings — one-stop wiring of HyCal + GEM detectors.
 // -------------------------------------------------------------------------
@@ -1096,6 +1043,5 @@ void register_det(py::module_ &m)
     bind_gem(det);       // 2a
     bind_hycal(det);     // 2b
     bind_transform(det); // 2c
-    bind_epics(det);     // 2c
     bind_pipeline(det);  // 2d — one-stop wiring (PipelineBuilder)
 }

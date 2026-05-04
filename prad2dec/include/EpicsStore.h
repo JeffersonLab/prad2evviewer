@@ -1,16 +1,29 @@
 #pragma once
 //=============================================================================
-// EpicsStore.h — accumulate and index EPICS slow control snapshots
+// EpicsStore.h — run-scoped EPICS snapshot accumulator with channel registry
 //
-// Fed by the decoder's ExtractEpicsText() output. Dynamically discovers
-// channels. Provides lookup of the most recent snapshot for any event number.
+// Companion to EpicsData.h.  EpicsRecord is the per-event POD; EpicsStore
+// is the multi-event store the monitor server queries to answer
+// "what's the most recent value of channel X at event N?"
+//
+// What it adds beyond a list of EpicsRecords:
+//   * channel registry — a stable string→int id assigned the first time a
+//     channel is seen, so later snapshots store dense `vector<float>`
+//     instead of repeating channel names per record;
+//   * value persistence — every Feed() carries forward the previous
+//     snapshot's values, so slow channels (which only update on a subset
+//     of EPICS events) keep their last-known reading;
+//   * O(log N) lookup by event_number (snapshots are kept in arrival
+//     order, which matches monotonic event_number).
+//
+// Both EpicsStore::Feed() and EvChannel::Epics() route raw text through
+// `epics::ParseEpicsText` (EpicsData.h) — there is one parser.
 //
 // Usage:
 //   EpicsStore epics;
 //   // in event loop:
-//   if (ch.GetEventType() == EventType::Epics) {
+//   if (ch.GetEventType() == EventType::Epics)
 //       epics.Feed(event_number, timestamp, ch.ExtractEpicsText());
-//   }
 //   // later, for any physics event:
 //   float beam_current;
 //   if (epics.GetValue(event_number, "beam_current", beam_current)) { ... }
@@ -21,7 +34,7 @@
 #include <unordered_map>
 #include <cstdint>
 
-namespace fdec
+namespace epics
 {
 
 class EpicsStore
@@ -83,4 +96,4 @@ private:
     std::vector<Snapshot>                      snapshots_;      // sorted by event_number
 };
 
-} // namespace fdec
+} // namespace epics

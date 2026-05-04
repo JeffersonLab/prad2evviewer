@@ -10,6 +10,7 @@
 //   prad2py.dec.EcPeak / EcCluster / VtpBlock / VtpEventData  (vtp)
 //   prad2py.dec.TdcHit / TdcEventData                         (tdc)
 //   prad2py.dec.SyncInfo                                      (sync)
+//   prad2py.dec.EpicsStore / EpicsSnapshot                    (slow control)
 //   prad2py.dec.EvChannel            (evio reader)
 //   prad2py.dec.load_daq_config(path) -> DaqConfig
 //
@@ -32,6 +33,7 @@
 #include "VtpData.h"
 #include "TdcData.h"
 #include "SyncData.h"
+#include "EpicsStore.h"
 
 #include <cstdlib>
 #include <memory>
@@ -1170,6 +1172,65 @@ void bind_channel(py::module_ &m)
             "Raw EPICS payload for the current event (empty if not EPICS).");
 }
 
+// -------------------------------------------------------------------------
+// EpicsStore — slow-control snapshot accumulator.  Fed via Feed() with the
+// raw text from EvChannel::ExtractEpicsText() (or the higher-level
+// EvChannel::Epics() result), then queried by event_number for the most
+// recent value of a channel.  See prad2dec/include/EpicsStore.h.
+// -------------------------------------------------------------------------
+void bind_epics(py::module_ &m)
+{
+    py::class_<epics::EpicsStore::Snapshot>(m, "EpicsSnapshot",
+        "One EPICS snapshot (event number + timestamp + channel values).")
+        .def_readonly("event_number", &epics::EpicsStore::Snapshot::event_number)
+        .def_readonly("timestamp",    &epics::EpicsStore::Snapshot::timestamp)
+        .def_readonly("values",       &epics::EpicsStore::Snapshot::values);
+
+    py::class_<epics::EpicsStore>(m, "EpicsStore",
+        "Accumulator for EPICS slow-control snapshots.  Feed it raw EPICS "
+        "text via feed() whenever an EPICS event arrives (channel discovery "
+        "is automatic), then query get_value() for any subsequent physics "
+        "event — returns the most recent snapshot at or before that event.")
+        .def(py::init<>())
+        .def("feed", &epics::EpicsStore::Feed,
+             py::arg("event_number"), py::arg("timestamp"), py::arg("text"),
+             "Parse a raw EPICS payload and store a snapshot.  Text format: "
+             "one `value  channel_name` line per channel.")
+        .def("get_value",
+            [](const epics::EpicsStore &self, int32_t event_number,
+               const std::string &channel) -> py::object {
+                float v = 0.f;
+                if (self.GetValue(event_number, channel, v))
+                    return py::float_(v);
+                return py::none();
+            },
+            py::arg("event_number"), py::arg("channel"),
+            "Return the most recent value of `channel` at or before "
+            "`event_number`, or None if unknown / not yet seen.")
+        .def("find_snapshot",
+            [](const epics::EpicsStore &self, int32_t event_number)
+                -> const epics::EpicsStore::Snapshot* {
+                return self.FindSnapshot(event_number);
+            },
+            py::arg("event_number"),
+            py::return_value_policy::reference_internal,
+            "Return the whole snapshot at or before `event_number`, or None.")
+        .def("get_channel_count", &epics::EpicsStore::GetChannelCount)
+        .def("get_channel_id",    &epics::EpicsStore::GetChannelId,
+             py::arg("name"),
+             "Return the integer id assigned to `name`, or -1 if unknown.")
+        .def("get_channel_name",  &epics::EpicsStore::GetChannelName,
+             py::arg("id"), py::return_value_policy::reference_internal)
+        .def("get_channel_names", &epics::EpicsStore::GetChannelNames,
+             py::return_value_policy::reference_internal)
+        .def("get_snapshot_count", &epics::EpicsStore::GetSnapshotCount)
+        .def("get_snapshot",       &epics::EpicsStore::GetSnapshot,
+             py::arg("index"), py::return_value_policy::reference_internal)
+        .def("trim", &epics::EpicsStore::Trim, py::arg("max_count"),
+             "Drop oldest snapshots so at most `max_count` remain.")
+        .def("clear", &epics::EpicsStore::Clear);
+}
+
 } // anonymous namespace
 
 // -------------------------------------------------------------------------
@@ -1186,5 +1247,6 @@ void register_dec(py::module_ &m)
     bind_ssp(dec);
     bind_vtp(dec);
     bind_tdc(dec);
+    bind_epics(dec);
     bind_channel(dec);
 }

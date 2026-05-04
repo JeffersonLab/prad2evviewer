@@ -34,7 +34,6 @@ endif()
 add_library(prad2det STATIC
     src/HyCalSystem.cpp
     src/HyCalCluster.cpp
-    src/EpicsStore.cpp
     src/GemSystem.cpp
     src/GemCluster.cpp
     src/GemPedestal.cpp

@@ -1,12 +1,21 @@
 //=============================================================================
 // EpicsStore.cpp — EPICS snapshot accumulation and lookup
+//
+// Parsing of the raw "value channel_name" payload is shared with the rest
+// of the codebase via prad2dec's epics::ParseEpicsText (see EpicsData.h).
+// EpicsStore adds two responsibilities the bare parser doesn't:
+//   1. dynamic channel registry (stable IDs across snapshots),
+//   2. cumulative snapshots — every Feed() copies the previous values so
+//      slow channels (which only update on a subset of EPICS events)
+//      retain their last-known reading.
 //=============================================================================
 
 #include "EpicsStore.h"
-#include <sstream>
+#include "EpicsData.h"
+
 #include <algorithm>
 
-namespace fdec
+namespace epics
 {
 
 //=============================================================================
@@ -39,38 +48,28 @@ void EpicsStore::Feed(int32_t event_number, uint64_t timestamp, const std::strin
 {
     if (text.empty()) return;
 
-    // start with a copy of the previous snapshot values (channels persist)
+    // Parse via the shared decoder (also used by EvChannel::Epics() and the
+    // offline replay's epics tree).  Same namespace now — drop the qualifier.
+    EpicsRecord rec;
+    ParseEpicsText(text, rec);
+    if (rec.channel.empty()) return;
+
+    // Carry forward previous channel values — slow EPICS channels only
+    // update on a subset of events, and consumers expect the last-known
+    // reading to persist.
     Snapshot snap;
     snap.event_number = event_number;
     snap.timestamp    = timestamp;
-
-    if (!snapshots_.empty()) {
+    if (!snapshots_.empty())
         snap.values = snapshots_.back().values;
-    }
 
-    // parse lines: "value  channel_name"
-    std::istringstream ss(text);
-    std::string line;
-    while (std::getline(ss, line)) {
-        if (line.empty()) continue;
-
-        // find first token (value) and second token (name)
-        std::istringstream ls(line);
-        float val;
-        std::string name;
-        if (!(ls >> val >> name)) continue;
-        if (name.empty()) continue;
-
-        int id = get_or_create_channel(name);
-
-        // grow values vector if new channels were discovered
+    for (size_t i = 0; i < rec.channel.size(); ++i) {
+        int id = get_or_create_channel(rec.channel[i]);
         if (id >= static_cast<int>(snap.values.size()))
             snap.values.resize(id + 1, 0.f);
-
-        snap.values[id] = val;
+        snap.values[id] = static_cast<float>(rec.value[i]);
     }
 
-    // ensure values vector covers all known channels
     if (snap.values.size() < channel_names_.size())
         snap.values.resize(channel_names_.size(), 0.f);
 
@@ -128,4 +127,4 @@ void EpicsStore::Clear()
     snapshots_.clear();
 }
 
-} // namespace fdec
+} // namespace epics
