@@ -486,20 +486,49 @@ def _panel_transform(world_w: float, world_h: float,
 def _draw_spacers(p: QPainter, det: dict,
                   scale: float, ox: float, oy: float,
                   x_size: float, y_size: float,
+                  hole: Optional[dict] = None,
                   *, alpha: int = 80, width: float = 1.0):
-    """Mechanical G10 spacer dashed lines (6 horizontal + 2 vertical per chamber)."""
+    """Mechanical G10 spacer dashed lines (6 horizontal + 2 vertical per
+    chamber).  Lines that cross the beam hole are split into two segments
+    so they don't draw through the dead region."""
     pen = QPen(QColor(150, 150, 150, alpha), width)
     pen.setStyle(Qt.PenStyle.DashLine)
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
 
+    # Hole bounds in world coords; -1 sentinel disables the split logic.
+    if hole and "x_center" in hole:
+        hw, hh = hole["width"], hole["height"]
+        hx0 = hole["x_center"] - hw / 2
+        hx1 = hole["x_center"] + hw / 2
+        hy0 = hole["y_center"] - hh / 2
+        hy1 = hole["y_center"] + hh / 2
+    else:
+        hx0 = hx1 = hy0 = hy1 = -1.0
+
     for x in det.get("spacer_x", []):
-        if 0.0 < x < x_size:
-            xa = ox + x * scale
+        if not (0.0 < x < x_size):
+            continue
+        xa = ox + x * scale
+        if hx0 < x < hx1:
+            # Vertical line crosses the hole — break at the hole edges.
+            p.drawLine(QPointF(xa, oy),
+                       QPointF(xa, oy + (y_size - hy1) * scale))
+            p.drawLine(QPointF(xa, oy + (y_size - hy0) * scale),
+                       QPointF(xa, oy + y_size * scale))
+        else:
             p.drawLine(QPointF(xa, oy), QPointF(xa, oy + y_size * scale))
+
     for y in det.get("spacer_y", []):
-        if 0.0 < y < y_size:
-            ya = oy + (y_size - y) * scale
+        if not (0.0 < y < y_size):
+            continue
+        ya = oy + (y_size - y) * scale
+        if hy0 < y < hy1:
+            p.drawLine(QPointF(ox, ya),
+                       QPointF(ox + hx0 * scale, ya))
+            p.drawLine(QPointF(ox + hx1 * scale, ya),
+                       QPointF(ox + x_size * scale, ya))
+        else:
             p.drawLine(QPointF(ox, ya), QPointF(ox + x_size * scale, ya))
 
 
@@ -712,8 +741,8 @@ def _draw_event_panel(p: QPainter, panel: QRectF,
     p.drawRect(QRectF(ox, oy, x_size * scale, y_size * scale))
 
     # Mechanical spacers — light dashed lines, drawn before strips so any
-    # strip hits render on top.
-    _draw_spacers(p, geom, scale, ox, oy, x_size, y_size,
+    # strip hits render on top.  Spacers crossing the hole get split.
+    _draw_spacers(p, geom, scale, ox, oy, x_size, y_size, hole,
                   alpha=70, width=0.8)
 
     # APV chip boxes around the chamber (drawn before strips so cluster
@@ -722,16 +751,16 @@ def _draw_event_panel(p: QPainter, panel: QRectF,
                     show_labels=True, fill_alpha=180,
                     border_width=0.5, font_size=6.5)
 
-    # Beam hole — round in the actual detector; draw as ellipse.
+    # Beam hole — square cutout with a framed border.
     if hole and "x_center" in hole:
         hx, hy = hole["x_center"], hole["y_center"]
         hw, hh = hole["width"], hole["height"]
         rx = ox + (hx - hw / 2) * scale
         ry = oy + (y_size - (hy + hh / 2)) * scale
         rw, rh = hw * scale, hh * scale
-        p.setPen(QPen(QColor("#cc3333"), 1.2))
+        p.setPen(QPen(QColor("#cc3333"), 1.6))
         p.setBrush(QColor(255, 204, 0, 24))
-        p.drawEllipse(QRectF(rx, ry, rw, rh))
+        p.drawRect(QRectF(rx, ry, rw, rh))
 
     # Strip segments (solid first, then cross-talk dashed).  Both planes
     # use the active colormap — orientation alone identifies X vs Y.
@@ -970,20 +999,21 @@ def draw_layout(painter: QPainter, canvas: QRectF,
     painter.drawRect(QRectF(ox, oy, x_size * scale, y_size * scale))
 
     # Mechanical spacers (dashed light gray, drawn before strips so the
-    # strip lines render on top and remain readable).
-    _draw_spacers(painter, det, scale, ox, oy, x_size, y_size,
+    # strip lines render on top and remain readable).  The hole is passed
+    # so spacers crossing the beam hole are split at its edges.
+    _draw_spacers(painter, det, scale, ox, oy, x_size, y_size, hole,
                   alpha=110, width=1.0)
 
-    # Beam hole — round in the actual detector; draw as ellipse.
+    # Beam hole — square cutout with a framed border.
     if hole and "x_center" in hole:
         hx, hy = hole["x_center"], hole["y_center"]
         hw, hh = hole["width"], hole["height"]
         rx = ox + (hx - hw / 2) * scale
         ry = oy + (y_size - (hy + hh / 2)) * scale
         rw, rh = hw * scale, hh * scale
-        painter.setPen(QPen(QColor("#cc3333"), 2.0))
+        painter.setPen(QPen(QColor("#cc3333"), 2.5))
         painter.setBrush(QColor(255, 204, 0, 36))
-        painter.drawEllipse(QRectF(rx, ry, rw, rh))
+        painter.drawRect(QRectF(rx, ry, rw, rh))
 
     # X strips (vertical blue lines, decimated by show_every within each extent group)
     x_by_extent: Dict[Tuple[float, float], list] = {}
@@ -1082,7 +1112,7 @@ def _paint_layout_legend(p: QPainter, area: QRectF, entries, fg: QColor,
         elif kind == "patch-yellow":
             p.setPen(QPen(QColor("#cc3333"), 1.2))
             p.setBrush(QColor(255, 204, 0, 48))
-            p.drawEllipse(QRectF(cx, cy - 5, 14, 10))
+            p.drawRect(QRectF(cx, cy - 5, 14, 10))
         elif kind == "patch-apv":
             c = QColor(*apv_rgb, 220)
             p.setPen(QPen(QColor("#222"), 0.8)); p.setBrush(c)
