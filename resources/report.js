@@ -158,17 +158,15 @@ function _resolveByPath(root, path){
 }
 
 // Capture an SVG-foreignObject snapshot of the .main panel for the given tab.
-// Returns a PNG data URL, or null on failure.
+// Returns a PNG data URL, or null on failure.  generateReport() parks the
+// page on the light theme around the whole loop, so a multi-tab report only
+// triggers the per-tab onThemeChange replay cascade once instead of once
+// per tab.  This function is responsible for tab switching only.
 async function captureTabScreenshot(tab){
     const prevTab = activeTab;
     if(tab !== activeTab){
         switchTab(tab);
         await _wait(TAB_SETTLE_MS);
-    }
-    const prevTheme = currentTheme();
-    if(prevTheme !== 'light'){
-        setTheme('light');
-        await _wait(THEME_SETTLE_MS);
     }
 
     const tabSpec = REPORT_TABS.find(t=>t.tab===tab);
@@ -266,7 +264,6 @@ async function captureTabScreenshot(tab){
     }finally{
         if(svgUrl) URL.revokeObjectURL(svgUrl);
         if(restore) restore();
-        if(prevTheme !== 'light') setTheme(prevTheme);
         if(prevTab !== activeTab) switchTab(prevTab);
     }
     return dataUrl;
@@ -465,6 +462,15 @@ async function generateReport(reportBy,runNumber){
     const statusBar=document.getElementById('status-bar');
     const prevStatus=statusBar.textContent;
     statusBar.textContent='Generating report...';
+    // Park the page on the light theme for the entire screenshot loop.
+    // Each setTheme fires the per-tab onThemeChange replay cascade across
+    // every plot/canvas — doing it once here (instead of inside every
+    // captureTabScreenshot) saves ~2N redraws for an N-tab report.
+    const prevTheme = currentTheme();
+    if(prevTheme !== 'light'){
+        setTheme('light');
+        await _wait(THEME_SETTLE_MS);
+    }
     try{
         await refreshDataForReport();
         reportAttachments=[];
@@ -507,6 +513,8 @@ async function generateReport(reportBy,runNumber){
     }catch(err){
         statusBar.textContent=`Report error: ${err.message}`;
         return null;
+    }finally{
+        if(prevTheme !== 'light') setTheme(prevTheme);
     }
 }
 

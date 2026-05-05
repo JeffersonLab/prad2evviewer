@@ -213,6 +213,7 @@ function connectWebSocket() {
                 }
             } else if (msg.type === 'lms_cleared') {
                 lmsSummaryData=null; lmsSelectedModule=-1; currentLmsData=null;
+                _lmsHistRaw=null; _lmsHistModName=null;
                 if(activeTab==='lms'){ geoLms(); updateLmsTable(); }
             } else if (msg.type === 'epics_event') {
                 const now3 = Date.now();

@@ -185,3 +185,15 @@ function initPhysics(data){
     document.getElementById('physics-logz').onchange=()=>{plotEnergyAngle();plotMollerXY();plotHycalXY();};
     document.getElementById('physics-elastic').onchange=plotEnergyAngle;
 }
+
+// Theme flip — Plotly bakes THEME-derived colors (title/legend/colorbar
+// titlefont, "ep elastic" line, etc.) into traces and layout at draw time,
+// so a chrome-only relayout would leave stale colors behind. Replay the
+// plot functions from cached *Data so titles/traces pick up live THEME.
+if (typeof onThemeChange === 'function') {
+    onThemeChange(() => {
+        plotEnergyAngle();
+        plotMollerXY();
+        plotHycalXY();
+    });
+}

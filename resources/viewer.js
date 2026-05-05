@@ -84,6 +84,7 @@ function geoHandleClick(cx,cy){
         } else if(activeTab==='lms'){
             lmsSelectedModule=-1;
             currentLmsData=null;
+            _lmsHistRaw=null; _lmsHistModName=null;
             Plotly.react('lms-plot',[],{...PL,title:{text:'LMS History',font:{size:10,color:THEME.textMuted}}},PC2);
             document.getElementById('lms-detail-header').innerHTML=
                 '<span class="cl-info-text">Click a module to view LMS history</span>';
@@ -870,16 +871,21 @@ function init(){
     themeBtn.onclick = () => toggleTheme();
     onThemeChange(() => {
         updateThemeBtn();
-        // Re-apply chrome to every previously-drawn Plotly plot.
+        // Per-tab listeners (cluster/lms/gem/gem_apv/physics/epics) do
+        // full Plotly.react replays so trace and title colors track the
+        // active palette.  This relayout is the safety net for plots
+        // whose listener early-returned (e.g. lms-plot before the user
+        // clicks a module) — chrome at minimum stays in sync.
         for(const p of plotRegistry) plotlyRelayout(p.id);
-        // Canvas widgets read THEME at draw time, so force a full repaint.
+        // Canvases read THEME at draw time, so force a full repaint.
+        // drawColorBar covers every per-tab colorbar canvas; redrawGeo
+        // hits whichever shared-geo tab is active.
         drawColorBar();
         redrawGeo();
-        // Plotly *shapes* (cut-range overlays, ref lines) embed THEME
-        // colors at draw time — relayout above only patches axis chrome,
-        // so the shapes still carry the previous theme's colors.  Re-run
-        // showWaveform to regenerate the layout (which calls wfLayout +
-        // showHistograms internally with fresh THEME.cutShade).
+        // DQ waveform + histograms — Plotly shapes (cut-range overlays,
+        // ref lines) bake THEME.cutShade at draw time, so a relayout
+        // chrome patch isn't enough.  Re-run showWaveform to regenerate
+        // the layout (calls wfLayout + showHistograms internally).
         if (typeof selectedModule !== 'undefined' && selectedModule
             && typeof showWaveform === 'function') {
             if (typeof lastHistModule !== 'undefined') lastHistModule = '';

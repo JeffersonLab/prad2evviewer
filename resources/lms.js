@@ -5,6 +5,10 @@ let g_lmsRefIndex=-1;  // -1 = None (no normalization)
 let currentLmsData=null;  // {x:[], y:[]} for copy button
 let lmsSummaryData=null;  // {modules:{idx:{name,mean,rms,count,warn}}, events}
 let lmsSelectedModule=-1;
+// Last /api/lms/<idx> response + module label, kept so theme flips can
+// re-render the lms-plot from cache (Plotly bakes THEME.success/danger/text
+// /overlay into trace lines and the legend bg at draw time).
+let _lmsHistRaw=null, _lmsHistModName=null;
 
 function geoLms(){
     const metric=document.getElementById('lms-color-metric').value;
@@ -71,44 +75,53 @@ function updateLmsDot(){
 function fetchLmsHistory(modIdx, modName){
     const refQ=g_lmsRefIndex>=0?`?ref=${g_lmsRefIndex}`:'';
     fetch(`/api/lms/${modIdx}${refQ}`).then(r=>r.json()).then(data=>{
-        if(!data.time||!data.time.length){
-            currentLmsData=null;
-            Plotly.react('lms-plot',[],{...PL,
-                title:{text:`${modName} — No LMS data`,font:{size:10,color:THEME.textMuted}}},PC2);
-            return;
-        }
-        currentLmsData={x:Array.from(data.time), y:Array.from(data.integral)};
-        const vals=data.integral;
-        const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
-        const warnHi=mean*(1+g_lmsWarnThresh);
-        const warnLo=mean*(1-g_lmsWarnThresh);
-        const tRange=[data.time[0],data.time[data.time.length-1]];
-
-        Plotly.react('lms-plot',[
-            {x:data.time, y:data.integral, type:'scatter', mode:'markers',
-             marker:{color:'#ff922b',size:3}, name:'LMS integral'},
-            {x:tRange, y:[mean,mean],
-             type:'scatter', mode:'lines', line:{color:THEME.success,width:1,dash:'dash'}, name:`Mean ${mean.toFixed(0)}`},
-            {x:tRange, y:[warnHi,warnHi],
-             type:'scatter', mode:'lines', line:{color:THEME.danger,width:1,dash:'dot'}, showlegend:false},
-            {x:tRange, y:[warnLo,warnLo],
-             type:'scatter', mode:'lines', line:{color:THEME.danger,width:1,dash:'dot'}, showlegend:false},
-        ],{...PL,
-            title:{text:`LMS — ${modName} (${data.events} pts)${g_lmsRefIndex>=0?' [ref corrected]':''}`,
-                font:{size:10,color:THEME.text}},
-            xaxis:{...PL.xaxis,
-                title:data.sync_unix
-                    ?`Time (s) after ${new Date((data.sync_unix - data.sync_rel_sec)*1000).toISOString().replace('T',' ').slice(0,19)} UTC`
-                    :'Time (s)'},
-            yaxis:{...PL.yaxis,title:g_lmsRefIndex>=0?'Corrected Integral':'Integral'},
-            legend:{x:1,y:1,xanchor:'right',bgcolor:THEME.overlay,font:{size:9}},
-            margin:{...PL.margin,t:28,b:36},
-            shapes:refShapes('lms'),
-        },PC2);
-
-        document.getElementById('lms-info-text').innerHTML=
-            `<span class="mod-name">${modName}</span> <span class="mod-daq">Mean: ${mean.toFixed(1)} | RMS: ${(Math.sqrt(vals.reduce((s,v)=>s+(v-mean)**2,0)/vals.length)).toFixed(1)} | ${data.events} pts</span>`;
+        _lmsHistRaw=data;
+        _lmsHistModName=modName;
+        renderLmsHistory();
     }).catch(()=>{});
+}
+
+function renderLmsHistory(){
+    if(!_lmsHistRaw || _lmsHistModName==null) return;
+    const data=_lmsHistRaw;
+    const modName=_lmsHistModName;
+    if(!data.time||!data.time.length){
+        currentLmsData=null;
+        Plotly.react('lms-plot',[],{...PL,
+            title:{text:`${modName} — No LMS data`,font:{size:10,color:THEME.textMuted}}},PC2);
+        return;
+    }
+    currentLmsData={x:Array.from(data.time), y:Array.from(data.integral)};
+    const vals=data.integral;
+    const mean=vals.reduce((a,b)=>a+b,0)/vals.length;
+    const warnHi=mean*(1+g_lmsWarnThresh);
+    const warnLo=mean*(1-g_lmsWarnThresh);
+    const tRange=[data.time[0],data.time[data.time.length-1]];
+
+    Plotly.react('lms-plot',[
+        {x:data.time, y:data.integral, type:'scatter', mode:'markers',
+         marker:{color:'#ff922b',size:3}, name:'LMS integral'},
+        {x:tRange, y:[mean,mean],
+         type:'scatter', mode:'lines', line:{color:THEME.success,width:1,dash:'dash'}, name:`Mean ${mean.toFixed(0)}`},
+        {x:tRange, y:[warnHi,warnHi],
+         type:'scatter', mode:'lines', line:{color:THEME.danger,width:1,dash:'dot'}, showlegend:false},
+        {x:tRange, y:[warnLo,warnLo],
+         type:'scatter', mode:'lines', line:{color:THEME.danger,width:1,dash:'dot'}, showlegend:false},
+    ],{...PL,
+        title:{text:`LMS — ${modName} (${data.events} pts)${g_lmsRefIndex>=0?' [ref corrected]':''}`,
+            font:{size:10,color:THEME.text}},
+        xaxis:{...PL.xaxis,
+            title:data.sync_unix
+                ?`Time (s) after ${new Date((data.sync_unix - data.sync_rel_sec)*1000).toISOString().replace('T',' ').slice(0,19)} UTC`
+                :'Time (s)'},
+        yaxis:{...PL.yaxis,title:g_lmsRefIndex>=0?'Corrected Integral':'Integral'},
+        legend:{x:1,y:1,xanchor:'right',bgcolor:THEME.overlay,font:{size:9}},
+        margin:{...PL.margin,t:28,b:36},
+        shapes:refShapes('lms'),
+    },PC2);
+
+    document.getElementById('lms-info-text').innerHTML=
+        `<span class="mod-name">${modName}</span> <span class="mod-daq">Mean: ${mean.toFixed(1)} | RMS: ${(Math.sqrt(vals.reduce((s,v)=>s+(v-mean)**2,0)/vals.length)).toFixed(1)} | ${data.events} pts</span>`;
 }
 
 function updateLmsTable(){
@@ -149,4 +162,13 @@ function updateLmsTable(){
             geoLms();
         };
     });
+}
+
+// Theme flip — lms-plot embeds THEME.success/danger/text/overlay/textMuted
+// in trace lines, the legend bg, and titles.  Replay from the cached raw
+// response (set by fetchLmsHistory) so a flip doesn't leave stale colors.
+// geoLms paints the SHARED geo canvas — viewer.js's master listener calls
+// redrawGeo() for the active tab, so we don't repeat it here.
+if (typeof onThemeChange === 'function') {
+    onThemeChange(renderLmsHistory);
 }

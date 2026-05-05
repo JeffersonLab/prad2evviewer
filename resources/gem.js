@@ -12,6 +12,7 @@
 const GEM_COLORS = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728'];
 
 let gemEffData = null;        // last /api/gem/efficiency response
+let gemOccupancyData = null;  // last /api/gem/occupancy response — cached for theme flips
 
 // Theme-aware layout factories (read from the active THEME at call time).
 function PL_GEM_OCC() {
@@ -41,7 +42,10 @@ function PL_GEM_EFF() {
 // --- fetch + render ---------------------------------------------------------
 
 function fetchGemAccum() {
-    fetch('/api/gem/occupancy').then(r => r.json()).then(plotGemOccupancy).catch(() => {});
+    fetch('/api/gem/occupancy').then(r => r.json()).then(d => {
+        gemOccupancyData = d;
+        plotGemOccupancy(d);
+    }).catch(() => {});
     fetch('/api/gem/efficiency').then(r => r.json()).then(updateGemEfficiency).catch(() => {});
 }
 
@@ -499,5 +503,22 @@ function resizeGem() {
     });
     ['gem-eff-xy', 'gem-eff-zy', 'gem-eff-zhist'].forEach(id => {
         try { Plotly.Plots.resize(id); } catch (e) {}
+    });
+}
+
+// Theme flip — every GEM plot embeds THEME values in titles, frame outlines,
+// fit lines, and marker/edge colors at draw time.  Replay both occupancy
+// (from cached /api/gem/occupancy) and efficiency (from gemEffData) so the
+// new theme reaches every text/marker, not just the chrome.
+if (typeof onThemeChange === 'function') {
+    onThemeChange(() => {
+        if (gemOccupancyData) plotGemOccupancy(gemOccupancyData);
+        if (gemEffData) {
+            renderGemEffCards();
+            renderGemEffSnapshot();
+        } else {
+            plotGemEffEmpty();
+            plotGemZTargetHist(null);
+        }
     });
 }

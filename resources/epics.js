@@ -22,47 +22,55 @@ function fetchEpicsChannels(){
     }).catch(()=>{});
 }
 
+function plotEpicsSlot(slot){
+    const results=epicsSlotData[slot];
+    if(!results||!results.length){
+        Plotly.react('epics-plot-'+slot,[],{...PL},PC_EPICS);
+        return;
+    }
+    const traces=[];
+    results.forEach((data,i)=>{
+        if(!data||!data.time||!data.time.length) return;
+        traces.push({
+            x:data.time,y:data.value,type:'scatter',mode:'lines+markers',
+            name:data.name,
+            line:{color:EPICS_COLORS[i%EPICS_COLORS.length],width:1.5},
+            marker:{size:3,color:EPICS_COLORS[i%EPICS_COLORS.length]},
+            hovertemplate:`${data.name}: %{y:.3f} (%{x:.1f}s)<extra></extra>`,
+        });
+    });
+    Plotly.react('epics-plot-'+slot,traces,{...PL,
+        xaxis:{...PL.xaxis,title:'Time (s)'},
+        yaxis:{...PL.yaxis,autorange:true,automargin:true,
+            rangemode:'normal',constraintoward:'center',
+            range: (()=>{
+                // add 10% padding to y range
+                let ymin=Infinity,ymax=-Infinity;
+                for(const t of traces) for(const v of t.y){if(v<ymin)ymin=v;if(v>ymax)ymax=v;}
+                if(!isFinite(ymin)) return undefined;
+                const pad=Math.max(Math.abs(ymax-ymin)*0.1,Math.abs(ymax)*0.01,1e-6);
+                return [ymin-pad,ymax+pad];
+            })()},
+        showlegend:traces.length>1,
+        legend:{font:{size:9,color:THEME.textDim},bgcolor:'rgba(0,0,0,0)',x:0,y:1},
+    },PC_EPICS);
+}
+
 function fetchAndPlotEpicsSlot(slot){
     const names=epicsSlots[slot];
     if(!names.length){
         epicsSlotData[slot]=null;
-        Plotly.react('epics-plot-'+slot,[],{...PL},PC_EPICS);
+        plotEpicsSlot(slot);
         return;
     }
     // batch fetch: single request for all channels in this slot
     const query=names.map(n=>'ch='+encodeURIComponent(n)).join('&');
     fetch(`/api/epics/batch?${query}`).then(r=>r.json()).then(batch=>{
         // reshape batch response to match the per-channel format
-        const results=(batch.channels||[]).map(ch=>({
+        epicsSlotData[slot]=(batch.channels||[]).map(ch=>({
             name:ch.name, time:batch.time||[], value:ch.value||[], count:ch.count||0
         }));
-        epicsSlotData[slot]=results;
-        const traces=[];
-        results.forEach((data,i)=>{
-            if(!data||!data.time||!data.time.length) return;
-            traces.push({
-                x:data.time,y:data.value,type:'scatter',mode:'lines+markers',
-                name:data.name,
-                line:{color:EPICS_COLORS[i%EPICS_COLORS.length],width:1.5},
-                marker:{size:3,color:EPICS_COLORS[i%EPICS_COLORS.length]},
-                hovertemplate:`${data.name}: %{y:.3f} (%{x:.1f}s)<extra></extra>`,
-            });
-        });
-        Plotly.react('epics-plot-'+slot,traces,{...PL,
-            xaxis:{...PL.xaxis,title:'Time (s)'},
-            yaxis:{...PL.yaxis,autorange:true,automargin:true,
-                rangemode:'normal',constraintoward:'center',
-                range: (()=>{
-                    // add 10% padding to y range
-                    let ymin=Infinity,ymax=-Infinity;
-                    for(const t of traces) for(const v of t.y){if(v<ymin)ymin=v;if(v>ymax)ymax=v;}
-                    if(!isFinite(ymin)) return undefined;
-                    const pad=Math.max(Math.abs(ymax-ymin)*0.1,Math.abs(ymax)*0.01,1e-6);
-                    return [ymin-pad,ymax+pad];
-                })()},
-            showlegend:traces.length>1,
-            legend:{font:{size:9,color:THEME.textDim},bgcolor:'rgba(0,0,0,0)',x:0,y:1},
-        },PC_EPICS);
+        plotEpicsSlot(slot);
     });
 }
 
@@ -177,9 +185,7 @@ function clearEpicsFrontend(){
     // Only the data caches + visible plots/table are reset.
     epicsLatestData=null;
     epicsSlotData=new Array(EPICS_NUM_SLOTS).fill(null);
-    for(let s=0;s<EPICS_NUM_SLOTS;s++){
-        try{Plotly.react('epics-plot-'+s,[],{...PL},PC_EPICS);}catch(e){}
-    }
+    for(let s=0;s<EPICS_NUM_SLOTS;s++) plotEpicsSlot(s);
     updateEpicsTable();
 }
 
@@ -261,5 +267,14 @@ function initEpics(data){
             const name=e.dataTransfer.getData('text/plain');
             if(name) addEpicsChannel(slot,name);
         };
+    });
+}
+
+// Theme flip — legend font.color comes from THEME.textDim at draw time.
+// Replay every slot from the cached batch response so the new palette
+// reaches the legend without paying a server roundtrip.
+if (typeof onThemeChange === 'function') {
+    onThemeChange(() => {
+        for (let i = 0; i < EPICS_NUM_SLOTS; i++) plotEpicsSlot(i);
     });
 }

@@ -525,3 +525,18 @@ function plotGemResiduals(){
         },PC2);
     }
 }
+
+// Theme flip — plot titles/traces bake THEME at draw time (e.g. THEME.textDim
+// in titles, THEME.highlight in selected bars, THEME.text in residual stats).
+// Replay each plot function from cached *Bins/*Data so the new theme reaches
+// every text/marker, not just the chrome.  geoCluster paints the SHARED geo
+// canvas — viewer.js's master listener handles that via redrawGeo() so we
+// don't clobber the active tab's geo here.
+if (typeof onThemeChange === 'function') {
+    onThemeChange(() => {
+        plotClHist();
+        plotRawEnergyHist();
+        plotClStatHists();
+        plotGemResiduals();
+    });
+}

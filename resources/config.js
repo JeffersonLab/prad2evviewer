@@ -35,6 +35,7 @@ function clearFrontend(){
 
     // LMS tab
     lmsSummaryData=null; lmsSelectedModule=-1; currentLmsData=null;
+    _lmsHistRaw=null; _lmsHistModName=null;
     Plotly.react('lms-plot',[],{...PL,title:{text:'LMS History',font:{size:10,color:'#555'}}},PC2);
     document.getElementById('lms-detail-header').innerHTML=
         '<span class="cl-info-text">Click a module to view LMS history</span>';
@@ -45,6 +46,7 @@ function clearFrontend(){
 
     // GEM, EPICS, Physics tabs
     gemEffData=null;
+    gemOccupancyData=null;
     // Cluster-tab GEM overlay cache — nullify so the next event refetches
     // and redrawGeo() (below) draws the cluster geo without stale dots.
     gemHits=null; gemHitsEvent=-1;

@@ -731,3 +731,12 @@ function resizeGemApv() {
     if (!gemApvData || !gemApvData.enabled) return;
     renderGemApvPanels();
 }
+
+// Theme flip — every per-APV canvas reads THEME at draw time for the
+// background tile, border, title, zero/threshold lines, and Y-range labels.
+// Replay the full render so all of those pick up the new palette.
+if (typeof onThemeChange === 'function') {
+    onThemeChange(() => {
+        if (gemApvData && gemApvData.enabled) renderGemApvPanels();
+    });
+}
