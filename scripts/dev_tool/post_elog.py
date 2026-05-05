@@ -25,6 +25,7 @@ import argparse
 import json
 import re
 import ssl
+import subprocess
 import sys
 import urllib.parse
 import urllib.request
@@ -105,20 +106,37 @@ def check_elog(url: str, book: str, cert: str, key: str, title: str):
             "matched_count": len(entries)}
 
 
-def post_elog(url: str, cert: str, key: str, xml_path: Path):
-    """Mirror handleElogPost — HTTP PUT to /incoming/prad2_report.xml."""
-    body = xml_path.read_bytes()
-    ctx  = make_ssl_ctx(cert, key)
+def post_elog(url: str, cert: str, key: str, xml_path):
+    """Mirror handleElogPost — shells out to curl --upload-file, the
+    same command prad2_server runs.  Apache on logbooks.jlab.org is
+    picky about the exact request shape (Expect: 100-continue, header
+    set, etc.); using curl directly avoids tripping over those
+    differences from urllib's PUT.
+    """
     full = f"{url}/incoming/prad2_report.xml"
-    req  = urllib.request.Request(full, data=body, method="PUT",
-                                  headers={"Content-Type": "application/xml"})
+    marker = "___HTTP_CODE___"
+    cmd = [
+        "curl", "-sS",
+        "--cert", cert, "--key", key,
+        "--upload-file", str(xml_path),
+        full,
+        "-w", f"\n{marker}%{{http_code}}",
+        "-m", str(TIMEOUT_S),
+    ]
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=TIMEOUT_S) as r:
-            return r.status, r.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        return e.code, (e.read().decode("utf-8", errors="replace") if e.fp else "")
-    except Exception as e:
-        return 0, f"network: {e}"
+        p = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=TIMEOUT_S + 5)
+    except FileNotFoundError:
+        return 0, "curl not found in PATH"
+    except subprocess.TimeoutExpired:
+        return 0, f"curl timed out (>{TIMEOUT_S}s)"
+    out = (p.stdout or "") + (p.stderr or "")
+    m = re.search(re.escape(marker) + r"(\d+)\s*$", out)
+    if not m:
+        return 0, out.strip() or "no HTTP code from curl"
+    code = int(m.group(1))
+    body = out[:m.start()].rstrip()
+    return code, body
 
 
 def main(argv=None):
