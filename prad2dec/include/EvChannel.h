@@ -177,6 +177,13 @@ public:
     // physics event has been seen.
     int32_t GetLastPhysicsEventNumber() const { return last_physics_event_number_; }
 
+    // Companion to GetLastPhysicsEventNumber: TI 48-bit timestamp of the
+    // same physics event.  Captured unconditionally at decode time so a
+    // downstream filter that drops the event from the output tree does
+    // not desynchronise slow rows from the timeline.  Returns 0 before
+    // any physics event has been seen.
+    uint64_t GetLastPhysicsTimestamp() const { return last_physics_timestamp_; }
+
     // --- legacy API (compat, writes directly to caller-owned structs) -------
     //
     // Preserves the original semantics: populate the caller's structs without
@@ -238,10 +245,13 @@ protected:
     mutable std::unique_ptr<dsc::DscEventData> cache_dsc;
     mutable std::unique_ptr<epics::EpicsRecord> cache_epics;
 
-    // Latest physics event_number observed via Info()/DecodeEvent().  Used by
-    // slow-event consumers to stamp non-physics records with the most recent
-    // physics event so analysis can join trees by integer key.
-    mutable int32_t last_physics_event_number_ = -1;
+    // Latest physics event_number / TI timestamp observed via Info() /
+    // DecodeEvent().  Used by slow-event consumers to stamp non-physics
+    // records with the most recent physics event so analysis can join
+    // trees by integer key (event_number) and recover the slow row's
+    // approximate time without re-reading the events tree (timestamp).
+    mutable int32_t  last_physics_event_number_ = -1;
+    mutable uint64_t last_physics_timestamp_    = 0;
 
     // Persistent across Scan() — refreshed only when a SYNC/EPICS or control
     // event is scanned, otherwise carries the most recent snapshot.  The

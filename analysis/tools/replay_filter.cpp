@@ -257,6 +257,10 @@ struct ScalerRow {
 
 struct EpicsArrival {
     int32_t                         event_number = 0;   // event_number_at_arrival
+    int64_t                         ti_ticks     = 0;   // ti_ticks_at_arrival,
+                                                        // 0 ⇒ not populated
+                                                        // (legacy file or no
+                                                        // physics seen yet)
     int64_t                         unix_time    = 0;
     uint32_t                        sync_counter = 0;
     uint32_t                        run_number   = 0;
@@ -365,6 +369,13 @@ bool load_epics(const std::vector<std::string> &files, std::vector<EpicsArrival>
         std::vector<std::string> *cp = &ep.channel;
         std::vector<double>      *vp = &ep.value;
         t->SetBranchAddress("event_number_at_arrival", &ep.event_number_at_arrival);
+        // ti_ticks_at_arrival was added after the first replays were taken;
+        // tolerate its absence so legacy ROOT files still load (we will
+        // fall back to the events-tree lookup for those rows).
+        const bool has_ticks_at_arrival =
+            (t->GetBranch("ti_ticks_at_arrival") != nullptr);
+        if (has_ticks_at_arrival)
+            t->SetBranchAddress("ti_ticks_at_arrival", &ep.ti_ticks_at_arrival);
         t->SetBranchAddress("unix_time",    &ep.unix_time);
         t->SetBranchAddress("sync_counter", &ep.sync_counter);
         t->SetBranchAddress("run_number",   &ep.run_number);
@@ -374,9 +385,13 @@ bool load_epics(const std::vector<std::string> &files, std::vector<EpicsArrival>
         Long64_t n = t->GetEntries();
         out.reserve(out.size() + n);
         for (Long64_t i = 0; i < n; ++i) {
+            ep.ti_ticks_at_arrival = 0;
             t->GetEntry(i);
             EpicsArrival a;
             a.event_number = ep.event_number_at_arrival;
+            a.ti_ticks     = has_ticks_at_arrival
+                              ? static_cast<int64_t>(ep.ti_ticks_at_arrival)
+                              : 0;
             a.unix_time    = ep.unix_time;
             a.sync_counter = ep.sync_counter;
             a.run_number   = ep.run_number;
@@ -641,9 +656,14 @@ int run(const std::vector<std::string> &input_files,
         fill_stats(kv.second, xs);
     }
 
-    // ---------- Phase 3: lookup event_num → TI ticks ----------
-    // Detect the events tree name (events / recon) once; the same name is
-    // used again for the physics-filter pass in phase 5.
+    // ---------- Phase 3: anchor for relative associated_timestamp ----------
+    // Slow rows now carry their own TI tick: scalers via `ti_ticks` (from the
+    // carrying SYNC event's info.timestamp) and EPICS via `ti_ticks` (the new
+    // ti_ticks_at_arrival branch, captured at decode time so it is independent
+    // of whether the anchor event was written to the events tree).  We still
+    // detect and pre-scan the events tree below — needed for phase 5's
+    // physics-filter loop, and as a back-compat fallback for EPICS rows from
+    // legacy replays that lack the new branch.
     std::string ev_tree_name;
     if (!detect_event_tree(input_files.front(), ev_tree_name)) {
         std::cerr << "replay_filter: no events/recon tree in "
@@ -653,14 +673,18 @@ int run(const std::vector<std::string> &input_files,
     std::map<int32_t, int64_t> evn_to_ticks;
     if (!build_evn_to_ticks(input_files, ev_tree_name, evn_to_ticks)) return 1;
 
-    // Anchor for relative time: the earliest TI tick we have.  We use the
-    // smallest looked-up timestamp so EPICS rows tied to events earlier
-    // than the first scaler still get a non-negative associated_timestamp.
+    // Anchor = smallest TI tick across every source we have.  Considering
+    // the slow rows (not just the events tree) keeps anchor monotonicity
+    // when the events tree skips early events (e.g. trigger filter).
     int64_t  ti_anchor    = 0;
     bool     anchor_set   = false;
-    for (const auto &kv : evn_to_ticks) {
-        if (!anchor_set || kv.second < ti_anchor) { ti_anchor = kv.second; anchor_set = true; }
-    }
+    auto consider_tick = [&](int64_t t) {
+        if (t <= 0) return;
+        if (!anchor_set || t < ti_anchor) { ti_anchor = t; anchor_set = true; }
+    };
+    for (const auto &kv : evn_to_ticks) consider_tick(kv.second);
+    for (const auto &s  : scalers)      consider_tick(s.ti_ticks);
+    for (const auto &e  : epics_rows)   consider_tick(e.ti_ticks);
     constexpr double TI_TICK_SEC = 4.0e-9;
 
     // ---------- Phase 4: walk merged timeline, mark good/bad ----------
@@ -693,16 +717,18 @@ int run(const std::vector<std::string> &input_files,
              scalers[sc_order[i_sc]].event_number <=
              epics_rows[ep_order[i_ep]].event_number);
 
-        int32_t cp_evn  = 0;
-        int64_t cp_unix = 0;
-        size_t  orig    = 0;
-        bool    is_sc   = take_sc;
+        int32_t cp_evn   = 0;
+        int64_t cp_unix  = 0;
+        int64_t cp_ticks = 0;        // TI tick captured on the slow row itself
+        size_t  orig     = 0;
+        bool    is_sc    = take_sc;
 
         bool emit_unix = false;     // true only for EPICS rows
         if (take_sc) {
             orig = sc_order[i_sc++];
             const auto &s = scalers[orig];
-            cp_evn = s.event_number;
+            cp_evn   = s.event_number;
+            cp_ticks = s.ti_ticks;   // SYNC event's own info.timestamp
             // Slice-local live fraction (Δgated / Δungated) — see
             // compute_delta_live_pct for why the cumulative row value is
             // not used.  The first row's predecessor is (0, 0).
@@ -714,25 +740,30 @@ int run(const std::vector<std::string> &input_files,
         } else {
             orig = ep_order[i_ep++];
             const auto &e = epics_rows[orig];
-            cp_evn = e.event_number;
+            cp_evn   = e.event_number;
+            cp_ticks = e.ti_ticks;   // ti_ticks_at_arrival, captured at decode
             for (const auto &kv : e.updates) cur_eps[kv.first] = kv.second;
             if (e.unix_time > 0) last_unix = e.unix_time;
             cp_unix    = last_unix;
             emit_unix  = (e.unix_time > 0);
-        }
-
-        // associated_timestamp: the TI tick of the physics event whose
-        // event_num matches our `cp_evn`, in seconds since the run's
-        // earliest looked-up tick.  Looked up once per unique event_num.
-        bool   pt_has_t = false;
-        double pt_t     = 0.0;
-        if (anchor_set && cp_evn >= 0) {
-            auto it = evn_to_ticks.find(cp_evn);
-            if (it != evn_to_ticks.end()) {
-                pt_has_t = true;
-                pt_t     = (it->second - ti_anchor) * TI_TICK_SEC;
+            // Legacy fallback: if the EPICS row was written before the
+            // ti_ticks_at_arrival branch existed, recover the timestamp
+            // by joining on event_number_at_arrival.  Misses when the
+            // anchor event itself was filtered out at replay time —
+            // exactly the failure mode the new branch closes.
+            if (cp_ticks <= 0 && cp_evn >= 0) {
+                auto it = evn_to_ticks.find(cp_evn);
+                if (it != evn_to_ticks.end()) cp_ticks = it->second;
             }
         }
+
+        // associated_timestamp: TI tick on this row, expressed as seconds
+        // since the run's earliest seen tick.  null when the row carries
+        // no tick (e.g. an EPICS event arriving before the first physics
+        // event seen on the channel).
+        bool   pt_has_t = (cp_ticks > 0) && anchor_set;
+        double pt_t     = pt_has_t
+                          ? (cp_ticks - ti_anchor) * TI_TICK_SEC : 0.0;
         bool   pt_has_unix = emit_unix;
         int64_t pt_unix    = emit_unix ? (int64_t)last_unix : 0;
 

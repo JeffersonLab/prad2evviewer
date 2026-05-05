@@ -446,6 +446,8 @@ inline void SetEpicsWriteBranches(TTree *tree, RawEpicsData &ep)
 {
     tree->Branch("event_number_at_arrival", &ep.event_number_at_arrival,
                  "event_number_at_arrival/I");
+    tree->Branch("ti_ticks_at_arrival", &ep.ti_ticks_at_arrival,
+                 "ti_ticks_at_arrival/L");
     tree->Branch("unix_time",    &ep.unix_time,    "unix_time/i");
     tree->Branch("sync_counter", &ep.sync_counter, "sync_counter/i");
     tree->Branch("run_number",   &ep.run_number,   "run_number/i");
@@ -508,6 +510,7 @@ inline void FillEpicsRow(const epics::EpicsRecord &rec, RawEpicsData &out)
 {
     out = RawEpicsData{};
     out.event_number_at_arrival = rec.event_number_at_arrival;
+    out.ti_ticks_at_arrival     = static_cast<long long>(rec.timestamp_at_arrival);
     out.unix_time               = rec.unix_time;
     out.sync_counter            = rec.sync_counter;
     out.run_number              = rec.run_number;
@@ -521,6 +524,7 @@ inline void SetEpicsReadBranches(TTree *tree, RawEpicsData &ep)
         if (tree->GetBranch(name)) tree->SetBranchAddress(name, addr);
     };
     bind("event_number_at_arrival", &ep.event_number_at_arrival);
+    bind("ti_ticks_at_arrival",     &ep.ti_ticks_at_arrival);
     bind("unix_time",    &ep.unix_time);
     bind("sync_counter", &ep.sync_counter);
     bind("run_number",   &ep.run_number);

@@ -33,6 +33,17 @@ struct EpicsRecord {
     int32_t     event_number_at_arrival = -1;  // physics event_number seen
                                                // most recently before this
                                                // EPICS event (-1 if none yet)
+    uint64_t    timestamp_at_arrival    = 0;   // TI 48-bit tick of the same
+                                               // physics event — captured
+                                               // unconditionally at decode
+                                               // time so analysis does not
+                                               // need to look it up via the
+                                               // events tree (which may not
+                                               // contain the event if the
+                                               // replay filtered it out
+                                               // before writing).  0 if no
+                                               // physics event has been
+                                               // decoded yet on this channel.
 
     // Channel readings — parallel arrays so consumers can dump them straight
     // into a TTree without per-row std::pair overhead.  Both must be the
@@ -47,6 +58,7 @@ struct EpicsRecord {
         sync_counter            = 0;
         run_number              = 0;
         event_number_at_arrival = -1;
+        timestamp_at_arrival    = 0;
         channel.clear();
         value.clear();
     }

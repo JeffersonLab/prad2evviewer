@@ -274,10 +274,15 @@ replay tree).
 Join key: `event_number_at_arrival` is the most recent physics
 `event_num` observed by the decoder at the time this EPICS event
 arrived (`-1` for EPICS that arrived before any physics event).
+`ti_ticks_at_arrival` is the TI 48-bit tick of that same physics
+event, captured at decode time so analysis does not have to look it
+back up via the events tree (which may have dropped the anchor event
+during replay-time filtering).
 
 | Branch | Type | Meaning |
 |---|---|---|
 | `event_number_at_arrival` | `int`               | Most recent physics `event_num` at EPICS arrival; `-1` if none |
+| `ti_ticks_at_arrival`     | `long long`         | TI tick of that physics event (4 ns / tick); `0` if none |
 | `unix_time`               | `uint32`            | Absolute Unix seconds (from the 0xE112 HEAD bank) |
 | `sync_counter`            | `uint32`            | Monotonic HEAD-bank counter |
 | `run_number`              | `uint32`            | CODA run number |

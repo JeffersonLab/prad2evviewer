@@ -602,10 +602,16 @@ void EvChannel::decodeInfoInto(fdec::EventInfo &info) const
         }
     }
 
-    // Track the latest physics event_number so slow events (DSC2 SYNCs,
-    // EPICS) can stamp themselves with it for offline join-by-key.
-    if (evtype == EventType::Physics && info.event_number != 0)
+    // Track the latest physics event_number AND TI timestamp so slow
+    // events (DSC2 SYNCs, EPICS) can stamp themselves with both — the
+    // event_number for offline join-by-key, the timestamp so analysis
+    // can place the slow row on the run timeline without depending on
+    // the events tree containing that physics event (a downstream
+    // trigger/error filter may have dropped it before write).
+    if (evtype == EventType::Physics && info.event_number != 0) {
         last_physics_event_number_ = info.event_number;
+        last_physics_timestamp_    = info.timestamp;
+    }
 }
 
 void EvChannel::decodeFadcInto(fdec::EventData &evt) const
@@ -850,10 +856,14 @@ void EvChannel::decodeEpicsInto(epics::EpicsRecord &out) const
     out.sync_counter = si.sync_counter;
     out.run_number   = si.run_number;
 
-    // last_physics_event_number_ is updated by decodeInfoInto() whenever a
-    // physics event is decoded.  Stamping it here lets analysis join the
-    // EPICS row to the physics tree by integer key.
+    // last_physics_{event_number,timestamp}_ are updated by decodeInfoInto()
+    // whenever a physics event is decoded.  Stamping both here lets the
+    // EPICS row carry its own anchor on the run timeline, so analysis
+    // does not have to look the timestamp back up via the events tree
+    // (which may not include the anchored physics event if the replay
+    // filtered it out before writing).
     out.event_number_at_arrival = last_physics_event_number_;
+    out.timestamp_at_arrival    = last_physics_timestamp_;
     out.present = true;
 }
 

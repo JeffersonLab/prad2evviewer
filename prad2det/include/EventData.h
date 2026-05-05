@@ -250,9 +250,14 @@ struct RawScalerData {
 // parallel name/value vectors so analysis can iterate without per-row
 // std::pair overhead.  `event_number_at_arrival` is the most-recent
 // physics event_number the channel had seen before this EPICS event —
-// used as the join key to the events tree.
+// used as the join key to the events tree.  `ti_ticks_at_arrival` is the
+// TI 48-bit tick of that same physics event, captured at decode time so
+// the row carries its own anchor on the run timeline (analysis does not
+// have to back-look it up via the events tree, which may have dropped
+// the anchor event during replay-time filtering).
 struct RawEpicsData {
     int      event_number_at_arrival = -1;
+    long long ti_ticks_at_arrival    = 0;
     uint32_t unix_time               = 0;
     uint32_t sync_counter            = 0;
     uint32_t run_number              = 0;

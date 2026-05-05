@@ -68,6 +68,23 @@ install(TARGETS replay_rawdata replay_recon replay_filter epCalib
                 gain_monitor gain_fitter
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# ---------------------------------------------------------------------------
+# Python tools — staged into <build>/bin/ alongside the C++ executables and
+# installed under the same prad2ana_ name so users do not need to know which
+# language a tool happens to be implemented in.
+# ---------------------------------------------------------------------------
+set(_REPLAY_REPORT_VIEWER_SRC
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/replay_report_viewer.py)
+add_custom_target(replay_report_viewer ALL
+    COMMAND ${CMAKE_COMMAND} -E copy
+            ${_REPLAY_REPORT_VIEWER_SRC}
+            ${CMAKE_BINARY_DIR}/bin/prad2ana_replay_report_viewer
+    DEPENDS ${_REPLAY_REPORT_VIEWER_SRC}
+    COMMENT "Staging prad2ana_replay_report_viewer")
+install(PROGRAMS ${_REPLAY_REPORT_VIEWER_SRC}
+    DESTINATION ${CMAKE_INSTALL_BINDIR}
+    RENAME prad2ana_replay_report_viewer)
+
 # Install the static analysis library so installed-mode ACLiC scripts can
 # link against analysis::* symbols (no shared lib needed since tools also
 # link statically).
