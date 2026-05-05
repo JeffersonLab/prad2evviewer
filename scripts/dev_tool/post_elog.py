@@ -45,10 +45,16 @@ TIMEOUT_S           = 30
 # <Tags> block still references tags from before the elog enum was
 # tightened) post cleanly.  No-op on new XMLs that already use the
 # correct tags. Override / extend with --rewrite-tag OLD=NEW; disable
-# entirely with --no-rewrite-tags.
+# entirely with --no-rewrite-tags.  An empty NEW value drops that
+# <tag>…</tag> block entirely (used to strip the old reason-as-tag
+# entries — "end-event", "run-change" — that aren't in PRADLOG's enum).
 DEFAULT_TAG_REWRITES = {
-    "AutoReport": "Autolog",
-    "PRad2":      "DAQ",
+    "AutoReport":      "Autolog",
+    "PRad2":           "DAQ",
+    "end-event":       "",
+    "run-change":      "",
+    "prestart-event":  "",
+    "end":             "",
 }
 
 
@@ -118,17 +124,31 @@ def check_elog(url: str, book: str, cert: str, key: str, title: str):
 
 def rewrite_tags(xml_text: str, mapping: dict) -> str:
     """Apply --rewrite-tag old=new replacements inside <Tags><tag>…
-    blocks. mapping is {"AutoReport": "Autolog", ...}.  Match is
-    exact-text inside a <tag>…</tag> element so we don't accidentally
-    munge body content.
+    blocks. mapping is {"AutoReport": "Autolog", ...}.  An empty
+    replacement drops the <tag>…</tag> block entirely — used to
+    strip stale tags that aren't in the elog enumeration anymore.
+    Match is exact-text inside <tag>…</tag>, so body content can't
+    accidentally trip the substitution.
     """
     if not mapping:
         return xml_text
+    # Strip surrounding whitespace too when dropping (so we don't leave
+    # blank lines inside <Tags>).
     def _sub(m):
         old = m.group(1)
-        new = mapping.get(old, old)
+        if old not in mapping:
+            return m.group(0)
+        new = mapping[old]
+        if new == "":
+            return ""  # drop the entire <tag>…</tag> block
         return f"<tag>{new}</tag>"
-    return re.sub(r"<tag>([^<]*)</tag>", _sub, xml_text)
+    out = re.sub(r"<tag>([^<]*)</tag>", _sub, xml_text)
+    # Collapse any blank-only Tags container left behind so the XML
+    # still validates: <Tags>\n  \n</Tags> → (empty)
+    out = re.sub(r"<Tags>\s*</Tags>\s*", "", out)
+    # Also collapse stray whitespace runs from removed tags inside <Tags>.
+    out = re.sub(r"(<Tags>)(\s*\n)+", r"\1\n", out)
+    return out
 
 
 def post_elog(url: str, cert: str, key: str, xml_path, run: int,
