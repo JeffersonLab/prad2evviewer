@@ -588,8 +588,11 @@ async function handleCaptureRequest(msg){
             if(sb) sb.textContent = 'Auto-report failed: report generation';
             return;
         }
+        // Tags must come from the logbook's enumerated set; the reason
+        // ("end" / "run-change") is informational only, so we surface
+        // it in the body rather than as a tag (it would fail PRADLOG's
+        // tag-enum schema validation).
         const tags = (elogConfig.tags||[]).slice();
-        if(reason && tags.indexOf(reason)<0) tags.push(reason);
         const body = `*Auto-posted: ${reason}*\n\n`+
                      report.md.replace(/!\[[^\]]*\]\([^)]+\)\n*/g,'');
         const xml  = buildElogXml(fullTitle, elogConfig.logbook||'',

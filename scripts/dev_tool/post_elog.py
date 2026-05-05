@@ -106,7 +106,23 @@ def check_elog(url: str, book: str, cert: str, key: str, title: str):
             "matched_count": len(entries)}
 
 
-def post_elog(url: str, cert: str, key: str, xml_path, run: int):
+def rewrite_tags(xml_text: str, mapping: dict) -> str:
+    """Apply --rewrite-tag old=new replacements inside <Tags><tag>…
+    blocks. mapping is {"AutoReport": "Autolog", ...}.  Match is
+    exact-text inside a <tag>…</tag> element so we don't accidentally
+    munge body content.
+    """
+    if not mapping:
+        return xml_text
+    def _sub(m):
+        old = m.group(1)
+        new = mapping.get(old, old)
+        return f"<tag>{new}</tag>"
+    return re.sub(r"<tag>([^<]*)</tag>", _sub, xml_text)
+
+
+def post_elog(url: str, cert: str, key: str, xml_path, run: int,
+              rewrite_map: dict = None):
     """Mirror handleElogPost — shells out to curl --upload-file, the
     same command prad2_server runs.  Apache on logbooks.jlab.org is
     picky about the exact request shape (Expect: 100-continue, header
@@ -118,6 +134,11 @@ def post_elog(url: str, cert: str, key: str, xml_path, run: int):
     post for a given run lands; subsequent attempts (other monitors,
     replay scripts) hit "already processed" and are rejected before
     creating duplicates.
+
+    --rewrite-tags lets us replay older saved XMLs whose <Tags> block
+    still references tags that aren't in the elog's current
+    enumeration (e.g. AutoReport → Autolog) without mutating the
+    on-disk archive.
     """
     if run > 0:
         upload_name = f"prad2_run_{run:06d}.xml"
@@ -125,10 +146,25 @@ def post_elog(url: str, cert: str, key: str, xml_path, run: int):
         upload_name = "prad2_" + Path(xml_path).name
     full = f"{url}/incoming/{upload_name}"
     marker = "___HTTP_CODE___"
+
+    if rewrite_map:
+        # Stage to a temp file with the substituted tags so curl can
+        # still --upload-file a real path.
+        import tempfile
+        text = Path(xml_path).read_text(encoding="utf-8")
+        text = rewrite_tags(text, rewrite_map)
+        tf = tempfile.NamedTemporaryFile(mode="w", suffix=".xml",
+                                         delete=False, encoding="utf-8")
+        tf.write(text)
+        tf.close()
+        upload_src = tf.name
+    else:
+        upload_src = str(xml_path)
+
     cmd = [
         "curl", "-sS",
         "--cert", cert, "--key", key,
-        "--upload-file", str(xml_path),
+        "--upload-file", upload_src,
         full,
         "-w", f"\n{marker}%{{http_code}}",
         "-m", str(TIMEOUT_S),
@@ -136,10 +172,12 @@ def post_elog(url: str, cert: str, key: str, xml_path, run: int):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True,
                            timeout=TIMEOUT_S + 5)
-    except FileNotFoundError:
-        return 0, "curl not found in PATH"
-    except subprocess.TimeoutExpired:
-        return 0, f"curl timed out (>{TIMEOUT_S}s)"
+    finally:
+        if rewrite_map:
+            try: Path(upload_src).unlink()
+            except Exception: pass
+    if isinstance(p, Exception):
+        return 0, str(p)
     out = (p.stdout or "") + (p.stderr or "")
     m = re.search(re.escape(marker) + r"(\d+)\s*$", out)
     if not m:
@@ -165,6 +203,10 @@ def main(argv=None):
         help="skip the dedup check (post even if already in elog)")
     ap.add_argument("--check-only", action="store_true",
         help="print dedup result and exit; do not post")
+    ap.add_argument("--rewrite-tag", action="append", default=[],
+        metavar="OLD=NEW",
+        help="rewrite a <tag> on the fly before upload (repeatable). "
+             "e.g. --rewrite-tag AutoReport=Autolog --rewrite-tag PRad2=DAQ")
     args = ap.parse_args(argv)
 
     # Resolve XML path + run number
@@ -203,7 +245,14 @@ def main(argv=None):
             return
 
     print("posting...")
-    code, body = post_elog(args.url, args.cert, args.key, xml_path, run)
+    rewrite_map = {}
+    for spec in args.rewrite_tag:
+        if "=" not in spec:
+            sys.exit(f"--rewrite-tag expects OLD=NEW, got '{spec}'")
+        old, new = spec.split("=", 1)
+        rewrite_map[old.strip()] = new.strip()
+    code, body = post_elog(args.url, args.cert, args.key, xml_path, run,
+                           rewrite_map=rewrite_map or None)
     print(f"HTTP {code}")
     if body:
         print(body[:1000])
