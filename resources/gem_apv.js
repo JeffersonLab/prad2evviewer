@@ -114,8 +114,8 @@ const GEM_APV_HIT_BLOCK_H = 2 * GEM_APV_HIT_ROW_H + 1;
 // =====================================================================
 
 function fetchGemApvData(evnum) {
-    if (typeof evnum !== 'number' || evnum <= 0) return;
-    fetch(`/api/gem/apv/${evnum}`)
+    if (typeof evnum !== 'number' || evnum <= 0) return Promise.resolve();
+    return fetch(`/api/gem/apv/${evnum}`)
         .then(r => {
             if (!r.ok) throw new Error('http ' + r.status);
             return r.json();

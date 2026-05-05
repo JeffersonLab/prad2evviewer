@@ -346,6 +346,12 @@ static void bind_gem(py::module_ &m)
              "O(1) DAQ→APV index lookup; -1 if no matching APV in the map.")
         .def("get_hole_x_offset", &gem::GemSystem::GetHoleXOffset,
              "Beam-hole X offset (mm) inferred from the `match` APVs in the map.")
+        .def("get_active_extent", &gem::GemSystem::GetActiveExtent,
+             py::arg("det_id"), py::arg("plane"),
+             "Active strip extent for (det_id, plane) in detector-local "
+             "coords (mm).  Returns (lo, hi) — tighter than PlaneConfig.size "
+             "on the inner-edge side when split APVs (shared_pos) reuse "
+             "strip numbers.  plane: 0=X, 1=Y.")
 
         // post-process-event diagnostics
         .def("is_channel_hit", &gem::GemSystem::IsChannelHit,

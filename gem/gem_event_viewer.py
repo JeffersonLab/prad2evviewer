@@ -1651,16 +1651,10 @@ class GemEventViewer(QMainWindow):
                 "Could not locate gem_map.json — use File → Choose gem_map.json to set it.")
             return
 
-        try:
-            layers, apvs, hole, raw = load_gem_map(self._gem_map_path)
-            self._detectors = build_strip_layout(layers, apvs, hole, raw)
-            self._apv_map = build_apv_map(apvs)
-            self._hole = hole
-            self._gem_raw = raw
-        except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "Bad gem_map.json", str(exc))
-            return
-
+        # Initialize the C++ GemSystem first so build_strip_layout can pull
+        # the active extent and hole offset from it (single source of truth
+        # shared with the on-line server) instead of re-deriving them from
+        # the JSON.
         try:
             self._gsys = det.GemSystem()
             self._gsys.init(self._gem_map_path)
@@ -1670,6 +1664,17 @@ class GemEventViewer(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "GemSystem init failed", str(exc))
             self._gsys = self._gcl = None
+            return
+
+        try:
+            layers, apvs, hole, raw = load_gem_map(self._gem_map_path)
+            self._detectors = build_strip_layout(
+                layers, apvs, hole, raw, gem_sys=self._gsys)
+            self._apv_map = build_apv_map(apvs)
+            self._hole = hole
+            self._gem_raw = raw
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "Bad gem_map.json", str(exc))
             return
 
         # Capture gem-map defaults so the "Reset defaults" button can
@@ -2403,17 +2408,21 @@ def _run_batch_layout(args) -> int:
         print(f"error: gem_map.json not found (pass -G <path>)", file=sys.stderr)
         return 2
     layers, apvs, hole, raw = load_gem_map(gem_map)
-    detectors = build_strip_layout(layers, apvs, hole, raw)
-    det = detectors[min(detectors.keys())]
+    # Use the C++ GemSystem to get x_size and the hole offset (single
+    # source of truth shared with the on-line server).
+    gsys = det.GemSystem()
+    gsys.init(gem_map)
+    detectors = build_strip_layout(layers, apvs, hole, raw, gem_sys=gsys)
+    det_layout = detectors[min(detectors.keys())]
 
     out = args.output or "gem_layout.png"
     image = QImage(args.width, args.height, QImage.Format.Format_ARGB32)
     image.fill(QColor("white"))
     p = QPainter(image)
     try:
-        draw_layout(p, QRectF(image.rect()), det, hole,
+        draw_layout(p, QRectF(image.rect()), det_layout, hole,
                     show_every=args.show_every,
-                    title=f"PRad-II GEM Strip Layout ({det['name']})",
+                    title=f"PRad-II GEM Strip Layout ({det_layout['name']})",
                     bg=QColor("white"), fg=QColor("#222"))
     finally:
         p.end()
@@ -2443,8 +2452,16 @@ def _run_batch_evio(args) -> int:
     if not indices:
         print("error: provide --event N or --events SPEC", file=sys.stderr); return 2
 
+    # Initialize the C++ GemSystem first so build_strip_layout can use its
+    # active-extent / hole-offset accessors as the single source of truth.
+    gsys = det.GemSystem()
+    gsys.init(gem_map)
+    if args.gem_ped and os.path.isfile(args.gem_ped):
+        gsys.load_pedestals(args.gem_ped)
+    gcl = det.GemCluster()
+
     layers, apvs, hole, raw = load_gem_map(gem_map)
-    detectors = build_strip_layout(layers, apvs, hole, raw)
+    detectors = build_strip_layout(layers, apvs, hole, raw, gem_sys=gsys)
     apv_map = build_apv_map(apvs)
 
     print(f"Scanning {args.evio} …")
@@ -2452,12 +2469,6 @@ def _run_batch_evio(args) -> int:
     if not events:
         print("error: no physics events found", file=sys.stderr); return 1
     print(f"  {len(events):,} physics events")
-
-    gsys = det.GemSystem()
-    gsys.init(gem_map)
-    if args.gem_ped and os.path.isfile(args.gem_ped):
-        gsys.load_pedestals(args.gem_ped)
-    gcl = det.GemCluster()
 
     stepper = Stepper(args.evio, daq_cfg)
     stepper.open()
@@ -2523,8 +2534,12 @@ def _run_batch_json(args) -> int:
     if not files:
         print("error: no JSON files found", file=sys.stderr); return 2
 
+    # Use the C++ GemSystem for the active extent (same as the live server)
+    # — JSON-only mode still benefits from a consistent x_size.
+    gsys = det.GemSystem()
+    gsys.init(gem_map)
     layers, apvs, hole, raw = load_gem_map(gem_map)
-    detectors = build_strip_layout(layers, apvs, hole, raw)
+    detectors = build_strip_layout(layers, apvs, hole, raw, gem_sys=gsys)
     apv_map = build_apv_map(apvs)
 
     single = len(files) == 1 and args.output and \

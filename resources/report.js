@@ -51,9 +51,26 @@ const REPORT_TABS = [
     {tab:'lms',     title:'Gain Monitoring',   filename:'tab_lms.png',     prep:_prepLmsTab},
     {tab:'cluster', title:'Clustering',        filename:'tab_cluster.png', prep:null},
     {tab:'gem',     title:'GEM Detectors',     filename:'tab_gem.png',     prep:null},
+    {tab:'gem_apv', title:'GEM APV Waveforms', filename:'tab_gem_apv.png', prep:null},
     {tab:'epics',   title:'EPICS Slow Control',filename:'tab_epics.png',   prep:null},
     {tab:'physics', title:'Physics',           filename:'tab_physics.png', prep:null},
 ];
+
+// Tab panel IDs corresponding to each REPORT_TABS entry (and a couple of
+// dq sub-panels that share the geo-panel container). Used by the screenshot
+// pipeline to force-hide every non-active panel in the cloned DOM, so the
+// SVG foreignObject can't render stale layout from a different tab.
+const TAB_PANELS = {
+    dq:      ['geo-panel','div-main','detail-panel'],
+    lms:     ['geo-panel','div-main','lms-panel'],
+    cluster: ['geo-panel','div-main','cluster-panel'],
+    gem:     ['gem-outer'],
+    gem_apv: ['gem-apv-outer'],
+    epics:   ['epics-outer'],
+    physics: ['physics-outer'],
+};
+const ALL_TAB_PANEL_IDS = ['geo-panel','div-main','detail-panel','lms-panel',
+    'cluster-panel','gem-outer','gem-apv-outer','epics-outer','physics-outer'];
 
 function _wait(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
@@ -158,10 +175,8 @@ function _resolveByPath(root, path){
 }
 
 // Capture an SVG-foreignObject snapshot of the .main panel for the given tab.
-// Returns a PNG data URL, or null on failure.  generateReport() parks the
-// page on the light theme around the whole loop, so a multi-tab report only
-// triggers the per-tab onThemeChange replay cascade once instead of once
-// per tab.  This function is responsible for tab switching only.
+// Returns a PNG data URL, or null on failure.  Uses the active theme — no
+// theme flipping — so the screenshot matches what the user sees on screen.
 async function captureTabScreenshot(tab){
     const prevTab = activeTab;
     if(tab !== activeTab){
@@ -186,32 +201,54 @@ async function captureTabScreenshot(tab){
         const H = Math.max(600, Math.ceil(rect.height));
 
         // 1) Snapshot every visible <canvas> + Plotly plot to data URLs.
+        // Restrict the search to the active tab's panel(s) so a stale
+        // canvas inside a hidden panel can't sneak in if its bounding
+        // rect happens to be non-zero (Plotly + display:none can leave
+        // last-rendered dimensions on the .js-plotly-plot wrapper).
+        const wantedPanels = TAB_PANELS[tab] || [];
+        const scopes = wantedPanels.map(id=>document.getElementById(id))
+                                   .filter(el=>el);
+        const scopeRoots = scopes.length ? scopes : [root];
         const replacements=[];  // [{path, src, w, h}]
-        for(const c of root.querySelectorAll('canvas')){
-            const r=c.getBoundingClientRect();
-            if(r.width===0||r.height===0) continue;
-            const path=_pathFromRoot(c, root);
-            if(!path) continue;
-            try{ replacements.push({path, src:c.toDataURL('image/png'), w:r.width, h:r.height}); }
-            catch(e){ /* tainted canvas */ }
-        }
-        for(const p of root.querySelectorAll('.js-plotly-plot')){
-            const r=p.getBoundingClientRect();
-            if(r.width===0||r.height===0) continue;
-            const path=_pathFromRoot(p, root);
-            if(!path) continue;
-            try{
-                const url=await Plotly.toImage(p,{format:'png',width:r.width,height:r.height});
-                replacements.push({path, src:url, w:r.width, h:r.height});
-            }catch(e){ /* uninitialised plot */ }
+        const seen=new Set();
+        for(const scope of scopeRoots){
+            for(const c of scope.querySelectorAll('canvas')){
+                if(seen.has(c)) continue; seen.add(c);
+                const r=c.getBoundingClientRect();
+                if(r.width===0||r.height===0) continue;
+                const path=_pathFromRoot(c, root);
+                if(!path) continue;
+                try{ replacements.push({path, src:c.toDataURL('image/png'), w:r.width, h:r.height}); }
+                catch(e){ /* tainted canvas */ }
+            }
+            for(const p of scope.querySelectorAll('.js-plotly-plot')){
+                if(seen.has(p)) continue; seen.add(p);
+                const r=p.getBoundingClientRect();
+                if(r.width===0||r.height===0) continue;
+                const path=_pathFromRoot(p, root);
+                if(!path) continue;
+                try{
+                    const url=await Plotly.toImage(p,{format:'png',width:r.width,height:r.height});
+                    replacements.push({path, src:url, w:r.width, h:r.height});
+                }catch(e){ /* uninitialised plot */ }
+            }
         }
 
         // 2) Clone DOM, freeze form state, swap snapshotted nodes for <img>.
         const clone = root.cloneNode(true);
         _freezeFormState(clone);
+        // Belt-and-suspenders: force-hide every non-active tab panel in
+        // the clone. switchTab already sets the live DOM correctly, but
+        // a stray re-show (theme replay, Plotly straggler, etc.) would
+        // otherwise leak the wrong outer into the cloned screenshot.
+        for(const panelId of ALL_TAB_PANEL_IDS){
+            if(wantedPanels.includes(panelId)) continue;
+            const el=clone.querySelector('#'+panelId);
+            if(el) el.style.display='none';
+        }
         clone.style.width=W+'px';
         clone.style.height=H+'px';
-        clone.style.background='#fff';
+        clone.style.background=THEME.bg;
         for(const rep of replacements){
             const twin=_resolveByPath(clone, rep.path);
             if(!twin || !twin.parentNode) continue;
@@ -228,8 +265,8 @@ async function captureTabScreenshot(tab){
         // 3) Inline stylesheets + override transient overlays.
         const cssText=_gatherCss();
         const overrides=
-            `body{background:#fff!important;}`+
-            `.main{background:#fff!important;overflow:hidden;}`+
+            `body{background:${THEME.bg}!important;}`+
+            `.main{background:${THEME.bg}!important;overflow:hidden;}`+
             `.geo-tooltip,.backdrop,.file-dialog,.progress-overlay{display:none!important;}`;
 
         const xhtml=new XMLSerializer().serializeToString(clone);
@@ -237,7 +274,7 @@ async function captureTabScreenshot(tab){
             `<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}">`+
               `<foreignObject x="0" y="0" width="${W}" height="${H}">`+
                 `<div xmlns="http://www.w3.org/1999/xhtml" `+
-                     `style="width:${W}px;height:${H}px;background:#fff;color:#000;`+
+                     `style="width:${W}px;height:${H}px;background:${THEME.bg};color:${THEME.text};`+
                      `font-family:'Consolas','SF Mono',monospace;">`+
                   `<style>${cssText}\n${overrides}</style>`+
                   xhtml+
@@ -254,7 +291,7 @@ async function captureTabScreenshot(tab){
                 const out=document.createElement('canvas');
                 out.width=W; out.height=H;
                 const ctx=out.getContext('2d');
-                ctx.fillStyle='#fff';
+                ctx.fillStyle=THEME.bg;
                 ctx.fillRect(0,0,W,H);
                 ctx.drawImage(img, 0, 0, W, H);
                 try{ dataUrl=out.toDataURL('image/png'); resolve(); }
@@ -359,6 +396,16 @@ async function _summaryGem(){
     return s;
 }
 
+async function _summaryGemApv(){
+    if(!gemApvData || !gemApvData.enabled) return '';
+    const ndets=(gemApvData.detectors||[]).length;
+    const napvs=(gemApvData.apvs||[]).length;
+    const evnum=(typeof gemApvCurrentEvent==='number')?gemApvCurrentEvent:'?';
+    let s=`Event: ${evnum} | Detectors: ${ndets} | APVs: ${napvs}`;
+    if(gemApvData.zs_sigma) s+=` | ZS σ: ${gemApvData.zs_sigma}`;
+    return s+'\n\n';
+}
+
 async function _summaryEpics(){
     let data;
     try{ data=await fetch('/api/epics/latest').then(r=>r.json()); }catch(e){}
@@ -399,6 +446,7 @@ const _SECTION_SUMMARIES = {
     lms:     _summaryLms,
     cluster: _summaryCluster,
     gem:     _summaryGem,
+    gem_apv: _summaryGemApv,
     epics:   _summaryEpics,
     physics: _summaryPhysics,
 };
@@ -454,6 +502,8 @@ async function refreshDataForReport(){
     }).catch(()=>{}));
     if(typeof fetchGemResiduals==='function') fetches.push(fetchGemResiduals());
     if(typeof fetchGemAccum==='function')     fetches.push(fetchGemAccum());
+    if(typeof fetchGemApvData==='function' && typeof currentEvent==='number'
+        && currentEvent>0)                    fetches.push(fetchGemApvData(currentEvent));
     if(typeof fetchLmsSummary==='function')   fetches.push(fetchLmsSummary());
     if(typeof fetchEpicsChannels==='function')fetches.push(fetchEpicsChannels());
     if(typeof fetchEpicsLatest==='function')  fetches.push(fetchEpicsLatest());
@@ -478,15 +528,6 @@ async function generateReport(reportBy,runNumber){
     const statusBar=document.getElementById('status-bar');
     const prevStatus=statusBar.textContent;
     statusBar.textContent='Generating report...';
-    // Park the page on the light theme for the entire screenshot loop.
-    // Each setTheme fires the per-tab onThemeChange replay cascade across
-    // every plot/canvas — doing it once here (instead of inside every
-    // captureTabScreenshot) saves ~2N redraws for an N-tab report.
-    const prevTheme = currentTheme();
-    if(prevTheme !== 'light'){
-        setTheme('light');
-        await _wait(THEME_SETTLE_MS);
-    }
     try{
         await refreshDataForReport();
         reportAttachments=[];
@@ -529,8 +570,6 @@ async function generateReport(reportBy,runNumber){
     }catch(err){
         statusBar.textContent=`Report error: ${err.message}`;
         return null;
-    }finally{
-        if(prevTheme !== 'light') setTheme(prevTheme);
     }
 }
 

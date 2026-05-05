@@ -124,11 +124,18 @@ def load_gem_map(path: str):
     return layers, apvs, hole, raw
 
 
-def build_strip_layout(layers, apvs, hole, raw):
+def build_strip_layout(layers, apvs, hole, raw, gem_sys=None):
     """Build per-detector strip positions (for the static layout view).
 
     X strips near the beam hole are shortened (split APVs drop 16 channels);
     Y strips crossing the hole split into top/bottom segments.
+
+    When ``gem_sys`` (an initialized ``prad2py.det.GemSystem``) is provided,
+    ``x_size``/``y_size`` and the hole X position come from
+    ``GemSystem.get_active_extent`` / ``get_hole_x_offset`` — the single
+    source of truth shared with the on-line server.  Without it we fall
+    back to recomputing from the JSON via ``map_apv_strips``; both paths
+    use the same C++ ``MapStrip`` pipeline so they agree.
     """
     detectors = {}
     strips_per_apv = raw.get("apv_channels", 128)
@@ -139,7 +146,7 @@ def build_strip_layout(layers, apvs, hole, raw):
         y_size = layer["y_apvs"] * strips_per_apv * y_pitch
         detectors[det_id] = {
             "name": layer["name"],
-            "x_size": 0,       # computed from actual strips below
+            "x_size": 0,       # filled below from gem_sys (or strip max)
             "y_size": y_size,
             "x_pitch": x_pitch,
             "y_pitch": y_pitch,
@@ -173,9 +180,20 @@ def build_strip_layout(layers, apvs, hole, raw):
             if apv.get("match", ""):
                 match_strips[det_id].extend(plane_strips)
 
+    # Active X (and Y) extent — ask GemSystem when available; otherwise
+    # derive from max(strips)*pitch (Y bbox already set above).  All paths
+    # produce the same number for the same gem_map; the GemSystem path
+    # just keeps a single source of truth in C++.
     for det_id, strips in all_x_strips.items():
-        if strips:
-            det = detectors[det_id]
+        if not strips:
+            continue
+        det = detectors[det_id]
+        if gem_sys is not None:
+            xr = gem_sys.get_active_extent(det_id, 0)  # (lo, hi) centered
+            yr = gem_sys.get_active_extent(det_id, 1)
+            det["x_size"] = xr[1] - xr[0]
+            det["y_size"] = yr[1] - yr[0]
+        else:
             det["x_size"] = (max(strips) + 1) * det["x_pitch"]
 
     if hole:
@@ -187,8 +205,18 @@ def build_strip_layout(layers, apvs, hole, raw):
     ref_det_id = min(detectors.keys())
     ref_det = detectors[ref_det_id]
     if hole and match_strips[ref_det_id]:
-        ms = match_strips[ref_det_id]
-        hx = (min(ms) + max(ms) + 1) / 2 * ref_det["x_pitch"]
+        if gem_sys is not None:
+            # GetHoleXOffset returns the offset from the bbox center; convert
+            # to the same chamber-mm 0-based reference frame the rest of
+            # build_strip_layout uses (left edge = 0).  Detector 0 is the
+            # reference, matching GemSystem::GetHoleXOffset.
+            offset = gem_sys.get_hole_x_offset()
+            ref_size = ref_det["x_pitch"] * raw["layers"][0]["x_apvs"] \
+                       * strips_per_apv
+            hx = offset + ref_size * 0.5
+        else:
+            ms = match_strips[ref_det_id]
+            hx = (min(ms) + max(ms) + 1) / 2 * ref_det["x_pitch"]
         hy = ref_det["y_size"] / 2
         hole_x0, hole_x1 = hx - hw / 2, hx + hw / 2
         hole_y0, hole_y1 = hy - hh / 2, hy + hh / 2
