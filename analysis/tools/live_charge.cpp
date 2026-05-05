@@ -192,6 +192,7 @@ std::vector<size_t> sort_by_event(const std::vector<T> &v)
 struct ChargeResult {
     double  value_nC          = 0.0;
     double  live_seconds      = 0.0;
+    double  real_seconds      = 0.0;   // Σ Δt over integrated pairs (wall clock)
     int64_t n_pairs_total     = 0;     // adjacent (i, i+1) pairs walked
     int64_t n_pairs_kept      = 0;     // both endpoints had good=true
     int64_t n_pairs_integrated = 0;    // contributed to Q
@@ -286,6 +287,7 @@ ChargeResult integrate(const std::vector<ScalerRow> &scalers,
         const double I  = 0.5 * (a.beam_current + b.beam_current);
         r.value_nC     += b.live_fraction * dt * I;
         r.live_seconds += b.live_fraction * dt;
+        r.real_seconds += dt;
         ++r.n_pairs_integrated;
     }
     return r;
@@ -367,7 +369,10 @@ int main(int argc, char **argv)
 
     std::cout
         << "live_charge: " << r.value_nC << " nC\n"
+        << "  real time              : " << r.real_seconds << " s\n"
         << "  live time              : " << r.live_seconds << " s\n"
+        << "  ⟨livetime⟩             : "
+        << (r.real_seconds > 0 ? r.live_seconds / r.real_seconds : 0.0) << "\n"
         << "  ⟨I⟩                    : "
         << (r.live_seconds > 0 ? r.value_nC / r.live_seconds : 0.0) << " nA\n"
         << "  beam current channel   : " << beam_current << "\n"
@@ -392,6 +397,9 @@ int main(int argc, char **argv)
             {"livetime_source",      source},
             {"livetime_channel",     channel},
             {"live_seconds",         r.live_seconds},
+            {"real_seconds",         r.real_seconds},
+            {"average_livetime",     r.real_seconds > 0
+                                     ? r.live_seconds / r.real_seconds : 0.0},
             {"average_current_nA",   r.live_seconds > 0
                                      ? r.value_nC / r.live_seconds : 0.0},
             {"n_scaler_rows",        scalers.size()},
