@@ -154,6 +154,28 @@ with `value_nC`, the accumulated live time, the beam-current channel
 name, and the count of integrated vs. skipped checkpoint pairs.
 Suitable for direct ingestion into a per-run quality dashboard.
 
+### live_charge
+
+Standalone live-charge integrator.  Reads the `scalers` and `epics`
+side trees from any replayed ROOT file — `replay_rawdata`,
+`replay_recon`, or `replay_filter` output — and accumulates
+`Σ live_fraction · Δt · ½(I_i + I_{i+1})` over adjacent slow-event
+checkpoints.  When the trees carry replay_filter's per-row `good`
+bool, only passing-passing pairs contribute (post-cut live charge);
+otherwise every adjacent pair contributes (total live charge over
+the run).  Beam current is assumed to publish in nA, so the result
+is reported in **nC**.
+
+```bash
+prad2ana_live_charge <input.root> [more.root ...] \
+    [-c hallb_IPM2C21A_CUR] [-s ref|trg|tdc] [-n channel] [-j out.json]
+```
+
+The text summary on stdout lists the value, accumulated live time,
+average current, and the count of total / kept / integrated / skipped
+checkpoint pairs.  `-j` additionally writes a JSON dump suitable for
+diff-checking against `replay_filter`'s `live_charge` block.
+
 ## Calibration
 
 ### epCalib
