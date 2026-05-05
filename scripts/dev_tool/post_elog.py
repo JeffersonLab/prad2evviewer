@@ -106,14 +106,24 @@ def check_elog(url: str, book: str, cert: str, key: str, title: str):
             "matched_count": len(entries)}
 
 
-def post_elog(url: str, cert: str, key: str, xml_path):
+def post_elog(url: str, cert: str, key: str, xml_path, run: int):
     """Mirror handleElogPost — shells out to curl --upload-file, the
     same command prad2_server runs.  Apache on logbooks.jlab.org is
     picky about the exact request shape (Expect: 100-continue, header
     set, etc.); using curl directly avoids tripping over those
     differences from urllib's PUT.
+
+    Filename embeds the run number so the elog's per-/incoming/-name
+    one-shot policy doubles as a per-run dedup guard: only the first
+    post for a given run lands; subsequent attempts (other monitors,
+    replay scripts) hit "already processed" and are rejected before
+    creating duplicates.
     """
-    full = f"{url}/incoming/prad2_report.xml"
+    if run > 0:
+        upload_name = f"prad2_run_{run:06d}.xml"
+    else:
+        upload_name = "prad2_" + Path(xml_path).name
+    full = f"{url}/incoming/{upload_name}"
     marker = "___HTTP_CODE___"
     cmd = [
         "curl", "-sS",
@@ -193,7 +203,7 @@ def main(argv=None):
             return
 
     print("posting...")
-    code, body = post_elog(args.url, args.cert, args.key, xml_path)
+    code, body = post_elog(args.url, args.cert, args.key, xml_path, run)
     print(f"HTTP {code}")
     if body:
         print(body[:1000])

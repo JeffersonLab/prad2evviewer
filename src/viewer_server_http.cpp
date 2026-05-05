@@ -399,9 +399,26 @@ json ViewerServer::handleElogPost(const std::string &body)
     std::string cert_flag;
     if (!app.elog_cert.empty())
         cert_flag = " --cert '" + app.elog_cert + "' --key '" + app.elog_key + "'";
+    // JLab elog uses /incoming/<name> as a one-shot key — each filename
+    // can be processed at most once.  Embedding the run number makes
+    // the filename itself a per-run dedup guard: whichever monitor
+    // instance / replay tool posts first for a run wins, every other
+    // attempt for the same run hits "already processed" at the elog
+    // and is rejected without creating a duplicate entry.  Run 0
+    // (manual posts, missing run info) falls back to the saved file's
+    // timestamped basename.
+    std::string upload_name;
+    if (run > 0) {
+        char buf[40];
+        std::snprintf(buf, sizeof(buf), "prad2_run_%06u.xml", run);
+        upload_name = buf;
+    } else {
+        upload_name = "prad2_" + sr.xml.filename().string();
+    }
     std::string cmd = "curl -s -o /dev/null -w '%{http_code}'" + cert_flag
                     + " --upload-file '" + saved_xml + "' '"
-                    + app.elog_url + "/incoming/prad2_report.xml' 2>/dev/null";
+                    + app.elog_url + "/incoming/" + upload_name
+                    + "' 2>/dev/null";
     std::string http_code;
     FILE *p = popen(cmd.c_str(), "r");
     if (p) {
