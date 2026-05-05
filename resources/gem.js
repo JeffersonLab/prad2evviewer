@@ -238,12 +238,16 @@ function renderGemEffSnapshot() {
     if (info) {
         const chi2 = (typeof snap.chi2_per_dof === 'number')
             ? snap.chi2_per_dof.toFixed(2) : '—';
-        // Per-detector ✓/✗ flag — ✓ = detector contributed to the fit (its hit
-        // is within match_window of the seed line), ✗ = no in-window hit.
-        // Missing detectors are dimmed so the present ones read at a glance.
+        // Per-detector ✓/✗ flag — ✓ = the GEM has a hit consistent with the
+        // fit line (within the match window), i.e. an efficient detection.
+        // For the LOO test detector this means the LOO probe found a hit;
+        // for the others it means they were matched to the anchor.  We
+        // gate by hit_present (not used_in_fit) because efficiency is the
+        // physics question — used_in_fit is just an algorithmic detail of
+        // which detector was held out as the LOO test.
         const flags = (snap.dets || []).map((d, i) => {
             const c = GEM_COLORS[i] || THEME.text;
-            const ok = d && d.used_in_fit;
+            const ok = d && d.hit_present;
             const style = ok
                 ? `color:${c}`
                 : `color:${c};opacity:0.35`;
@@ -343,10 +347,12 @@ function plotGemEffView(snap) {
         });
 
         // Per-detector overlays: filled circle at the hit, star at the
-        // prediction.  Both are gated by hit_present so a no-hit (dimmed)
-        // detector leaves the Z–Y plane blank, matching the dim/active
-        // state shown by the GEM✓/✗ flags above the plot.  When a hit is
-        // present we draw both markers so the residual is visible.
+        // prediction.  Gated by hit_present so a GEM with no hit on the
+        // track leaves the Z-Y plane blank — matches the ✓/✗ flag above
+        // the plot.  hit_present is the detection criterion the user
+        // cares about (a hit consistent with the fit = efficient
+        // detection); used_in_fit is an algorithmic detail of which
+        // detector was held out as the LOO test, not whether it fired.
         (snap.dets || []).forEach(d => {
             if (!d.hit_present) return;
             const R = d.id;
