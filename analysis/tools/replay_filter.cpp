@@ -993,6 +993,11 @@ int run(const std::vector<std::string> &input_files,
     }
 
     // Concatenate epics tree from every input, tagged the same way.
+    // We also resolve ti_ticks_at_arrival here: bind it from the input
+    // when present, otherwise fill it from the events-tree lookup so the
+    // output is always self-contained — downstream consumers (live-charge
+    // recomputation, etc.) read the row's tick directly without needing
+    // to know whether the upstream replay carried the new branch.
     {
         prad2::RawEpicsData ep;
         std::vector<std::string> *cp = &ep.channel;
@@ -1009,6 +1014,10 @@ int run(const std::vector<std::string> &input_files,
             TTree *t = dynamic_cast<TTree *>(f->Get("epics"));
             if (!t) continue;
             t->SetBranchAddress("event_number_at_arrival", &ep.event_number_at_arrival);
+            const bool has_ticks_in =
+                (t->GetBranch("ti_ticks_at_arrival") != nullptr);
+            if (has_ticks_in)
+                t->SetBranchAddress("ti_ticks_at_arrival", &ep.ti_ticks_at_arrival);
             t->SetBranchAddress("unix_time",    &ep.unix_time);
             t->SetBranchAddress("sync_counter", &ep.sync_counter);
             t->SetBranchAddress("run_number",   &ep.run_number);
@@ -1016,7 +1025,14 @@ int run(const std::vector<std::string> &input_files,
             t->SetBranchAddress("value",   &vp);
             Long64_t n = t->GetEntries();
             for (Long64_t i = 0; i < n; ++i) {
+                ep.ti_ticks_at_arrival = 0;
                 t->GetEntry(i);
+                if (ep.ti_ticks_at_arrival <= 0
+                    && ep.event_number_at_arrival >= 0) {
+                    auto eit = evn_to_ticks.find(ep.event_number_at_arrival);
+                    if (eit != evn_to_ticks.end())
+                        ep.ti_ticks_at_arrival = eit->second;
+                }
                 good = (seq < epics_verdict.size()) ? epics_verdict[seq] : false;
                 ++seq;
                 out->cd();
