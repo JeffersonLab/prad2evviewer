@@ -833,6 +833,8 @@ bool Replay::ProcessWithRecon(const std::string &input_evio, const std::string &
     }
     std::cerr << "\rReplay: " << total << " events reconstructed -> " << output_root << "\n";
     tree->Write();
+    scalers_tree->Write();
+    epics_tree->Write();
     delete outfile;
 
     return true;
