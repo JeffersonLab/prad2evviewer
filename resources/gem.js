@@ -432,6 +432,9 @@ function plotGemEffGrid(data) {
             yRange = [-det.y_size / 2 - padY, det.y_size / 2 + padY];
         }
 
+        // No scaleanchor here — GEM frames are ~1:2 portrait so locking aspect
+        // would leave wide margins inside the cell.  Each axis fills its half
+        // of the panel (matches plotGemOccupancy behavior).
         const layout = Object.assign({}, PL_GEM_EFF(), {
             title: { text: detName, font: { size: 11, color: frameColor } },
             xaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
@@ -439,8 +442,7 @@ function plotGemEffGrid(data) {
                      range: xRange, autorange: xRange ? false : true },
             yaxis: { gridcolor: THEME.grid, zerolinecolor: THEME.border,
                      ticks: 'outside', ticklen: 3,
-                     range: yRange, autorange: yRange ? false : true,
-                     scaleanchor: 'x', scaleratio: 1 },
+                     range: yRange, autorange: yRange ? false : true },
             margin: showBar ? compactMarginR : compactMargin,
             shapes: shapes,
         });
